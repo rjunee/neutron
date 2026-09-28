@@ -345,10 +345,11 @@ function startCodexAfterClaudeHandoff(lifecycle: ConversationLifecycle, scope: s
   let inner: SessionHandle | undefined
   let cancelled = false
   const events = (async function* (): AsyncGenerator<Event, void, void> {
-    // Only an exact Claude owner is handed off; ambiguous pre-#1226 survivors never
-    // held the manager's Chat slot, so the Codex owner's own placement decides.
+    // A manager slot is not the conversation census. Ambiguous legacy survivors
+    // still own this scope even without that slot; only a verified handoff may
+    // authorize another provider to start while Claude ownership is present.
     const owner = await lifecycle.ownerFor(scope)
-    if (owner.kind === 'owner') {
+    if (owner.kind !== 'none') {
       const handoff = await lifecycle.handoffChat(scope,
         { sessionKey: `${CODEX_CHAT_HANDOFF_KEY}:${scope ?? ''}`, credentialId: 'openai-codex' }, { keepResumable: true })
       if (handoff.status !== 'ready') {

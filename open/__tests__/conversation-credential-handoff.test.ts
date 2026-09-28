@@ -106,7 +106,7 @@ interface Rig {
   leases: AdmissionLeaseRow[]
   logged: Array<{ event: string; fields: Record<string, unknown> | undefined }>
   factorySpawns: ClaudeCodeSubstrateOptions[]
-  wire(lifecycleOverrides?: Partial<ProjectScopeLifecycleDeps>): ReturnType<typeof wireSubstrates>
+  wire(lifecycleOverrides?: Partial<ProjectScopeLifecycleDeps>, wiringOverrides?: Partial<OpenWiringContext>): ReturnType<typeof wireSubstrates>
 }
 
 async function rig(options: { herdr: boolean; admissionGeneration?: number; credentials?: string[] }): Promise<Rig> {
@@ -159,7 +159,7 @@ async function rig(options: { herdr: boolean; admissionGeneration?: number; cred
   }
   return {
     pool, peer, server, shells, leases, logged, factorySpawns,
-    wire(lifecycleOverrides = {}) {
+    wire(lifecycleOverrides = {}, wiringOverrides = {}) {
       const conversationLifecycle = createProjectScopeLifecycle({
         admission: {
           listLeases: () => leases,
@@ -178,6 +178,7 @@ async function rig(options: { herdr: boolean; admissionGeneration?: number; cred
         admissionGenerationFor: async () => options.admissionGeneration, prewarmSubstrate: async () => {},
         ...(conversationTerminal === undefined ? {} : { conversationTerminal }),
         conversationLifecycle, substrateFactory: factory,
+        ...wiringOverrides,
       }
       return wireSubstrates(ctx)
     },
@@ -580,6 +581,44 @@ test('ambiguous owners: a same-key join serves a survivor; a dispatch that would
   expect(r.peer.children).toHaveLength(2)
   expect(r.factorySpawns).toHaveLength(spawnsBefore)
   expect(alive(r)).toHaveLength(2)
+})
+
+test.each(['p-one', null])('Claude -> Codex refuses ambiguous real survivors without closing either (scope=%s)', async scope => {
+  const r = await rig({ herdr: false })
+  // Reproduce legacy survivors through actual Claude spawns, not a fabricated
+  // ownerFor answer. Only their original lifecycle is blind to existing owners.
+  const blind = r.wire({ sessions: async () => ({ live: [], unresolved: 0 }) })
+  expect(completed(await collect(blind.liveAgentSubstrate!.start(specFor(scope))))).toBe(true)
+  reportFailure(r.pool, 'anthropic:a', 429)
+  expect(completed(await collect(blind.liveAgentSubstrate!.start(specFor(scope))))).toBe(true)
+  expect(alive(r)).toHaveLength(2)
+  const codexStarts: Array<string | undefined> = []
+  const wired = r.wire({}, {
+    providerResolver: () => ({ provider: 'openai-codex', source: 'project' }),
+    startCodexOwner: projectId => {
+      codexStarts.push(projectId)
+      return { events: (async function* () { yield { kind: 'completion' } as Event })(),
+        tool_resolution: 'internal', async cancel() {}, async respondToTool() {} }
+    },
+  })
+  const refused = await collect(wired.liveAgentSubstrate!.start(specFor(scope)))
+  expect(codexStarts).toEqual([])
+  expect(refused).toEqual([expect.objectContaining({ kind: 'error', code: 'chat_handoff_unknown', retryable: true,
+    message: expect.stringContaining('ambiguous Chat owner: 2 live sessions') })])
+  expect(alive(r)).toHaveLength(2)
+  expect(r.peer.children).toHaveLength(2)
+  expect(chatCloses(r)).toHaveLength(0)
+  expect(r.logged).toContainEqual(expect.objectContaining({ event: 'chat_handoff_unknown' }))
+  // The ambiguity belongs only to this scope; another owner-free scope starts.
+  const otherScope = scope === null ? 'p-one' : null
+  expect(completed(await collect(wired.liveAgentSubstrate!.start(specFor(otherScope))))).toBe(true)
+  expect(codexStarts).toEqual([otherScope ?? undefined])
+  expect(alive(r)).toHaveLength(2)
+  // Positive absence after exact fixture exits also restores this scope's path.
+  for (const { child } of r.peer.children) child.kill()
+  await Promise.all(r.peer.children.map(({ child }) => child.exited))
+  expect(completed(await collect(wired.liveAgentSubstrate!.start(specFor(scope))))).toBe(true)
+  expect(codexStarts).toEqual([otherScope ?? undefined, scope ?? undefined])
 })
 
 test('Codex -> Claude switch: a Chat held by a live non-Claude owner refuses the Claude spawn with its recovery path; nothing is closed', async () => {

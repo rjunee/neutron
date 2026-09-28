@@ -398,3 +398,28 @@ shared-host suite was deliberately deferred to avoid concurrent heavy validation
 the earlier focused receipts are not asserted as a full-suite pass for this head.
 Required remote CI, merge review, deployment and served recovery/sleep evidence
 remain separate gates. No live acceptance criterion is marked complete.
+
+### Ambiguous Claude ownership blocks a Codex switch — 2026-09-28 review
+
+Exact-head review of replacement PR #1386 found that the Codex provider-switch
+path only handed off a single Claude owner. An ambiguous owner fell through to
+Codex start, relying on the manager slot to catch legacy survivors that might
+never have occupied it. This contradicted the spec's existing ambiguity refusal.
+`gateway/wiring/build-llm-call-substrate.ts:351` now requires the lifecycle's
+verified handoff for every non-absent Claude ownership result. The lifecycle
+returns retryable `chat_handoff_unknown` for ambiguity; it closes no survivor and
+starts no Codex owner. Positive absence retains its existing direct-start path.
+
+The consuming fixture in `open/__tests__/conversation-credential-handoff.test.ts`
+creates two real persistent Claude children for each of project and General
+scope, then requests Codex through production composition. Both survivors remain
+alive, no Codex start is observed, and the precise retryable refusal is yielded.
+An owner-free other scope still starts; after the exact fixture children exit,
+the original scope also starts. Existing `project-scope-sleep.test.ts` controls
+still retire one verified idle Claude owner resumably before starting Codex.
+
+The handoff, scope-sleep and gateway substrate suites passed 72 tests with 604
+assertions; both TypeScript projects passed. Restoring ambiguous fallthrough
+failed both project and General refusals while exact-owner controls passed.
+Blanket refusal of exact owners failed the allowed-handoff controls while both
+ambiguity refusals passed. Both mutations were restored before final checks.
