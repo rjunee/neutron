@@ -13,6 +13,24 @@ is introduced.
 
 ## Acceptance
 
+- [ ] Generic credential create, overwrite and delete refuse normalized `codex`
+      and `codex-acct-*`, including the reserved-write entry points for other
+      modules. Explicit Codex-owned writes remain available. Existing credential
+      reads, resolution and metadata listing are unchanged; unrelated services
+      and owners remain writable. Verify:
+      `bun test trident/codex-service-custody.test.ts
+      gateway/http/__tests__/project-credentials-surface-scope.test.ts`.
+- [ ] The service's process-local maintenance gate closes writer admission
+      synchronously and drains previously admitted queue entries, harvest writes
+      and status-probe metadata writes. Nested writes of admitted operations may
+      finish; detached continuations cannot reuse a settled admission. While
+      held, metadata-producing status/resolution paths refuse, and stored-only
+      metadata/read paths remain available. HTTP refusals are 409 and do not
+      change auth, credential or rotation data. Releasing an old lease cannot
+      reopen a newer one. Verify:
+      `bun test project-credentials/codex-custody-gate.test.ts
+      trident/codex-service-custody.test.ts
+      gateway/http/codex-credential-surface.test.ts`.
 - [ ] Named rotation clears only the target's cooldown/quarantine, adds no
       departure cooldown and returns the actual pointer change. Plain rotation
       selects an eligible successor without adding departure cooling;
@@ -103,3 +121,9 @@ independently establish identity/freshness across any legacy duplicate before
 adoption, keep a stable old-id-to-slot mapping, and adopt only distinct other
 subscriptions at their existing named homes. This service does not infer the
 mapping or perform the offline migration.
+
+The write-admission gate covers participating store/service operations sharing
+one `ProjectDb` object in one process. It does not survive a process restart,
+exclude native CLI refreshers or other database connections, or authorize
+reconciliation. A held service lease is not a host quiescence receipt. Native
+writer exclusion and independent account mapping remain separate prerequisites.

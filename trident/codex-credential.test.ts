@@ -278,7 +278,7 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
     await svc.connect(OWNER, subscriptionAuth()) // working global default
     // Store an EXPIRED project override directly (expires_at in the past) — the
     // resolver skips it, so status resolves the global default (scope=global)…
-    await store.set(OWNER, {
+    await store.setCodex(OWNER, {
       service: CODEX_CREDENTIAL_SERVICE,
       plaintext: subscriptionAuth(),
       scope: 'project',
@@ -583,14 +583,14 @@ describe('harvest account identity', () => {
       if (identity === 'duplicate') refreshed.tokens.account_id = slot === 'work' ? 'a' : 'other-account'
       if (identity === 'missing-disk' || identity === 'missing-both') delete refreshed.tokens.account_id
       if (identity === 'missing-stored' || identity === 'missing-both') delete original.tokens.account_id
-      await store.set(OWNER, { service, plaintext: JSON.stringify(original), scope: project ? 'project' : 'global',
+      await store.setCodex(OWNER, { service, plaintext: JSON.stringify(original), scope: project ? 'project' : 'global',
         project_id: project, label: 'Preserved finite grant', expires_at: '2999-01-01T00:00:00.000Z' })
       const before = store.resolve(OWNER, project, service)!.plaintext
       const metadata = store.getMeta(OWNER, project, service)
       const disk = JSON.stringify(refreshed)
       writeFileSync(codexAuthPath(home), disk)
       if (slot === 'work') new SqliteCodexRotationStore(db).setActiveSlot(OWNER, slot, Date.now())
-      const persist = spyOn(store, 'set')
+      const persist = spyOn(store, 'setCodex')
       try {
         expect(svc.resolveActiveCodexHome(OWNER, project || 'review-project')).toBe(home)
         await new Promise(resolve => setTimeout(resolve, 0))
@@ -665,7 +665,7 @@ describe('project directory ownership', () => {
     expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('REVOKED')
     await svc.connect(OWNER, subscriptionAuth().replace('"acc"', '"reconnected-access"'), { scope: 'project', project_id: 'alpha' })
     expect(svc.resolveProjectOwnerCredential(OWNER, 'alpha').codexHome).toBe(codexProjectHome(codexHome, 'alpha'))
-    await store.set(OWNER, { service: CODEX_CREDENTIAL_SERVICE, plaintext: subscriptionAuth(), scope: 'project',
+    await store.setCodex(OWNER, { service: CODEX_CREDENTIAL_SERVICE, plaintext: subscriptionAuth(), scope: 'project',
       project_id: 'alpha', expires_at: '2000-01-01T00:00:00.000Z' })
     expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('Connect a Codex subscription')
   })
@@ -675,7 +675,7 @@ describe('project directory ownership', () => {
     store = new ProjectCredentialStore(db, { crypto: new SecretsStore({ data_dir: tmp, db }), now: () => new Date(now).toISOString() })
     const svc = new CodexCredentialService({ store, codexHome, now: () => now, rotation: new SqliteCodexRotationStore(db) })
     const expires_at = '2026-09-23T01:00:00.000Z'
-    await store.set(OWNER, { service: CODEX_CREDENTIAL_SERVICE, plaintext: subscriptionAuth(), scope: 'project',
+    await store.setCodex(OWNER, { service: CODEX_CREDENTIAL_SERVICE, plaintext: subscriptionAuth(), scope: 'project',
       project_id: 'alpha', label: 'Finite project grant', expires_at })
     const first = svc.resolveProjectOwnerCredential(OWNER, 'alpha')
     const refreshed = JSON.parse(subscriptionAuth())

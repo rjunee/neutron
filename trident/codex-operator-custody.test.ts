@@ -66,7 +66,7 @@ test('plain rotation preserves departure availability; free one/all releases wit
 test('adoption persists exact newer live bytes preserving finite grant, labels, history and pointer', async () => {
   await pool()
   const expires = '2026-10-01T00:00:00Z'
-  await store.set(owner, { service: 'codex', plaintext: disk('default'), scope: 'global', label: 'Finite grant', expires_at: expires })
+  await store.setCodex(owner, { service: 'codex', plaintext: disk('default'), scope: 'global', label: 'Finite grant', expires_at: expires })
   rotation.setCooldown(owner, 'default', { cooling_until: now + 2000, cooling_reason: 'long-window' })
   const state = rotation.listSlots(owner)
   const refreshed = auth('first', '2026-09-27T00:00:00Z', 'fixture-new-refresh') + '\n'
@@ -113,7 +113,7 @@ test('adoption refuses duplicate accounts, expired grants and another owner iden
   mkdirSync(service.slotHome('third'), { recursive: true })
   writeFileSync(join(service.slotHome('third'), 'auth.json'), auth('first'))
   expect(await service.adoptAccount(owner, { slot: 'third', accountId: 'first' })).toMatchObject({ ok: false, code: 'duplicate_account' })
-  await store.set(owner, { service: 'codex', plaintext: disk('default'), scope: 'global', expires_at: '2026-09-25T00:00:00Z' })
+  await store.setCodex(owner, { service: 'codex', plaintext: disk('default'), scope: 'global', expires_at: '2026-09-25T00:00:00Z' })
   expect(await service.adoptAccount(owner, { slot: 'default', accountId: 'first' })).toMatchObject({ ok: false, code: 'account_grant_unavailable' })
   expect(await service.adoptAccount(owner, { slot: 'second', accountId: 'wrong' })).toMatchObject({ ok: false, code: 'account_identity_conflict' })
 })
@@ -176,8 +176,8 @@ test('adoption reports partial custody when selection changes during persistence
   rotation.removeSlot(owner, 'default')
   const bytes = auth('first', '2026-09-27T00:00:00Z', 'fixture-new-refresh')
   writeFileSync(join(service.slotHome('default'), 'auth.json'), bytes)
-  const persist = store.set.bind(store)
-  const spy = spyOn(store, 'set').mockImplementation(async (account, input) => {
+  const persist = store.setCodex.bind(store)
+  const spy = spyOn(store, 'setCodex').mockImplementation(async (account, input) => {
     const result = await persist(account, input)
     rotation.setActiveSlot(owner, 'second', now)
     return result
@@ -192,7 +192,7 @@ test('adoption reports partial custody when selection changes during persistence
 
 test.each([true, false])('plain rotation skips an expired successor, later healthy account present=%s', async (healthy) => {
   await pool()
-  await store.set(owner, { service: codexSlotService('second'), plaintext: disk('second'), scope: 'global', expires_at: '2026-09-26T00:00:00Z' })
+  await store.setCodex(owner, { service: codexSlotService('second'), plaintext: disk('second'), scope: 'global', expires_at: '2026-09-26T00:00:00Z' })
   if (healthy) await service.connectAccount(owner, auth('third'), { slot: 'third' })
   const states = rotation.listSlots(owner)
   const expired = store.getMeta(owner, '', codexSlotService('second'))

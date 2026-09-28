@@ -53,9 +53,30 @@
  * reserved rows too — a row the Admin tab can neither overwrite nor delete has no
  * business being rendered there, and the agent's available-services block should
  * not advertise an MCP server's secret blob as an external service it can use.
+ *
+ * Codex is separately WRITE-owned: `codex` and `codex-acct-*` refuse generic
+ * set/delete, including the MCP reserved-write methods. Their reads, resolution
+ * and metadata enumeration remain shared. `setCodex` / `deleteCodex` acquire
+ * the same process-local custody admission used by the credential service.
  */
 
 import type { ProjectDb, OwnerHandle } from '@neutronai/persistence/index.ts'
+import { CodexServiceCustodyGate } from './codex-custody-gate.ts'
+
+// All stores constructed over the same live DB share the process-local gate.
+const codexCustodyGates = new WeakMap<ProjectDb, CodexServiceCustodyGate>()
+
+/** Write ownership only: Codex rows remain visible to ordinary read/resolvers. */
+export function isCodexCustodyService(service: string): boolean {
+  const normalized = service.trim().toLowerCase()
+  return normalized === 'codex' || normalized.startsWith('codex-acct-')
+}
+
+function refuseGenericCodexWrite(service: string): void {
+  if (isCodexCustodyService(service)) {
+    throw new ProjectCredentialValidationError('reserved_service', 'Codex credentials are managed by their credential service')
+  }
+}
 
 /** '' is the global-scope sentinel — a real project id is always 1..128 chars. */
 export const GLOBAL_PROJECT_ID = ''
@@ -275,6 +296,7 @@ function resolveScopeProjectId(scope: CredentialScope, project_id: string | unde
 }
 
 export class ProjectCredentialStore {
+  readonly codexCustody: CodexServiceCustodyGate
   private readonly db: ProjectDb
   private readonly crypto: SecretCrypto
   private readonly now: () => string
@@ -282,6 +304,8 @@ export class ProjectCredentialStore {
 
   constructor(db: ProjectDb, opts: ProjectCredentialStoreOptions) {
     this.db = db
+    this.codexCustody = codexCustodyGates.get(db) ?? new CodexServiceCustodyGate()
+    codexCustodyGates.set(db, this.codexCustody)
     this.crypto = opts.crypto
     this.now = opts.now ?? ((): string => new Date().toISOString())
     this.ulid = opts.ulid ?? defaultUlid
@@ -297,6 +321,7 @@ export class ProjectCredentialStore {
    * here rotates it without retiring the child that holds the old value.
    */
   async set(owner_slug: OwnerHandle, input: SetCredentialInput): Promise<ProjectCredentialRecord> {
+    refuseGenericCodexWrite(typeof input.service === 'string' ? input.service : '')
     if (isReservedService(typeof input.service === 'string' ? input.service : '')) {
       throw new ProjectCredentialValidationError(
         'reserved_service',
@@ -319,7 +344,16 @@ export class ProjectCredentialStore {
     owner_slug: OwnerHandle,
     input: SetCredentialInput,
   ): Promise<ProjectCredentialRecord> {
+    refuseGenericCodexWrite(typeof input.service === 'string' ? input.service : '')
     return this.setUnchecked(owner_slug, input)
+  }
+
+  /** The Codex credential service's write boundary, including queued harvest. */
+  async setCodex(owner_slug: OwnerHandle, input: SetCredentialInput): Promise<ProjectCredentialRecord> {
+    if (typeof input.service !== 'string' || !isCodexCustodyService(input.service)) {
+      throw new ProjectCredentialValidationError('invalid_service', 'Codex custody requires a Codex credential service')
+    }
+    return this.codexCustody.run(owner_slug, () => this.setUnchecked(owner_slug, input))
   }
 
   private async setUnchecked(
@@ -500,6 +534,7 @@ export class ProjectCredentialStore {
    * running — no `onRevoked`, nothing evicted. See § RESERVED NAMESPACES.
    */
   async delete(owner_slug: OwnerHandle, project_id: string, service: string): Promise<boolean> {
+    refuseGenericCodexWrite(service)
     if (isReservedService(service)) {
       throw new ProjectCredentialValidationError(
         'reserved_service',
@@ -515,7 +550,16 @@ export class ProjectCredentialStore {
     project_id: string,
     service: string,
   ): Promise<boolean> {
+    refuseGenericCodexWrite(service)
     return this.deleteUnchecked(owner_slug, project_id, service)
+  }
+
+  /** The Codex credential service's delete boundary. Ordinary reads stay shared. */
+  async deleteCodex(owner_slug: OwnerHandle, project_id: string, service: string): Promise<boolean> {
+    if (!isCodexCustodyService(service)) {
+      throw new ProjectCredentialValidationError('invalid_service', 'Codex custody requires a Codex credential service')
+    }
+    return this.codexCustody.run(owner_slug, () => this.deleteUnchecked(owner_slug, project_id, service))
   }
 
   private async deleteUnchecked(

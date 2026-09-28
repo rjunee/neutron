@@ -48,6 +48,7 @@
 
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { ProjectCredentialValidationError } from '@neutronai/project-credentials/store.ts'
+import { CodexCustodyAdmissionError } from '@neutronai/project-credentials/codex-custody-gate.ts'
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { CodexAdoptionInitialState, CodexCredentialService, CodexTarget } from '@neutronai/trident/codex-credential.ts'
@@ -230,6 +231,7 @@ export function createCodexCredentialSurface(
             return jsonError(405, 'method_not_allowed', `method '${req.method}' not allowed on /codex-auth`)
         }
       } catch (error) {
+        if (error instanceof CodexCustodyAdmissionError) return jsonError(409, error.code, error.message)
         if (error instanceof CodexProjectOwnerError) return jsonError(409, error.code, error.message)
         throw error
       }

@@ -77,6 +77,27 @@ afterEach(() => {
 })
 
 describe('codex-auth HTTP surface — GLOBAL (primary)', () => {
+  test('maintenance returns 409 for writers and probing status, while stored metadata stays readable', async () => {
+    const crypto = new SecretsStore({ data_dir: tmp, db })
+    const store = new ProjectCredentialStore(db, { crypto })
+    expect((await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth() })))?.status).toBe(201)
+    const before = db.all('SELECT * FROM project_credentials')
+    const lease = await store.codexCustody.beginMaintenance(SLUG).drained
+    for (const request of [
+      req('POST', GLOBAL, { auth: subscriptionAuth() }), req('DELETE', GLOBAL), req('GET', GLOBAL),
+      req('POST', `${GLOBAL}/rotate`, { to: 'default' }), req('POST', `${GLOBAL}/free`, { account: 'all' }),
+      req('POST', `${GLOBAL}/adopt`, { account: 'default', account_id: 'fixture' }),
+    ]) {
+      const response = await surface.handler(request)
+      expect(response?.status).toBe(409)
+      expect(await response?.json()).toMatchObject({ code: 'codex_custody_maintenance' })
+    }
+    expect((await surface.handler(req('GET', `${GLOBAL}/rotation`)))?.status).toBe(200)
+    expect(db.all('SELECT * FROM project_credentials')).toEqual(before)
+    lease.release()
+    expect((await surface.handler(req('DELETE', GLOBAL)))?.status).toBe(200)
+  })
+
   test('operator routes require authentication and use only server owner and canonical homes', async () => {
     for (const action of ['rotation', 'rotate', 'free', 'adopt']) {
       expect((await surface.handler(req(action === 'rotation' ? 'GET' : 'POST', `${GLOBAL}/${action}`, undefined, false)))?.status).toBe(401)
