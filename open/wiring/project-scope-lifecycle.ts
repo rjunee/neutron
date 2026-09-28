@@ -40,9 +40,10 @@
  *     then the pool's exact retirement runs in SLEEP mode (the conversation's registry
  *     row loses its pid/handle/claims but keeps its session id and gains the durable
  *     `asleep_at` pin, so the next spawn `--resume`s; transcripts are never touched),
- *     then the manager re-samples: the pane is positively gone. Pane-only: the
- *     workspace is never closed (no atomic server-side guard exists) and is left for
- *     lifecycle reconciliation.
+ *     then the manager requests empty-workspace retirement only when the server
+ *     advertises the atomic ownership/contents guard. Otherwise it re-samples the
+ *     pane and leaves the workspace. Ambiguous retirement remains reserved for
+ *     reconciliation; there is no sampled-list workspace.close fallback.
  *   - ADMISSION IS STOPPED FIRST. Sleep and handoff are serialized per exact scope, so
  *     a conversation dispatch for the scope waits for a sleep in progress (and then
  *     wakes it) instead of racing it. The pool fences the key before it re-reads this
@@ -53,7 +54,8 @@
  *     live-chat substrate, which pins the asleep conversation's credential from the
  *     DURABLE registry row (`resumeCredentialFor`, while usable — process memory is
  *     never the pin, so a restart still resumes), `handoffChat` finds no owner and the
- *     spawn resumes the asleep row into a fresh Chat tab of the SAME workspace; due
+ *     spawn resumes the asleep row into a fresh Chat tab (a new owned workspace if
+ *     the old empty one was atomically retired); due
  *     project work places a worker, and the manager reserves Chat with the inert
  *     placeholder until a real Chat replaces it (#1254 identity revalidation).
  *   - Restart adoption stays the boot path (`adoptLiveAgentRepls`): a survivor with a
@@ -81,7 +83,7 @@ import {
   type AsleepConversation,
   type ResolvedProjectSessions,
 } from '@neutronai/runtime/adapters/claude-code/persistent/live-project-sessions.ts'
-import type { ChatInspection } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspaces.ts'
+import type { ChatInspection, WorkspaceRetirement } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspaces.ts'
 import type { AdmissionReason } from '@neutronai/gateway/project-admission-store.ts'
 import type { ProjectLivenessSurface } from './project-liveness.ts'
 
@@ -96,7 +98,7 @@ export type AwakeOutcome =
   | { status: 'unknown'; reason: string }
 
 export type SleepOutcome =
-  | { status: 'retired'; sessionId: string; workspace: 'pane-retired' | 'left-for-reconciliation' }
+  | { status: 'retired'; sessionId: string; workspace: 'pane-retired' | 'workspace-retired' | 'left-for-reconciliation' }
   | { status: 'absent' }
   | { status: 'refused' | 'unknown'; reason: string }
 
@@ -143,7 +145,10 @@ export interface ProjectScopeLifecycleDeps {
   /** The owner's last genuine turn in the scope (ms since epoch), or null. */
   foregroundMs?: (scope: string | null) => Promise<number | null> | number | null
   /** The shared manager's read-only Chat sample (on Herdr). */
-  conversationTerminal?: { inspectChat?(scope: string | null): Promise<ChatInspection> }
+  conversationTerminal?: {
+    inspectChat?(scope: string | null): Promise<ChatInspection>
+    retireEmptyWorkspace?(scope: string | null, expected: ChatInspection): Promise<WorkspaceRetirement>
+  }
   /** The scope's provider. With NO Claude owner, a Codex scope (`openai-codex`) has no exact
    * retirement authority, so sleep refuses it; a Claude owner is decided by its own kind. */
   providerFor?: (scope: string | null) => string
@@ -508,6 +513,13 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
       // a provider switch is still a Claude owner and sleeps below.
       if (deps.providerFor?.(scope) === 'openai-codex') return { status: 'refused', reason: 'codex owner: no exact retirement authority' }
       if (before?.status === 'live') return { status: 'refused', reason: 'the live Chat is not a Claude pool owner: no exact retirement authority' }
+      if (before?.status === 'gone' && deps.conversationTerminal?.retireEmptyWorkspace !== undefined) {
+        const evidence = await awake(scope)
+        if (evidence.status === 'awake') return { status: 'refused', reason: `awake: ${evidence.reasons.join(', ')}` }
+        if (evidence.status === 'unknown') return { status: 'unknown', reason: evidence.reason }
+        const cleanup = await deps.conversationTerminal.retireEmptyWorkspace(scope, before)
+        if (cleanup.status === 'unknown' || cleanup.status === 'refused') return cleanup
+      }
       return { status: 'absent' }
     }
     if (owner.spawning === true) return { status: 'refused', reason: 'owner still in a turn' }
@@ -548,6 +560,12 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
     if (retired === 'absent') return { status: 'absent' }
     log.info('project_scope_slept', { scope, session_id: owner.sessionId, credential: owner.credentialId, outcome: retired })
     if (inspect === undefined || before === undefined || before.status === 'none') {
+      return { status: 'retired', sessionId: owner.sessionId, workspace: 'left-for-reconciliation' }
+    }
+    const cleanup = await deps.conversationTerminal?.retireEmptyWorkspace?.(scope, before)
+    if (cleanup?.status === 'retired') return { status: 'retired', sessionId: owner.sessionId, workspace: 'workspace-retired' }
+    if (cleanup?.status === 'unknown' || cleanup?.status === 'refused') {
+      log.warn('project_scope_workspace_retirement_unconfirmed', { scope, ...cleanup })
       return { status: 'retired', sessionId: owner.sessionId, workspace: 'left-for-reconciliation' }
     }
     // The pool closed the Chat pane (confirmed exit). Re-sample: anything but a

@@ -124,6 +124,9 @@ export function createConversationTerminal(input: {
   const host = input.host
   // #1226 sleep: the strict host's read-only Chat sample, for the exact scope.
   return isProjectChatInspector(host)
-    ? { host, placementFor, inspectChat: scope => host.inspectChat(placementFor(scope)) }
+    ? { host, placementFor, inspectChat: scope => host.inspectChat(placementFor(scope)),
+      ...(host.retireEmptyWorkspace === undefined ? {} : {
+        retireEmptyWorkspace: (scope, expected) => host.retireEmptyWorkspace!(placementFor(scope), expected),
+      }) }
     : { host, placementFor }
 }

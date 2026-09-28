@@ -273,6 +273,65 @@ function expectUntouched(r: Rig, chatCount = 1) {
   expect(chatLayouts(r)).toHaveLength(chatCount)
 }
 
+test('capable server atomically retires empty scope workspace and wake preserves native history', async () => {
+  const r = await rig()
+  r.server.ownedEmptyWorkspaceRetirement = true
+  expect(await turn(r, 'p-one')).toBe(true)
+  const first = r.peer.children[0]!, workspace = livePane(r)!.workspace_id
+  await until(() => getRecord(r.registryPath, keyOf(r, first.sessionId)!)?.has_session === true)
+  const transcript = readFileSync(join(r.transcripts, `${first.sessionId}.jsonl`), 'utf8')
+  expect(await r.lifecycle.sleep('p-one')).toEqual({ status: 'retired', sessionId: first.sessionId, workspace: 'workspace-retired' })
+  expect(r.server.workspaces.has(workspace)).toBe(false)
+  expect(r.server.callsTo('workspace.close')).toHaveLength(0)
+  expect(r.server.callsTo('workspace.retire_empty_owned')).toHaveLength(1)
+  r.restart()
+  expect(await turn(r, 'p-one')).toBe(true)
+  expect(livePane(r)!.workspace_id).not.toBe(workspace)
+  expect(r.peer.children[1]!.sessionId).toBe(first.sessionId)
+  expect(readFileSync(join(r.transcripts, `${first.sessionId}.jsonl`), 'utf8')).toBe(transcript)
+})
+
+test('scope sleep preserves a foreign pane arriving at guarded workspace retirement', async () => {
+  const r = await rig()
+  r.server.ownedEmptyWorkspaceRetirement = true
+  expect(await turn(r, 'p-one')).toBe(true)
+  const first = r.peer.children[0]!, pane = livePane(r)!
+  await until(() => getRecord(r.registryPath, keyOf(r, first.sessionId)!)?.has_session === true)
+  r.server.beforeEmptyWorkspaceRetirement = () => r.server.panes.set('foreign', { ...pane, pane_id: 'foreign', argv: ['foreign'] })
+  expect(await r.lifecycle.sleep('p-one')).toEqual({ status: 'retired', sessionId: first.sessionId, workspace: 'left-for-reconciliation' })
+  expect(r.server.panes.has('foreign')).toBe(true)
+  expect(r.server.workspaces.has(pane.workspace_id)).toBe(true)
+  expect(r.server.callsTo('workspace.close')).toHaveLength(0)
+  r.restart()
+  expect(await turn(r, 'p-one')).toBe(true)
+  expect(r.peer.children[1]!.sessionId).toBe(first.sessionId)
+  expect(livePane(r)!.workspace_id).toBe(pane.workspace_id)
+  expect(r.server.panes.has('foreign')).toBe(true)
+})
+
+test('lost workspace reply recovers its original reservation after gateway restart', async () => {
+  const r = await rig()
+  r.server.ownedEmptyWorkspaceRetirement = true
+  expect(await turn(r, 'p-one')).toBe(true)
+  const first = r.peer.children[0]!
+  await until(() => getRecord(r.registryPath, keyOf(r, first.sessionId)!)?.has_session === true)
+  const call = r.server.call.bind(r.server)
+  let lost = false
+  r.server.call = async (method, params) => {
+    const reply = await call(method, params)
+    if (method === 'workspace.retire_empty_owned' && !lost) { lost = true; throw new Error('lost reply') }
+    return reply
+  }
+  expect(await r.lifecycle.sleep('p-one')).toEqual({ status: 'retired', sessionId: first.sessionId, workspace: 'left-for-reconciliation' })
+  r.restart()
+  expect(await r.lifecycle.sleep('p-one')).toEqual({ status: 'absent' })
+  const requests = r.server.callsTo('workspace.retire_empty_owned')
+  expect(requests).toHaveLength(2)
+  expect(requests[1]!.params).toEqual(requests[0]!.params)
+  expect(await turn(r, 'p-one')).toBe(true)
+  expect(r.peer.children[1]!.sessionId).toBe(first.sessionId)
+})
+
 test('idle retirement: an idle owned Chat sleeps pane-only, keeps its transcript and resumable row, and wakes by --resume in the SAME workspace', async () => {
   const r = await rig()
   expect(await turn(r, 'p-one')).toBe(true)
