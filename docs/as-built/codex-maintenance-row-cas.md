@@ -23,9 +23,15 @@ The focused four-file run passed 67 tests and 315 assertions. Both affected
 TypeScript projects passed. Six semantic mutations were killed: signed-input
 snapshot witness, independent identity mapping, receipt fsync, key witness,
 named-peer equality and inbound foreign-key refusal. Whitespace checks passed.
-The whole-tree leak gate still reports existing findings, including its scan of
-the worktree metadata file; the full partitioned suite has not been run for this
-candidate, and no publication or merge is claimed.
+The local whole-tree leak gate still reports existing findings, including its
+scan of the worktree metadata file; the changed-file comparison with the base
+introduced no findings. The full partitioned suite runs in hosted CI; no merge
+or deployment is claimed.
+The first hosted full-suite run found one dashboard fixture still using generic
+credential writes to seed and remove Codex. That fixture now uses the Codex-owned
+methods; its connection/gauge assertions are unchanged, and its focused run
+passes 10 tests and 65 assertions. Hosted purity, layering, lint,
+typecheck and CodeQL passed on the initial reviewed head.
 
 This is a library and synthetic proof. No root operator adapter, host-wide native
 writer exclusion, live mutation, deployment or provider refresh-token usability
