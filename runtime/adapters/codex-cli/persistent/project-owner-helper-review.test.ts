@@ -229,8 +229,13 @@ test('restore readback mismatch and replaced native binding cannot return writab
   const replaced = await fixture(), next = await replaced.connect()
   const nextLease = await next.reviewPrepare({ stageDir: replaced.stageDir, network: false }, next.broker.state().epoch)
   replaced.invalidate()
-  await expect(nextLease.start([])).rejects.toThrow('Stale native')
+  // A replaced binding can refuse before the response, or lose that refusal
+  // while the frontend is also fencing itself. Neither can grant a native turn.
+  await expect(nextLease.start([])).rejects.toThrow(/Stale native|outcome may be unknown/)
+  expect(next.broker.state().phase).toBe('closed')
   expect(replaced.sent.some(message => message.method === 'turn/start')).toBe(false)
+  await expect(replaced.broker.gateway('native-after-replacement').request('turn/start',
+    { threadId: 'owner', input: [] }, replaced.broker.state().epoch)).rejects.toThrow('review')
 })
 
 test('abandon synchronously fences the proxy even when its helper response is lost', async () => {
