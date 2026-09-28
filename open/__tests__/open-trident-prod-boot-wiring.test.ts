@@ -1668,6 +1668,10 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     const composition = await composer({ db, project_slug: 'owner' })
     try {
       expect(composition.trident?.fire_inner_workflow).toBeFunction()
+      expect(composition.trident?.fire_review_panel).toBeUndefined()
+      expect(composition.trident?.arbitrate).toBeUndefined()
+      expect(composition.trident?.resolve_conflict).toBeUndefined()
+      expect(composition.trident?.fix_leak_findings).toBeUndefined()
       expect(composition.trident_build_dispatch).toBeDefined()
       expect(admissions).toEqual([])
       const page = () => composition.landing_server!.fetch(new Request('http://127.0.0.1/chat'), {} as never)

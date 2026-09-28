@@ -1366,6 +1366,8 @@ export function buildOpenGraphComposer(
       retireSetup,
       retireLegacyBackground,
       liveAgentSubstrate,
+      canDispatchLiveAgent,
+      ephemeralSubstrateAvailable,
       makeProjectLiveAgentSubstrate,
       adoptLiveAgentRepls,
       recoverLiveAgentRepls,
@@ -1419,7 +1421,7 @@ export function buildOpenGraphComposer(
     // Bound panels supply their stable launcher_repo_path so this warm cache
     // never retains disposable review worktrees; workflow args keep those paths.
     const tridentFireReviewPanel =
-      liveAgentSubstrate !== null
+      ephemeralSubstrateAvailable
         ? buildWorkflowFirer({ fire: buildSubstrateWorkflowFire({ build_substrate: makeWarmFireSubstrate }) })
         : null
 
@@ -6474,6 +6476,7 @@ export function buildOpenGraphComposer(
       appWsRegistry,
       webPresence,
       appWsChatTurn,
+      canDispatchLiveAgent,
       scribeOnUserTurn,
       // M2 task 5 — resolve a voice note's transcript for the SCRIBE text (voice
       // → text → gbrain parity). The resolver sets `transcript` only for audio,
@@ -6640,11 +6643,11 @@ export function buildOpenGraphComposer(
 
     // #342 — bounded Forge merge-conflict resolver: a fresh ephemeral REPL rooted
     // in the conflicted worktree, reusing the SAME per-cwd factory the dispatch
-    // family uses. Gated on the live-credential predicate (a resolver can only run
-    // where builds run). Absent → a rebase conflict escalates a specific question
+    // family uses. Gated on that factory's credential pools; a native owner alone
+    // cannot run this helper. Absent → a rebase conflict escalates a specific question
     // to chat rather than auto-resolving.
     const tridentConflictResolver =
-      tridentFireInnerWorkflow !== null
+      ephemeralSubstrateAvailable
         ? buildForgeConflictResolver({
             build_substrate: makeEphemeralSubstrate('cc-trident-resolve'),
           })
@@ -6659,8 +6662,8 @@ export function buildOpenGraphComposer(
     // was removed because it let an untrusted judge steer a credentialed agent —
     // and `approve`/`merge`/`skip-review` cannot even enter the option set
     // (`FORBIDDEN_OPTION_IDS`). Instance prefix per `arbiter.ts`. Gated on the SAME
-    // live-credential predicate as the resolver: an arbiter can only run where
-    // builds run. Unavailability remains evidence for the project decision turn.
+    // helper-credential predicate as the resolver. Unavailability remains
+    // evidence for the project decision turn.
     //
     // CREDENTIAL-FREE BY PROFILE, not by prompt — the `PROFILE_LEAK_FIXER` rule
     // fourteen lines below, and this turn needs it MORE than that one does. On the
@@ -6674,7 +6677,7 @@ export function buildOpenGraphComposer(
     // drops the grant, so the authority the option set excludes structurally is
     // absent from the environment too.
     const tridentArbiter =
-      tridentFireInnerWorkflow !== null
+      ephemeralSubstrateAvailable
         ? buildFableArbiter({
             build_substrate: makeEphemeralSubstrate('cc-trident-arbiter', PROFILE_ARBITER),
           })
@@ -6683,14 +6686,14 @@ export function buildOpenGraphComposer(
     // Purity-preflight fixer (2026-08-31): a fresh ephemeral REPL rooted in the
     // preflight's scratch worktree rewords gate-flagged prose so a finding is a
     // fixable defect in THIS round instead of a guaranteed-red PR. Same gating
-    // as the conflict resolver — a fixer can only run where builds run. Absent →
+    // as the conflict resolver — a native owner alone cannot run this helper. Absent →
     // findings are annotated on the PR and CI stays the enforcement of record.
     // CREDENTIAL-FREE BY PROFILE, not by prompt. The reword turn never commits, never pushes and
     // never opens a PR — the outer preflight does all three — so it runs on `PROFILE_LEAK_FIXER`,
     // which is `PROFILE_EPHEMERAL` minus the GitHub grant. It is the one dispatch here that reads
     // text the gate has already objected to, and it needs nothing that publishes.
     const tridentLeakFixer =
-      tridentFireInnerWorkflow !== null
+      ephemeralSubstrateAvailable
         ? buildLeakPreflightFixer({
             build_substrate: makeEphemeralSubstrate('cc-trident-leakfix', PROFILE_LEAK_FIXER),
           })
@@ -7549,7 +7552,7 @@ export function buildOpenGraphComposer(
         ? {
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
-              fire_review_panel: tridentFireReviewPanel!,
+              ...(tridentFireReviewPanel !== null ? { fire_review_panel: tridentFireReviewPanel } : {}),
               on_run_terminal: async (run): Promise<void> => {
                 await tridentOnRunTerminal(run)
                 const resolvedHome = codexCredentialService.resolveActiveCodexHome(

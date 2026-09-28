@@ -1165,6 +1165,8 @@ describe('wireSubstrates — on-demand helpers', () => {
     }, providerResolver: projectId => ({ provider: selected && projectId === 'codex-project' ? 'openai-codex' : 'anthropic', source: 'project' }) })
     const wired = wireSubstrates(ctx)
     expect(wired.liveAgentSubstrate).not.toBeNull()
+    expect(wired.canDispatchLiveAgent('codex-project')).toBe(false)
+    expect(wired.ephemeralSubstrateAvailable).toBe(false)
     expect(admitted).toEqual([])
     expect(wired.llmCallSubstrate).toBeNull()
     expect(wired.utilitySubstrate).toBeNull()
@@ -1175,6 +1177,7 @@ describe('wireSubstrates — on-demand helpers', () => {
     const unavailable = await Array.fromAsync(wired.liveAgentSubstrate!.start(spec).events)
     expect(unavailable).toContainEqual(expect.objectContaining({ kind: 'error', code: 'no_credentials', retryable: false }))
     selected = true
+    expect(wired.canDispatchLiveAgent('codex-project')).toBe(true)
     expect(wired.makeProjectLiveAgentSubstrate('codex-project')).not.toBeNull()
     const events = await Array.fromAsync(wired.liveAgentSubstrate!.start(spec).events)
     expect(events.at(-1)).toMatchObject({ kind: 'completion', substrate_instance_id: 'native-owner' })
@@ -1182,6 +1185,7 @@ describe('wireSubstrates — on-demand helpers', () => {
     granted = false
     expect(() => wired.liveAgentSubstrate!.start(spec)).toThrow('Project credential revoked')
     selected = false
+    expect(wired.canDispatchLiveAgent('codex-project')).toBe(false)
     const switchedBack = await Array.fromAsync(wired.liveAgentSubstrate!.start(spec).events)
     expect(switchedBack).toContainEqual(expect.objectContaining({ kind: 'error', code: 'no_credentials' }))
     expect(admitted).toEqual(['codex-project'])

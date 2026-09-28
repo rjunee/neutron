@@ -327,9 +327,11 @@ describe('Open skill-forge prod-boot wiring (parity gap #5)', () => {
     const composer = buildOpenGraphComposer({ env: process.env })
     const composition = await composer({ db, project_slug: 'owner' })
 
-    // No credential → no Trident dispatch → no auto-propose trigger…
-    expect(composition.trident).toBeUndefined()
-    // …but the approve/decline/list surface is still wired (no feature flag).
+    // Native project admission can become available after boot, but the bounded
+    // helpers remain unavailable without their own credential pools.
+    expect(composition.trident?.fire_inner_workflow).toBeFunction()
+    expect(composition.trident?.arbitrate).toBeUndefined()
+    // The approve/decline/list surface is still wired (no feature flag).
     expect(composition.skill_forge).toBeDefined()
     const backend = composition.skill_forge!.backend
 

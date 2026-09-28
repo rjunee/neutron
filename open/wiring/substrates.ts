@@ -63,6 +63,10 @@ export interface WiredSubstrates {
   retireLegacyBackground: (projectIds: readonly string[]) => Promise<void>
   /** Live-chat dispatcher; available with a native owner binding even before a project selects it. */
   liveAgentSubstrate: Substrate | null
+  /** Per-turn availability, independent of the shared dispatcher's lifetime. */
+  canDispatchLiveAgent: (project_id?: string) => boolean
+  /** Credential pools supported by the bounded helper factories. */
+  ephemeralSubstrateAvailable: boolean
   /** Build a live-chat substrate pinned to one project for lazy REPL creation. */
   makeProjectLiveAgentSubstrate: (project_id: string) => Substrate | null
   /**
@@ -245,10 +249,12 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // Provider selection and project credentials are checked at dispatch, not
   // against the boot inventory. Pinned factories still refuse unavailable
   // providers; constructing this dispatcher never starts an owner.
+  const canDispatchLiveAgent = (projectId?: string): boolean => conversationalAvailable
+    || ctx.startCodexOwner !== undefined
+      && (ctx.providerResolver?.(projectId, 'conversation')?.provider ?? ctx.provider) === 'openai-codex'
   const makeLiveAgentSubstrate = (projectIdResolver?: () => string): LlmCallSubstrate | null =>
-    (conversationalAvailable || ctx.startCodexOwner !== undefined
-      && (projectIdResolver === undefined
-        || (ctx.providerResolver?.(projectIdResolver(), 'conversation')?.provider ?? ctx.provider) === 'openai-codex'))
+    (projectIdResolver === undefined && ctx.startCodexOwner !== undefined
+      || canDispatchLiveAgent(projectIdResolver?.()))
       ? buildLlmCallSubstrate({
           ...anthropicPoolArg,
           substrate_instance_id: `cc-agent-${owner_handle}`,
@@ -623,6 +629,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     llmCallSubstrate,
     utilitySubstrate,
     liveAgentSubstrate,
+    canDispatchLiveAgent,
+    ephemeralSubstrateAvailable: harnessAvailable,
     makeProjectLiveAgentSubstrate,
     makeComposeSubstrate,
     reminderComposeSubstrate,
