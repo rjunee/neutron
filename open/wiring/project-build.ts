@@ -342,6 +342,14 @@ function worktreeAddDiagnostic(result: HostCommandResult | null) {
 export async function prepareProjectBuild(input: InnerLoopInput, context: ProjectBuildContext, signal: AbortSignal): Promise<ProjectBuildHostOptions> {
   const run = { ...input.run, branch: input.run.branch ?? `trident/${input.run.slug}`,
     worktree: input.run.worktree ?? runWorktreePath(input.run.repo_path, input.run) }
+  const declaration = readProjectRepos(context.projectDir, run.project_slug)
+  const repo = declaration.repos.find(row => resolve(context.projectDir, row.path) === resolve(run.repo_path))
+  // PR builds cannot reach review or merge without this explicit project binding.
+  // Refuse before preparing a worktree or workers; local builds need no remote CI.
+  if (run.merge_mode === 'pr') {
+    if (!repo) throw Error('PR build repository is not declared in project-repos.json')
+    if (!repo.ciWorkflow?.trim()) throw Error(`PR build requires ciWorkflow for selected repo "${repo.name}" in project-repos.json`)
+  }
   const runSuite = (command: string, logPath: string) => runHostSuite({
     argv: ['bash', '--noprofile', '--norc', '-c', suiteScript(command, logPath)], cwd: run.worktree,
     env: HOST_SUITE_ENV,
@@ -921,8 +929,6 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     await writeFile(bodyFile, body, { mode: 0o600 })
     return { title, bodyFile }
   }
-  const declaration = readProjectRepos(context.projectDir, run.project_slug)
-  const repo = declaration.repos.find(row => resolve(context.projectDir, row.path) === resolve(run.repo_path))
   const reviewCredentialIdentity = async (provider: Provider): Promise<string | null> => {
     if (provider !== 'anthropic' || provider !== context.provider) {
       return workerCredentialIdentity(provider, provider === 'openai-codex' ? codexEnv : context.env)

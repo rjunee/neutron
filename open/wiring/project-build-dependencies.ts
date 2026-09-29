@@ -1,5 +1,5 @@
-import { appendFile, lstat, open, readFile, readdir, realpath, rename, statfs, unlink, writeFile } from 'node:fs/promises'
-import { join, resolve, sep } from 'node:path'
+import { appendFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, statfs, unlink, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { hostname, release } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
@@ -261,6 +261,165 @@ const PORTABLE_RUNNER_FILES = ['scripts/run-tests.sh', 'scripts/lib/discover-tes
 const PORTABLE_RUNNER_TUNING = new Set(['NEUTRON_TEST_JOBS', 'NEUTRON_TEST_CONCURRENCY',
   'NEUTRON_TEST_CHUNK_SIZE', 'NEUTRON_TEST_TIMEOUT', 'NEUTRON_TEST_PGLITE_RETRIES',
   'NEUTRON_TEST_PGLITE_CONCURRENCY', 'NEUTRON_TEST_PGLITE_TIMEOUT'])
+const PORTABLE_RUNNER_TOOLS = ['dirname', 'sysctl', 'nproc', 'find', 'sort', 'grep', 'tail', 'awk',
+  'mktemp', 'rm', 'sed', 'cat', 'wc', 'tr', 'sleep']
+
+// The admitted selector is Bun's default Linux system-shell rule (bash/sh/zsh),
+// with no CLI/config override. We measure its entire candidate set, including
+// absent candidates; an inner /proc sample cannot recover an interpreter which
+// already exec'd Bash. This is deliberately not a claim about that transient PID.
+const BUN_SYSTEM_SHELL_CANDIDATES = ['bash', 'sh', 'zsh']
+
+/** The generated runner observes its actual Bash parent and child environment.
+ * Environment values other than executable/PATH coordinates leave only as
+ * digests. Only the three known package fields and package PATH slots normalize. */
+const BUN_LAUNCHER_PROBE = String.raw`
+import hashlib,json,os,sys
+root=sys.argv[1]
+baseline=json.loads(sys.argv[2])
+def digest(value): return hashlib.sha256(value.encode()).hexdigest()
+env=dict(os.environ)
+path=env.get('PATH','').split(':')
+expected=[root+'/node_modules/.bin',root+'/node_modules/.bin']
+parent=os.path.dirname(root)
+while True:
+ expected.append(parent.rstrip('/')+'/node_modules/.bin')
+ if parent=='/': break
+ parent=os.path.dirname(parent)
+prefix=len(expected)
+if path[:prefix]!=expected: sys.exit(3)
+if digest(':'.join(path[prefix:]))!=baseline.get('PATH'): sys.exit(3)
+if any(not part.startswith('/') for part in path): sys.exit(3)
+if env.get('BASH_ENV','') or env.get('ENV',''): sys.exit(3)
+known={'PATH','PWD','SHLVL','_','NODE','npm_command','npm_config_local_prefix',
+ 'npm_config_user_agent','npm_execpath','npm_lifecycle_event','npm_lifecycle_script',
+ 'npm_node_execpath','npm_package_json','npm_package_name','npm_package_version'}
+for name in set(env)|set(baseline):
+ if name not in known and (digest(env[name]) if name in env else None)!=baseline.get(name): sys.exit(3)
+if env.get('PWD')!=root or env.get('npm_config_local_prefix')!=root or env.get('npm_package_json')!=root+'/package.json': sys.exit(3)
+if env.get('npm_command')!='run-script' or env.get('npm_lifecycle_event')!='test' or env.get('npm_lifecycle_script')!='bash scripts/run-tests.sh': sys.exit(3)
+env['PWD']='<package>'; env['npm_config_local_prefix']='<package>'; env['npm_package_json']='<package>/package.json'
+normalized=['<package>/node_modules/.bin']*2+path[2:]
+env['PATH']=':'.join(normalized)
+shellopts=sys.argv[3].split(':'); bashopts=sys.argv[4].split(':')
+if not set(shellopts)<=set(['braceexpand','hashall','interactive-comments']): sys.exit(3)
+if not set(bashopts)<=set(['checkwinsize','cmdhist','complete_fullquote','extquote','force_fignore','globasciiranges','globskipdots','hostcomplete','interactive_comments','patsub_replacement','progcomp','promptvars','sourcepath']): sys.exit(3)
+print(json.dumps({'path':normalized,'innerBash':os.path.realpath('/proc/%s/exe'%os.getppid()),
+ 'node':env.get('NODE'),'npmNode':env.get('npm_node_execpath'),'bun':env.get('npm_execpath'),
+ 'environment':digest(json.dumps(sorted(env.items()))),
+ 'startup':digest(json.dumps([env.get('BASH_ENV'),env.get('ENV'),shellopts,bashopts]))}))
+`
+
+async function bunPackageLauncherIdentity(worktree: string, command: string): Promise<string | null> {
+  if (process.platform !== 'linux') return null
+  const root = await realpath(worktree)
+  const inheritedPath = process.env.PATH ?? ''
+  if (!inheritedPath.split(':').every(part => isAbsolute(part))) return null
+  for (const [name, value] of Object.entries(process.env)) {
+    if (/^(BUN_|npm_|NPM_)/.test(name) || name.startsWith('NODE_') && name !== 'NODE_ENV'
+      || ['NODE', 'SHELLOPTS', 'BASHOPTS'].includes(name)
+      || name === 'ENV' && value) return null
+  }
+  // The package launcher automatically loads local dotenv/configuration. Only
+  // the existing first-party bunfig (checked by portableSuiteIdentity) is known.
+  if ((await readdir(root)).some(name => name === '.env' || name.startsWith('.env.'))
+    || await exists(join(root, '.npmrc'))) return null
+  const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+  if (manifest?.scripts?.test !== 'bash scripts/run-tests.sh'
+    || Object.hasOwn(manifest.scripts, 'pretest') || Object.hasOwn(manifest.scripts, 'posttest')) return null
+  if (await exists(join(root, 'bunfig.toml'))) {
+    const config = await readFile(join(root, 'bunfig.toml'))
+    if (!config.equals(await readFile(join(hostDirectory, 'bunfig.toml')))
+      || Object.hasOwn(Bun.TOML.parse(config.toString()), 'run')) return null
+  }
+  const bunPath = Bun.which('bun', { PATH: inheritedPath })
+  const pythonPath = Bun.which('python3', { PATH: inheritedPath })
+  const nodePath = Bun.which('node', { PATH: inheritedPath })
+  const bashPath = Bun.which('bash', { PATH: inheritedPath })
+  if (!bunPath || !pythonPath || !nodePath || !bashPath) return null
+  const bun = await realpath(bunPath), python = await realpath(pythonPath), node = await realpath(nodePath)
+  if (node === bun) return null // Bun's generated node alias is not a measured Node.
+  const bash = await realpath(bashPath)
+  // A custom shell may interpret the probe differently before it can report.
+  // Admit only the same system candidates that the default selector can use.
+  const systemPath = '/usr/bin:/bin'
+  const systemBash = Bun.which('bash', { PATH: systemPath })
+  if (!systemBash || bash !== await realpath(systemBash)) return null
+  const measureTools = async (vector: string[]): Promise<[string, string | null][] | null> => {
+    const effectivePath = vector.join(':')
+    const tools: [string, string | null][] = []
+    for (const name of [...BUN_SYSTEM_SHELL_CANDIDATES, 'bun', 'node', 'python3', ...PORTABLE_RUNNER_TOOLS]) {
+      const selected = Bun.which(name, { PATH: effectivePath })
+      const inherited = Bun.which(name, { PATH: inheritedPath })
+      if (selected !== inherited) return null
+      if (BUN_SYSTEM_SHELL_CANDIDATES.includes(name)) {
+        const system = Bun.which(name, { PATH: systemPath })
+        if (Boolean(selected) !== Boolean(system) || selected && await realpath(selected) !== await realpath(system!)) return null
+      }
+      if (!selected && !['zsh', 'sysctl', 'nproc'].includes(name)) return null
+      tools.push([name, selected ? await toolContentIdentity(selected) : null])
+    }
+    if (process.env.SHELL && !await Promise.all(BUN_SYSTEM_SHELL_CANDIDATES.map(async name => {
+      const selected = Bun.which(name, { PATH: effectivePath })
+      return selected !== null && await realpath(process.env.SHELL!) === await realpath(selected)
+    })).then(values => values.some(Boolean))) return null
+    return tools
+  }
+  // Admission precedes execution: a sibling probe inherits the same ancestor
+  // bins, so discovering a shadow only from its output would already run it.
+  // Derive only the admitted PATH rule, then require the actual observation to
+  // match this vector and these tool bytes after each probe.
+  const prospectivePath = [join(root, 'node_modules/.bin'), join(root, 'node_modules/.bin')]
+  for (let parent = dirname(root);; parent = dirname(parent)) {
+    prospectivePath.push(join(parent, 'node_modules/.bin'))
+    if (dirname(parent) === parent) break
+  }
+  prospectivePath.push(...inheritedPath.split(':'))
+  const baseline = Object.fromEntries(Object.entries({ ...process.env, ...HOST_SUITE_ENV })
+    .filter((entry): entry is [string, string] => entry[1] !== undefined).map(([name, value]) => [name, digest(value)]))
+  for (const line of command.split('\n').slice(0, -1)) {
+    const [, name, value] = /^export ([A-Z_]+)=([0-9]+)$/.exec(line)!
+    baseline[name!] = digest(value!)
+  }
+  const observations: string[] = []
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const admittedTools = await measureTools(prospectivePath)
+    if (!admittedTools) return null
+    // Same parent preserves every ancestor PATH slot. No project file is changed.
+    const probe = await mkdtemp(join(dirname(root), '.suite-launcher-probe-'))
+    try {
+      await mkdir(join(probe, 'scripts'))
+      await writeFile(join(probe, 'package.json'), JSON.stringify(manifest))
+      if (await exists(join(root, 'bunfig.toml'))) await writeFile(join(probe, 'bunfig.toml'), await readFile(join(root, 'bunfig.toml')))
+      await writeFile(join(probe, 'scripts/run-tests.sh'),
+        `${quote(python)} -I -S -c ${quote(BUN_LAUNCHER_PROBE)} "$PWD" ${quote(JSON.stringify(baseline))} "$SHELLOPTS" "$BASHOPTS"\n`)
+      const result = await spawnCapture([bash, '--noprofile', '--norc', '-c', command], probe, HOST_SUITE_ENV, 10_000)
+      if (!result.ok || result.timed_out || result.stdout.length > 256 * 1024) {
+        log.warn('suite_launcher_probe_refused', { exit: result.exit_code }); return null
+      }
+      const record = JSON.parse(result.stdout) as { path: string[]; innerBash: string; node: string; npmNode: string; bun: string; environment: string; startup: string }
+      if (!Array.isArray(record.path) || !record.path.every(part => typeof part === 'string')
+        || record.innerBash !== bash || record.node !== nodePath || record.npmNode !== nodePath
+        || record.bun !== bun || !/^[a-f0-9]{64}$/.test(record.environment) || !/^[a-f0-9]{64}$/.test(record.startup)) {
+        log.warn('suite_launcher_probe_record_refused', { bash: record.innerBash === bash, node: record.node === nodePath,
+          npmNode: record.npmNode === nodePath, bun: record.bun === bun }); return null
+      }
+      const vector = record.path.map(part => part === '<package>/node_modules/.bin' ? join(root, 'node_modules/.bin') : part)
+      // Ancestor bin coordinates remain exact external PATH inputs. Their
+      // presence is not installation evidence. They may not supply any member
+      // of the first-party launcher's measured executable closure below.
+      if (JSON.stringify(vector) !== JSON.stringify(prospectivePath)) return null
+      const tools = await measureTools(vector)
+      if (!tools || JSON.stringify(tools) !== JSON.stringify(admittedTools)) return null
+      const version = await spawnCapture([bun, '--version'], probe, HOST_SUITE_ENV, 5000)
+      const nodeVersion = await spawnCapture([node, '--version'], probe, HOST_SUITE_ENV, 5000)
+      if (!version.ok || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?\n?$/.test(version.stdout)
+        || !nodeVersion.ok || !/^v\d+\.\d+\.\d+\n?$/.test(nodeVersion.stdout)) return null
+      observations.push(digest(JSON.stringify(['bun-linux-system-selector-v1', record, tools, version.stdout.trim(), nodeVersion.stdout.trim()])))
+    } finally { await rm(probe, { recursive: true, force: true }) }
+  }
+  return observations[0] === observations[1] ? observations[0]! : null
+}
 
 /** Only commands whose launcher closure the host knows can carry portable proof.
  * An identical command string does not measure an arbitrary external runtime. */
@@ -279,13 +438,17 @@ async function portableCommandTools(worktree: string, command?: string): Promise
     if (!match || !PORTABLE_RUNNER_TUNING.has(match[1]!)) return null
   }
   if (executable === 'bun test') return []
-  if (executable !== 'bash scripts/run-tests.sh') return null
+  if (executable !== 'bash scripts/run-tests.sh' && executable !== 'bun run test') return null
   for (const path of PORTABLE_RUNNER_FILES) {
     if (!(await readFile(join(worktree, path))).equals(await readFile(join(hostDirectory, path)))) return null
   }
   const identities: string[] = []
-  for (const name of ['dirname', 'sysctl', 'nproc', 'find', 'sort', 'grep', 'tail', 'awk',
-    'mktemp', 'rm', 'sed', 'cat', 'wc', 'tr', 'sleep']) {
+  if (executable === 'bun run test') {
+    const launcher = await bunPackageLauncherIdentity(worktree, command)
+    if (!launcher) return null
+    identities.push(launcher)
+  }
+  for (const name of PORTABLE_RUNNER_TOOLS) {
     const path = Bun.which(name, { PATH: process.env.PATH ?? '' })
     if (!path && name !== 'sysctl' && name !== 'nproc') return null
     identities.push(digest(JSON.stringify([name, path ? await toolContentIdentity(path) : null])))

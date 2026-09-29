@@ -1,14 +1,14 @@
 ---
 title: Preserve publication ownership when salvaging a failed build
 group: trident
-status: open
+status: done
 priority: P0
 cutover: true
 ---
 
 # Salvage publication provenance
 
-Work state: #1217, in progress pending served acceptance. The locked pivot retains
+Tracked by #1217. The locked pivot retains
 the publication and pinned merge gates
 (`docs/plans/harness-orchestrator-pivot-2026-09-11.md:271-274`). Recovery
 must preserve completed work and provenance
@@ -49,7 +49,7 @@ evidence under the locked pivot
 - [x] Semantic mutations that discard a valid receipt or adopt a discovered PR
   fail the consuming tests. The restored implementation passes, including both
   TypeScript checks.
-- [ ] The exact merged revision is deployed and served on the target instance,
+- [x] The exact merged revision is deployed and served on the target instance,
   verified with positive and negative source controls: the served source contains
   corroborated creation receipt recording, and the superseded receipt-dropping
   salvage path is absent, with a known-present control checked by the same
@@ -69,14 +69,14 @@ the restarted host must independently observe the exact PR, OPEN at the same
 head on the same source and target branches, before recording `published_pr`.
 The publication, review and pinned merge gates still apply.
 
-- [ ] Restart after the response is saved but before PR inspection or ownership
+- [x] Restart after the response is saved but before PR inspection or ownership
   persistence resumes publication with exactly one creation, including repeated
   recovery. Verify: `trident/production-host-effects.test.ts`, `publication restart`.
-- [ ] Missing, corrupt, mismatched or uncorroborated response evidence cannot
+- [x] Missing, corrupt, mismatched or uncorroborated response evidence cannot
   authorize ownership or repeat creation. A malformed latest response cannot
   revive an older valid one. Verify: the same tests and the existing foreign-PR
   discovery refusal control.
-- [ ] A failed response write leaves the independently discovered PR unowned.
+- [x] A failed response write leaves the independently discovered PR unowned.
   Recovery never infers the lost response from a branch or matching head.
   Verify: `publication restart cannot invent a create response when its durable write failed`.
 
@@ -84,3 +84,5 @@ A crash before the successful response reaches durable storage remains
 unresolved. This slice does not establish interrupted native worker recovery,
 release native-child leases, or prove unattended recovery across an actual
 gateway, terminal-host or machine restart.
+
+Live acceptance: [sequence and publication witness](../as-built/trident-sequence-and-publication-live-acceptance.md).

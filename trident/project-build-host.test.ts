@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -97,6 +97,21 @@ test.each([
   })))
   expect(await host.deps.validateLegacyPendingRequest!(originalWorkers)).toEqual(allowed
     ? { kind: 'allow' } : { kind: 'unknown', detail: 'Original worker brief is not the reserved legacy artifact' })
+})
+
+test('review timing remains advisory when stage persistence fails and invokes the operation exactly once', async () => {
+  const f = await fixture()
+  const host = await createProjectBuildHost(f.options)
+  const persist = spyOn(f.options.production.store, 'recordStageEvent').mockRejectedValue(Error('unavailable stage sink'))
+  const identity = { head_sha: 'b'.repeat(40), round: 1, step_id: 'original-review' }
+  let calls = 0
+  const failure = Error('producer failure')
+  try {
+    expect(await host.deps.timeReview!(identity, async () => { calls++; return 'observed' })).toBe('observed')
+    await expect(host.deps.timeReview!(identity, async () => { calls++; throw failure })).rejects.toBe(failure)
+    expect(calls).toBe(2)
+    expect(persist).toHaveBeenCalledTimes(4)
+  } finally { persist.mockRestore() }
 })
 
 test('project build wrappers preserve accounting recovery without preparation or dispatch on restart', async () => {

@@ -310,25 +310,34 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         const dispatchDeadline = Math.min(deadline, clock.now() + DISPATCH_TIMEOUT_MS)
         let accepted = false
         let seen: SubagentObservation = { directory: 'absent', metaFiles: 0, matched: false }
-        while (!expired()) {
+        const hasCurrentOrUnreadableTrailer = async () => {
           try {
             const trailer = await stat(request.result.path)
             if (trailer.isFile()) {
-              if (projectTrailerStep(await readFile(request.result.path, 'utf8'), request) !== 'not-current-step') {
-                if (binding.onNativeDispatchEvidence) {
-                  recordBoundChild(await observeSubagents(subagents, `${request.role}: ${request.step_id}`, request, session.sessionId))
-                }
-                return { kind: 'turn-ended' as const }
-              }
+              return projectTrailerStep(await readFile(request.result.path, 'utf8'), request) !== 'not-current-step'
             } else {
               throw new Error('Claude trailer path is not a file')
             }
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
           }
+          return false
+        }
+        while (!expired()) {
+          if (await hasCurrentOrUnreadableTrailer()) {
+            if (binding.onNativeDispatchEvidence) {
+              recordBoundChild(await observeSubagents(subagents, `${request.role}: ${request.step_id}`, request, session.sessionId))
+            }
+            return { kind: 'turn-ended' as const }
+          }
           seen = await observeSubagents(subagents, `${request.role}: ${request.step_id}`, request, session.sessionId)
           recordBoundChild(seen)
-          if (seen.rateLimited) return { kind: 'blocked' as const, on: 'Claude child stopped at the provider rate limit (HTTP 429).' }
+          if (seen.rateLimited) {
+            // Provider observation performs I/O: a result may have arrived since
+            // the first probe. Its normal decoder keeps precedence over the error.
+            if (await hasCurrentOrUnreadableTrailer()) return { kind: 'turn-ended' as const }
+            return { kind: 'blocked' as const, on: 'Claude child stopped at the provider rate limit.' }
+          }
           // Terminal acknowledgement, parent consumption, and description-only
           // metadata cannot transfer ownership. A uniquely bound reader or
           // host-admitted independent writer permits another parent submission.

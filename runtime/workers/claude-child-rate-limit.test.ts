@@ -31,7 +31,15 @@ test('the exact child provider quota rejection is observed without classifying i
   expect(await f.run()).toBe(true)
 })
 
-for (const field of ['agentId', 'sessionId', 'isSidechain', 'type', 'isApiErrorMessage', 'error', 'apiErrorStatus', 'quotaLimits', 'requestId', 'message'] as const) {
+test('typed subscription quota errors need no quotaLimits enrichment', async () => {
+  const f = await fixture()
+  expect(await f.run([f.initial, { ...f.final, quotaLimits: undefined,
+    message: { ...f.final.message, stop_reason: 'stop_sequence' } }])).toBe(true)
+  expect(await f.run([f.initial, { ...f.final, quotaLimits: { status: 'allowed' } }])).toBe(false)
+  expect(await f.run([f.initial, { ...f.final, quotaLimits: null }])).toBe(false)
+})
+
+for (const field of ['agentId', 'sessionId', 'isSidechain', 'type', 'isApiErrorMessage', 'error', 'apiErrorStatus', 'requestId', 'message'] as const) {
   test(`child quota observation requires provider envelope ${field}`, async () => {
     const f = await fixture()
     expect(await f.run([f.initial, { ...f.final, [field]: undefined }])).toBe(false)
@@ -51,6 +59,9 @@ test('quoted errors, partial writes and a resumed child remain uncertain', async
   expect(await f.run([f.initial, { ...f.final, message: { ...f.final.message, model: 'fable' } }])).toBe(false)
   expect(await f.run([f.initial, { ...f.final, isApiErrorMessage: false,
     message: { role: 'assistant', model: 'fable', content: JSON.stringify(f.final) } }])).toBe(false)
+  expect(await f.run([f.initial, { ...f.final, error: 'authentication_failed' }])).toBe(false)
+  expect(await f.run([f.initial, { ...f.final, isApiErrorMessage: undefined, error: undefined,
+    message: { ...f.final.message, stop_reason: 'stop_sequence' } }])).toBe(false)
   expect(await f.run([f.initial, f.final], '')).toBe(false)
   expect(await f.run([f.initial, f.final], '\n{"partial":')).toBe(false)
   expect(await f.run([f.initial, f.final, { ...f.initial, message: { role: 'user', content: 'Continue' } }])).toBe(false)

@@ -53,9 +53,9 @@ import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agen
 import { routeCodegenCancel } from '@neutronai/gateway/codegen-cancel-router.ts'
 import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/codegen-core'
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
-import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
+import { projectInstallAvailableBytes, projectSuiteIdentityMeasurement } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { appendFile, chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -97,6 +97,7 @@ import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/trident/project-build-host.ts'
 import { spawnCapture as captureProcess, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
 import { runHostSuite } from '@neutronai/trident/host-suite.ts'
+import { buildTestStrategyDetail } from '@neutronai/trident/test-strategy.ts'
 import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
 import { VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { taskLedgerPath, workContextPath } from '@neutronai/trident/production-host-effects.ts'
@@ -979,6 +980,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   hostLedger?: boolean
   bunWorkspace?: boolean
   bunWorkspaceDefaultConfig?: boolean
+  bunPackageSuite?: boolean
   bunWorkspacePeer?: boolean
   bunWorkspaceSibling?: boolean
   manifest?: Record<string, unknown>
@@ -1089,11 +1091,14 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       // isolated store and package-local resolution, just like the production suite.
       await mkdir(join(repo, 'app'), { recursive: true })
       await mkdir(join(repo, 'vendor', 'package'), { recursive: true })
-      await writeFile(join(repo, '.gitignore'), 'node_modules/\n')
+      await writeFile(join(repo, '.gitignore'), 'node_modules/\n' + (options.bunPackageSuite ? '.env\n' : ''))
       await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: options.bunWorkspaceSibling ? ['app', 'cores/sdk'] : ['app'],
-        scripts: { postinstall: 'touch lifecycle-ran' } }))
+        ...(options.bunPackageSuite ? { dependencies: { 'fixture-dependency': 'file:vendor/dependency.tgz' } } : {}),
+        scripts: { postinstall: 'touch lifecycle-ran', ...(options.bunPackageSuite ? { test: 'bash scripts/run-tests.sh' } : {}) } }))
       if (!options.bunWorkspaceDefaultConfig) await writeFile(join(repo, 'bunfig.toml'), '[install]\nlinker = "isolated"\n')
-      await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js' }))
+      await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js',
+        ...(options.bunPackageSuite ? { bin: { 'suite-local-helper': 'helper.sh' } } : {}) }))
+      if (options.bunPackageSuite) await writeFile(join(repo, 'vendor/package/helper.sh'), '#!/bin/sh\nprintf "package-local helper\\n"\n', { mode: 0o755 })
       await writeFile(join(repo, 'vendor', 'package', 'index.js'), 'exports.message = "dependency consumed"\n')
       const packed = await spawnCapture(['tar', '-czf', 'dependency.tgz', 'package'], join(repo, 'vendor'))
       expect(packed.ok).toBe(true)
@@ -1123,6 +1128,16 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await rm(join(repo, 'lifecycle-ran'))
       await rm(join(repo, 'node_modules'), { recursive: true, force: true })
       await rm(join(repo, 'app', 'node_modules'), { recursive: true, force: true })
+      if (options.bunPackageSuite) {
+        for (const path of ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh']) {
+          await mkdir(dirname(join(repo, path)), { recursive: true })
+          await copyFile(new URL(`../../${path}`, import.meta.url), join(repo, path))
+        }
+        // Production nests retry worktrees below the original installed repo.
+        // Keep a populated ancestor bin without letting it supply launcher tools.
+        await mkdir(join(repo, 'node_modules/.bin'), { recursive: true })
+        await writeFile(join(repo, 'node_modules/.bin/ancestor-only-tool'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+      }
     }
     await writeFile(join(repo, 'NOTES.md'), 'seed\n')
     if (options.spec) await writeFile(join(repo, 'SPEC.md'), '# Project specification\n\nRecord and verify notes.\n')
@@ -1224,9 +1239,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       const identity = { agentId: 'quota', sessionId: 'e2e-session', isSidechain: true }
       await writeFile(join(directory, 'agent-quota.jsonl'), [
         { ...identity, type: 'user', message: { role: 'user', content: args.prompt } },
-        { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [] },
-          isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429,
-          quotaLimits: { status: 'rejected' }, requestId: 'quota-request' },
+        { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [], stop_reason: 'stop_sequence' },
+          isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-request' },
       ].map(row => JSON.stringify(row)).join('\n') + '\n')
       world.dispatches.push({ role: request.role, step_id: request.step_id, schema: request.result.schema, wrote: [] })
     } }, acquireTurn: async () => () => {} }
@@ -1510,6 +1524,50 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   const host = await createProjectBuildHost(options)
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
+
+test('missing project CI setup refuses before spending work, then an explicit binding completes the same run', async () => {
+  const f = await fixture()
+  const declaration = join(f.dir, 'project-repos.json')
+  await rm(declaration)
+  await expect(drive(f)).rejects.toThrow('requires ciWorkflow for selected repo "project" in project-repos.json')
+  expect(f.commands).toEqual([])
+  expect(f.world.dispatches).toEqual([])
+  expect(f.context.attempts.list(f.row.id)).toEqual([])
+  expect(f.store.get(f.row.id)!.worktree).toBeNull()
+  await writeFile(declaration, JSON.stringify({
+    repos: [{ name: 'project', path: 'code', remote: null, ciWorkflow: 'ci.yml' }], default: 'project',
+  }))
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+  expect(dispatchRoles(f.world)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
+}, 60_000)
+
+test.each(['red', 'moved-head', 'malformed-configuration'] as const)(
+  'explicit project CI binding preserves readiness refusal: %s', async fault => {
+    const f = await fixture()
+    const runHost = f.context.runHost
+    f.context.runHost = async (...args) => {
+      const [argv] = args
+      const observed = await runHost(...args)
+      if (fault === 'moved-head' && argv[0] === 'gh' && argv.at(-1) === 'headRefOid,mergeable') {
+        return { ...observed, stdout: JSON.stringify({ headRefOid: 'f'.repeat(40), mergeable: 'MERGEABLE' }) }
+      }
+      if (fault === 'malformed-configuration' && argv[0] === 'gh' && argv[2]?.includes('/protection/required_status_checks')) {
+        return { ...observed, stdout: '{}' }
+      }
+      return observed
+    }
+    if (fault === 'red') f.github.checkRuns.check_runs[0]!.conclusion = 'FAILURE'
+    const outcome = await drive(f)
+    expect(outcome.kind, why(f, outcome)).toBe(fault === 'red' ? 'blocked' : 'unknown')
+    expect(f.github.prs[0]!.state).toBe('OPEN')
+    expect(f.commands.some(argv => argv[0] === 'gh' && argv[2] === 'merge')).toBe(false)
+    if (fault === 'red') {
+      // Settled red enters the existing review/fix path with its CI veto intact.
+      expect(dispatchRoles(f.world)).toContain('review')
+    } else expect(dispatchRoles(f.world)).toEqual(['plan', 'build'])
+  }, 60_000)
 
 test.each(['draft', 'suggestion', 'busy', 'unreadable', 'empty'] as const)('adopted project composer %s preserves input or completes the build through Herdr', async state => {
   const { HerdrHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts')
@@ -2352,6 +2410,112 @@ test('attempt accounting consumes a full build with missing metadata and attribu
   expect(intervals.map(value => value.stage)).toContain('dependency-preparation')
   for (const interval of intervals) expect(interval.ended_at).toBeGreaterThanOrEqual(interval.started_at)
 })
+
+test.each(['standalone', 'synthesis', 'standalone-throws'] as const)('review stage measures the admitted producer join wall interval: %s finishes last', async last => {
+  const f = await fixture()
+  f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
+  const options = await f.prepare()
+  const epoch = Date.now()
+  let now = epoch, settled = false
+  const clock = spyOn(Date, 'now').mockImplementation(() => now)
+  const latch = () => {
+    let release!: () => void
+    return { promise: new Promise<void>(resolve => { release = resolve }), release: () => release() }
+  }
+  const holds = { standalone: latch(), seats: latch(), synthesis: latch() }
+  const entered = latch(), synthesisEntered = latch(), standaloneDone = latch(), panelDone = latch()
+  const starts: string[] = [], ends: string[] = []
+  const events = (kind: string) => f.store.stageEvents(f.row.id).filter(event => event.stage === kind)
+    .map(event => JSON.parse(event.meta!)).filter(event => event.stage === 'review-and-synthesis')
+  const execute = async <T>(seat: string, operation: () => Promise<T>): Promise<T> => {
+    starts.push(seat)
+    // The durable interval precedes every producer, including synthesis.
+    expect(events('build-stage-started')).toHaveLength(1)
+    expect(events('build-stage-ended')).toEqual([])
+    if (seat === 'synthesis') {
+      expect(ends.sort()).toEqual(expect.arrayContaining(['review_adversarial', 'review_rubric']))
+      synthesisEntered.release()
+    } else if (starts.length === 3) entered.release()
+    await holds[seat === 'standalone' || seat === 'synthesis' ? seat : 'seats'].promise
+    try {
+      if (seat === 'standalone' && last === 'standalone-throws') throw Error('scripted standalone failure')
+      return await operation()
+    } finally {
+      ends.push(seat)
+      if (seat === 'standalone') standaloneDone.release()
+    }
+  }
+  const runner = options.substrate.inRepl!
+  options.substrate.inRepl = { ...runner, run: (...args) => args[0].role === 'review' && args[0].result.schema !== 'verdict'
+    ? execute('standalone', () => runner.run(...args)) : runner.run(...args) }
+  const runnerFor = options.policy.review!.runnerFor
+  options.policy.review!.runnerFor = (...args) => {
+    const selected = runnerFor(...args)
+    return selected && { ...selected, run: (...runArgs) => execute(args[1].id, () => selected.run(...runArgs)) }
+  }
+  let running: Promise<ProjectBuildOutcome> | undefined
+  let deadline: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    deadline = setTimeout(() => reject(Error(`Review timing barrier incomplete: ${starts}; ${ends}`)), 10_000)
+  })
+  const wait = (barrier: ReturnType<typeof latch>) => Promise.race([barrier.promise, timeout])
+  try {
+    const host = await createProjectBuildHost(options)
+    const artifact = host.deps.reviewArtifact!
+    host.deps.reviewArtifact = async (...args) => {
+      expect(events('build-stage-started')).toEqual([])
+      const result = await artifact(...args)
+      now = epoch + 200
+      return result
+    }
+    const panel = host.deps.observeReview
+    host.deps.observeReview = async (...args) => {
+      try { return await panel(...args) } finally { panelDone.release() }
+    }
+    const ci = host.deps.reviewCi!
+    host.deps.reviewCi = async (...args) => {
+      // Post-join CI must not inflate the producer interval.
+      if (starts.length) now = epoch + 900
+      return ci(...args)
+    }
+    running = host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+      .then(outcome => { settled = true; return outcome })
+    await wait(entered)
+    expect(starts.sort()).toEqual(['review_adversarial', 'review_rubric', 'standalone'])
+    now = epoch + 220
+    holds.seats.release()
+    await wait(synthesisEntered)
+    now = epoch + 240
+    holds[last === 'synthesis' ? 'standalone' : 'synthesis'].release()
+    await wait(last === 'synthesis' ? standaloneDone : panelDone)
+    expect(events('build-stage-ended')).toEqual([])
+    expect(settled).toBe(false)
+    now = epoch + 270
+    holds[last === 'synthesis' ? 'synthesis' : 'standalone'].release()
+    const outcome = await running
+    expect(outcome.kind, why(f, outcome)).toBe(last === 'standalone-throws' ? 'blocked' : 'merged')
+    if (last === 'standalone-throws') expect(outcome).toMatchObject({ on: expect.stringContaining('scripted standalone failure') })
+    const intervals = events('build-stage-ended')
+    expect(events('build-stage-started')).toHaveLength(1)
+    expect(intervals).toHaveLength(1)
+    const standalone = f.context.attempts.list(f.row.id).find(row => row.role === 'review' && row.review_seat === null)!
+    expect(intervals[0]).toMatchObject({ run_id: f.row.id, task_id: `${f.row.id}:task:0`,
+      head_sha: standalone.head_sha, step_id: standalone.step_id, round: 1,
+      started_at: epoch + 200, ended_at: epoch + 270 })
+    // Concurrent producer durations overlap; wall time is the enclosing interval.
+    expect(intervals[0].ended_at - intervals[0].started_at).toBe(70)
+    const attempts = f.context.attempts.list(f.row.id).filter(row => row.role === 'review' || row.role === 'synthesis')
+    expect(attempts.reduce((sum, row) => sum + row.ended_at! - row.started_at!, 0)).toBeGreaterThan(70)
+    expect(attempts.every(row => row.started_at! >= intervals[0].started_at && row.ended_at! <= intervals[0].ended_at)).toBe(true)
+    expect(starts).toHaveLength(4)
+    expect(ends).toHaveLength(4)
+  } finally {
+    for (const hold of Object.values(holds)) hold.release()
+    await running
+    clearTimeout(deadline)
+    clock.mockRestore()
+  }
+}, 30_000)
 
 test.each(['valid', 'wrong-run'] as const)('attempt accounting retains actual headless transport usage with %s result identity', async codexReview => {
   const f = await fixture({ codexReview })
@@ -3349,8 +3513,10 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
   expect(f.world.dispatches).toHaveLength(0)
 }, 120_000)
 
-for (const changed of ['none', 'head', 'dependencies', 'environment', 'strategy', 'subset', 'legacy', 'red', 'invalidated'] as const)
-test(`prepared cross-run suite proof handles ${changed} inputs in a distinct retry worktree`, async () => {
+for (const launcher of ['bare', 'package'] as const)
+for (const changed of ['none', 'head', 'dependencies', 'environment', 'strategy', 'subset', 'legacy', 'red', 'invalidated',
+  ...(launcher === 'package' ? ['hooks', 'config', 'tool-resolution', 'bash-shadow', 'node-absent', 'startup-env', 'runner', 'inner-env'] as const : [])] as const)
+test(`prepared cross-run ${launcher} suite proof handles ${changed} inputs in a distinct retry worktree`, async () => {
   // The outer CI shard selects this test, not the nested project's full suite.
   const outerShard = process.env.NEUTRON_TEST_SHARD
   cleanups.push(() => {
@@ -3359,8 +3525,13 @@ test(`prepared cross-run suite proof handles ${changed} inputs in a distinct ret
   })
   delete process.env.NEUTRON_TEST_SHARD
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
-  const f = await fixture({ bunWorkspace: true, bunWorkspaceDefaultConfig: true, dispatchTask: task,
+  const f = await fixture({ bunWorkspace: true, bunWorkspaceDefaultConfig: true, bunPackageSuite: launcher === 'package', dispatchTask: task,
     testStrategy: 'TEST EXECUTION: run the card regression.\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n' })
+  if (launcher === 'package') {
+    f.input.test_strategy = buildTestStrategyDetail(f.repo, { cores: 2, active_runs: 1, mem_available_bytes: 4 * 1024 ** 3, base_branch: 'main' }).block
+    expect(f.input.test_strategy).toContain('bun run test')
+    expect(f.input.test_strategy).toContain('export NEUTRON_TEST_JOBS=')
+  }
   let suites = 0
   const original = f.context.runSuite!
   f.context.runSuite = async (...args) => { suites++; return original(...args) }
@@ -3368,7 +3539,12 @@ test(`prepared cross-run suite proof handles ${changed} inputs in a distinct ret
   const sourceWorktree = f.store.get(f.row.id)!.worktree!
   await writeFile(join(sourceWorktree, 'app', 'proof.test.ts'),
     'import { expect, test } from "bun:test"\nimport { message } from "fixture-dependency"\n'
-    + `test("installed dependency is consumed", () => expect(message).toBe(${JSON.stringify(changed === 'red' ? 'wrong dependency' : 'dependency consumed')}))\n`)
+    + `test("installed dependency is consumed", () => expect(message).toBe(${JSON.stringify(changed === 'red' ? 'wrong dependency' : 'dependency consumed')}))\n`
+    + (launcher === 'package' ? 'test("package PATH is preserved", () => expect(Bun.spawnSync(["suite-local-helper"]).stdout.toString().trim()).toBe("package-local helper"))\n'
+      // Bun 1.3.13 omits its file-count summary when every test is filtered out.
+      // This real passing test gives the unmodified runner's discovery probe a
+      // summary; the complete suite still executes every fixture test afterward.
+      + 'test("__neutron_runtests_no_match__ fixture discovery control", () => expect(true).toBe(true))\n' : ''))
   expect((await spawnCapture(['git', 'add', 'app/proof.test.ts'], sourceWorktree)).ok).toBe(true)
   expect((await spawnCapture(['git', 'commit', '-m', 'test: real portable suite'], sourceWorktree)).ok).toBe(true)
   const first = await createProjectBuildHost(preparedFirst)
@@ -3417,14 +3593,63 @@ test(`prepared cross-run suite proof handles ${changed} inputs in a distinct ret
   }
   const prepared = await f.prepare()
   const destination = f.store.get(dispatched.run.id)!.worktree!
+  if (launcher === 'package') {
+    expect(destination.startsWith(join(f.repo, '.trident-worktrees') + '/')).toBe(true)
+    expect((await stat(join(f.repo, 'node_modules/.bin'))).isDirectory()).toBe(true)
+  }
   expect(destination).not.toBe(sourceWorktree)
   expect((await stat(destination)).ino).not.toBe(sourceInode)
   if (changed === 'head') expect((await spawnCapture(['git', 'commit', '--allow-empty', '-m', 'test: moved suite revision'], destination)).ok).toBe(true)
   if (changed === 'dependencies') await writeFile(join(destination, 'node_modules', 'proof-input'), 'changed installed input')
+  if (changed === 'hooks') {
+    const manifest = JSON.parse(await readFile(join(destination, 'package.json'), 'utf8'))
+    manifest.scripts.pretest = 'true'
+    await writeFile(join(destination, 'package.json'), JSON.stringify(manifest))
+  }
+  if (changed === 'config') await writeFile(join(destination, 'bunfig.toml'), '[run]\nshell = "system"\n')
+  if (changed === 'runner') await appendFile(join(destination, 'scripts/run-tests.sh'), '\n# changed runner\n')
+  if (changed === 'inner-env') await writeFile(join(destination, '.env'), 'ENV=/unread/fixture-startup\n')
+  if (changed === 'tool-resolution' || changed === 'bash-shadow') {
+    // An ancestor PATH shadow must invalidate even though it is outside the
+    // destination's dependency tree and its Git revision has not moved.
+    const shell = changed === 'tool-resolution' ? 'sh' : 'bash'
+    const wrapper = join(f.repo, `node_modules/.bin/${shell}`), marker = join(f.dir, 'launcher-shadow-ran')
+    const markerArg = `'${marker.replaceAll("'", "'\\''")}'`
+    await writeFile(wrapper, `#!/bin/sh\nprintf 'executed' > ${markerArg}\nexec /bin/${shell} "$@"\n`, { mode: 0o755 })
+    // Prove the wrapper really writes before asking measurement to refuse it.
+    expect((await spawnCapture([wrapper, '-c', 'true'], destination)).ok).toBe(true)
+    expect(await readFile(marker, 'utf8')).toBe('executed')
+    await rm(marker)
+    const observation = await projectSuiteIdentityMeasurement(destination, undefined, 'bun run test')
+    expect(observation?.identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(observation?.portableIdentity).toBeUndefined()
+    expect(await Bun.file(marker).exists()).toBe(false)
+  }
+  if (changed === 'node-absent') {
+    const directory = join(f.dir, 'without-node'), previous = process.env.PATH
+    await mkdir(directory)
+    for (const name of ['git', 'bash', 'sh', 'python3', 'bun', 'dirname', 'sysctl', 'nproc', 'find', 'sort', 'grep', 'tail',
+      'awk', 'mktemp', 'rm', 'sed', 'cat', 'wc', 'tr', 'sleep', 'head', 'date', 'readlink']) {
+      const selected = Bun.which(name)
+      if (selected) await symlink(selected, join(directory, name))
+    }
+    cleanups.push(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous })
+    process.env.PATH = directory
+    expect(Bun.which('node', { PATH: directory })).toBeNull()
+  }
+  if (changed === 'startup-env') {
+    const previous = process.env.ENV
+    cleanups.push(() => { if (previous === undefined) delete process.env.ENV; else process.env.ENV = previous })
+    process.env.ENV = '/unread/fixture-startup'
+  }
+  if (['hooks', 'config', 'runner'].includes(changed)) {
+    expect((await spawnCapture(['git', 'add', '.'], destination)).ok).toBe(true)
+    expect((await spawnCapture(['git', 'commit', '-m', 'test: changed launcher inputs'], destination)).ok).toBe(true)
+  }
   const host = await createProjectBuildHost(prepared)
   const measured = await host.deps.measure()
   if (measured.kind !== 'known') throw Error('Expected measured retry')
-  if (changed === 'head') {
+  if (['head', 'hooks', 'config', 'runner'].includes(changed)) {
     // The review gate additionally binds the build checkpoint. A moved head
     // cannot inherit that authority even after publication acquires fresh proof.
     expect(await host.deps.reviewSuite!(measured.value, 1)).toMatchObject({ kind: 'unknown' })
@@ -3435,6 +3660,7 @@ test(`prepared cross-run suite proof handles ${changed} inputs in a distinct ret
     if (assessment.kind === 'known') expect(assessment.findings.length).toBe(changed === 'red' ? 1 : 0)
   }
   expect(suites).toBe(changed === 'none' ? 1 : 2)
+  if (changed === 'bash-shadow') expect(await readFile(join(f.dir, 'launcher-shadow-ran'), 'utf8')).toBe('executed')
   const adopted = JSON.parse(f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-suite-receipt').at(-1)!.meta!)
   expect(adopted.receipt).toMatchObject({ runId: dispatched.run.id, head: measured.value.head, round: 1, scope: 'full-suite' })
   if (changed === 'none') expect(adopted.adoptedFrom).toEqual({ runId: f.row.id, eventId: source.id, round: 1 })
@@ -4974,18 +5200,21 @@ test(`consuming host admission overlaps without early dispatch or cleanup: ${fir
   }
 }, 60_000)
 
-test.each(['readiness', 'ci', 'artifact'] as const)('unavailable admission prevents every review producer in the consuming host: %s', async stop => {
+test.each(['readiness', 'suite', 'ci', 'artifact'] as const)('unavailable admission prevents every review producer in the consuming host: %s', async stop => {
   const started: string[] = []
   const f = await fixture({ reviewChild: async (_request, seat) => { started.push(seat) } })
   f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
   const host = await createProjectBuildHost(await f.prepare())
   if (stop === 'readiness') host.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'fixture readiness unavailable' })
+  if (stop === 'suite') host.deps.reviewSuite = async () => ({ kind: 'unknown', detail: 'fixture suite unavailable' })
   if (stop === 'ci') host.deps.reviewCi = async () => ({ kind: 'blocked', on: 'fixture CI unavailable' })
   if (stop === 'artifact') host.deps.reviewArtifact = async () => ({ kind: 'unknown', detail: 'fixture artifact unavailable' })
   const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind).toBe(stop === 'ci' ? 'blocked' : 'unknown')
   expect(started).toEqual([])
   expect(f.world.dispatches.map(call => call.role)).toEqual(['plan', 'build'])
+  expect(f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-stage-started' || event.stage === 'build-stage-ended')
+    .map(event => JSON.parse(event.meta!)).filter(event => event.stage === 'review-and-synthesis')).toEqual([])
 }, 30_000)
 
 /** Same task, providers, gates and scripted verdicts in both schedules. The
@@ -6140,13 +6369,15 @@ test('an unavailable panel seat stops by configured seat and never synthesizes o
   expect(originMain.stdout).toBe(f.baseSha)
 }, 300_000)
 
-test('a provider rate-limited synthesis stops with its cause without a trailer, replay, fix or merge', async () => {
+test('a typed subscription quota-limited synthesis stops without quotaLimits enrichment, trailer, replay, fix or merge', async () => {
   const f = await fixture({ rateLimitedSynthesis: true })
   const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator',
-    on: 'infra-only: Review synthesis unavailable: Review seat synthesis: Claude child stopped at the provider rate limit (HTTP 429).' })
+    on: 'infra-only: Review synthesis unavailable: Review seat synthesis: Claude child stopped at the provider rate limit.' })
   expect(dispatchRoles(f.world)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
   expect(f.world.dispatches.find(call => call.role === 'synthesis')?.wrote).toEqual([])
+  expect(f.admission.listLeases('liveChild').map(lease => JSON.parse(lease.workRef)))
+    .toEqual([[f.row.id, f.world.dispatches.find(call => call.role === 'synthesis')!.step_id]])
   expect(f.github.prs).toHaveLength(1)
   expect(f.github.prs[0]!.state).toBe('OPEN')
   const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
@@ -7207,6 +7438,7 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
   // run, so G055 answered `unknown` — fail-closed — for every local build. That is
   // the fix this case guards; see `build-host.ts`'s `reviewCi`.
   const f = await fixture({ mergeMode: 'local' })
+  await rm(join(f.dir, 'project-repos.json'))
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(dispatchRoles(f.world))

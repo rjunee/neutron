@@ -210,8 +210,9 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
   }
   const readiness = host.deps.reviewReadiness!
   host.deps.reviewReadiness = (...args) => timed('review-readiness-wait', () => readiness(...args))
-  const reviewGate = host.deps.reviewGate
-  host.deps.reviewGate = (...args) => timed('review-and-synthesis', () => reviewGate(...args))
+  host.deps.timeReview = (identity, operation) => accounting.interval('review-and-synthesis', {
+    run_id: config.runId, task_id: taskId(), ...identity,
+  }, operation)
   const publishGate = host.deps.publishGate
   host.deps.publishGate = (...args) => timed('publication-proof', () => publishGate(...args))
   const mergeGate = host.deps.mergeGate

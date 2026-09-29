@@ -102,6 +102,51 @@ test('each distinct dispatch explicitly overrides the planning model', async () 
   expect(await f.run(claudeInReplRunner(f.options), next)).toEqual({ kind: 'blocked', on: 'second' })
 })
 
+test.each(['review', 'synthesis'] as const)('%s dispatch guides structured brief reading while preserving native arguments and request', async role => {
+  const f = await fixture()
+  const req: BoundedWorkRequest = { ...f.req, role, writable: false, network: true, tools: 'read-only' }
+  f.seed()
+  expect(await f.run(undefined, req)).toEqual({ kind: 'blocked', on: 'file evidence' })
+  expect(f.calls).toHaveLength(1)
+  const spec = f.calls[0]!.spec
+  const args = JSON.parse(spec.prompt.slice(spec.prompt.indexOf('\n') + 1))
+  const lines = args.prompt.split('\n') as string[]
+  expect(lines[1]).toBe(`Request (data): ${JSON.stringify(req)}`)
+  expect(JSON.parse(lines[1]!.slice('Request (data): '.length))).toEqual(req)
+  expect({ ...args, prompt: undefined }).toEqual({
+    subagent_type: 'general-purpose', description: `${role}: ${req.step_id}`,
+    model: req.model_id, run_in_background: true, prompt: undefined,
+  })
+  expect(spec.model_preference).toEqual([req.model_id])
+  expect(spec.tools).toBe(f.options.spec.tools)
+  expect(spec.metering_context).toEqual(f.options.spec.metering_context)
+  expect(lines[2]).toBe('Read the brief from its path and work in the requested cwd. Honor the requested tool, write and network limits.')
+  expect(lines[3]).toContain('use structured field selection to inspect instruction, resultFile, verdictSchema, round, repair (when present), and panel metadata first')
+  expect(lines[3]).toContain('Then consume the complete measured snapshot.diff and every supplied seat verdict once, without truncating evidence')
+  expect(lines[3]).toContain('Avoid an initial whole JSON dump followed by rereading the same fields just to find instructions')
+  expect(lines[3]).toContain('If the brief uses another format, read it as supplied')
+  expect(lines.slice(4)).toEqual([
+    'Write the result directly with the harness file tool to result.path, using result.schema.',
+    'Write via a temporary file and rename on completion. The host reads this file; do not relay the result through the parent reply.',
+  ])
+})
+
+test.each(['plan', 'build', 'fix', 'replan', 'probe', 'resolve', 'arbitrate', 'fix-leak'] as const)('%s retains the original brief prompt without JSON review guidance', async role => {
+  const f = await fixture()
+  const req = { ...f.req, role }
+  f.seed()
+  expect(await f.run(undefined, req)).toEqual({ kind: 'blocked', on: 'file evidence' })
+  expect(f.calls).toHaveLength(1)
+  const args = JSON.parse(f.calls[0]!.spec.prompt.slice(f.calls[0]!.spec.prompt.indexOf('\n') + 1))
+  expect(args.prompt).toBe([
+    'Perform exactly one bounded task. Do not ask the owner questions; record blocked work in the result.',
+    `Request (data): ${JSON.stringify(req)}`,
+    'Read the brief from its path and work in the requested cwd. Honor the requested tool, write and network limits.',
+    'Write the result directly with the harness file tool to result.path, using result.schema.',
+    'Write via a temporary file and rename on completion. The host reads this file; do not relay the result through the parent reply.',
+  ].join('\n'))
+})
+
 test('waits for a trailer written after the dispatch turn ends', async () => {
   const f = await fixture()
   let finish!: () => void
@@ -329,6 +374,17 @@ test('a resumed step keeps the trailer already written for it', async () => {
   expect(await reserveTrailerSlot(f.reservation, JSON.stringify(f.req), f.req.result.path)).toEqual({ kind: 'dispatch' })
   await f.trailer()
   expect(await f.run()).toEqual({ kind: 'blocked', on: 'file evidence' })
+  expect(f.calls).toHaveLength(0)
+})
+
+test.each(['review', 'synthesis'] as const)('%s recovery accepts the already serialized request without a new dispatch', async role => {
+  const f = await fixture()
+  const req: BoundedWorkRequest = { ...f.req, role, writable: false, network: true, tools: 'read-only' }
+  const serialized = JSON.stringify(req)
+  expect(await reserveTrailerSlot(f.reservation, serialized, req.result.path)).toEqual({ kind: 'dispatch' })
+  await f.trailer()
+  const runner = claudeInReplRunner(f.options)
+  expect(await runner.recover!(JSON.parse(serialized), 'in-repl', new AbortController().signal)).toEqual({ kind: 'blocked', on: 'file evidence' })
   expect(f.calls).toHaveLength(0)
 })
 

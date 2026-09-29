@@ -276,6 +276,147 @@ test('portable Bun configuration permits confined tracked first-party preloads a
   expect(external?.portableIdentity).toBeUndefined()
 })
 
+async function packageLauncherFixture() {
+  const { root, git } = await fixture()
+  await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'launcher-fixture', version: '1.0.0', scripts: { test: 'bash scripts/run-tests.sh' } }))
+  for (const path of ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh', 'scripts/ci/verify-workspace-deps.ts']) {
+    await mkdir(join(root, path, '..'), { recursive: true })
+    await copyFile(new URL(`../../${path}`, import.meta.url), join(root, path))
+  }
+  await git('add', '.')
+  await git('commit', '-qm', 'package launcher fixture')
+  const command = 'export NEUTRON_TEST_JOBS=1\nexport NEUTRON_TEST_CONCURRENCY=2\nbun run test'
+  return { root, git, command }
+}
+
+test('portable package launcher observes its inner closure and retains package PATH semantics', async () => {
+  const { root, git, command } = await packageLauncherFixture()
+  const first = await measureSuiteIdentity(root, undefined, command)
+  expect(first?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  const retry = `${root}-retry`; roots.push(retry)
+  await git('worktree', 'add', '--detach', retry, 'HEAD')
+  expect((await measureSuiteIdentity(retry, undefined, command))?.portableIdentity).toBe(first!.portableIdentity)
+})
+
+test('nested package measurement refuses ancestor shell execution before launching its probe', async () => {
+  const { root, git, command } = await packageLauncherFixture()
+  const nested = join(root, '.trident-worktrees/retry')
+  await git('worktree', 'add', '--detach', nested, 'HEAD')
+  await mkdir(join(root, 'node_modules/.bin'), { recursive: true })
+  await writeFile(join(root, 'node_modules/.bin/unrelated'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  const before = await measureSuiteIdentity(nested, undefined, command)
+  expect(before?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  const marker = join(root, 'node_modules/shadow-executed')
+  const wrapper = join(root, 'node_modules/.bin/bash')
+  await writeFile(wrapper, `#!/bin/sh\nprintf 'executed' > '${marker}'\nexec /bin/bash "$@"\n`, { mode: 0o755 })
+  expect((await spawnCapture([wrapper, '-c', 'true'], nested)).ok).toBe(true)
+  expect(await readFile(marker, 'utf8')).toBe('executed')
+  await rm(marker)
+  expect((await measureSuiteIdentity(nested, undefined, command))?.portableIdentity).toBeUndefined()
+  expect(await Bun.file(marker).exists()).toBe(false)
+  await rm(wrapper)
+  expect((await measureSuiteIdentity(nested, undefined, command))?.portableIdentity).toBe(before!.portableIdentity)
+})
+
+type PackageFixtureEnvironmentKey = 'ENV' | 'BASHOPTS' | 'SHELLOPTS' | 'BUN_OPTIONS' | 'npm_config_script_shell' | 'PATH'
+function preservePackageFixtureEnvironment(name: PackageFixtureEnvironmentKey | undefined) {
+  const previous = name === undefined ? undefined : process.env[name]
+  return () => {
+    if (name === undefined) return
+    if (previous === undefined) delete process.env[name]
+    else process.env[name] = previous
+  }
+}
+
+test('package fixture cleanup restores present and absent keys without restoring unrelated input', () => {
+  const restoreOuter = preservePackageFixtureEnvironment('ENV')
+  const unrelated = process.env.LAUNCHER_FIXTURE_INPUT
+  try {
+    for (const original of ['original fixture input', undefined]) {
+      if (original === undefined) delete process.env.ENV
+      else process.env.ENV = original
+      process.env.LAUNCHER_FIXTURE_INPUT = 'before cleanup'
+      const restore = preservePackageFixtureEnvironment('ENV')
+      process.env.ENV = 'changed fixture input'
+      process.env.LAUNCHER_FIXTURE_INPUT = 'during fixture'
+      restore()
+      if (original === undefined) expect(process.env.ENV).toBeUndefined()
+      else expect(process.env.ENV).toBe(original)
+      expect(Object.hasOwn(process.env, 'ENV')).toBe(original !== undefined)
+      expect(process.env.LAUNCHER_FIXTURE_INPUT).toBe('during fixture')
+    }
+  } finally {
+    restoreOuter()
+    if (unrelated === undefined) delete process.env.LAUNCHER_FIXTURE_INPUT
+    else process.env.LAUNCHER_FIXTURE_INPUT = unrelated
+  }
+})
+
+for (const changed of ['pretest', 'posttest', 'config', 'dotenv', 'ENV', 'BASHOPTS', 'SHELLOPTS',
+  'BUN_OPTIONS', 'npm_config_script_shell', 'bash-shadow', 'sh-shadow', 'zsh-shadow', 'node-absent', 'root-tool-shadow'] as const)
+test(`portable package launcher refuses ${changed} and accepts its unchanged sibling`, async () => {
+  const { root, git, command } = await packageLauncherFixture()
+  const before = await measureSuiteIdentity(root, undefined, command)
+  expect(before?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  const environmentKey: PackageFixtureEnvironmentKey | undefined =
+    changed === 'ENV' || changed === 'BASHOPTS' || changed === 'SHELLOPTS' || changed === 'BUN_OPTIONS' || changed === 'npm_config_script_shell'
+      ? changed : changed === 'node-absent' || (changed.endsWith('-shadow') && changed !== 'root-tool-shadow') ? 'PATH' : undefined
+  const originalPath = process.env.PATH
+  const restoreEnvironment = preservePackageFixtureEnvironment(environmentKey)
+  try {
+    if (changed === 'pretest' || changed === 'posttest') {
+      const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
+      manifest.scripts[changed] = 'true'
+      await writeFile(join(root, 'package.json'), JSON.stringify(manifest))
+      await git('add', 'package.json'); await git('commit', '-qm', 'lifecycle fixture')
+    } else if (changed === 'config' || changed === 'dotenv') {
+      await writeFile(join(root, changed === 'config' ? 'bunfig.toml' : '.env'),
+        changed === 'config' ? '[run]\nshell = "bun"\n' : 'BASH_ENV=/unread/fixture-startup\n')
+      await git('add', '.'); await git('commit', '-qm', 'launcher configuration fixture')
+    } else if (changed.endsWith('-shadow') || changed === 'node-absent') {
+      const directory = changed === 'root-tool-shadow' ? join(root, 'node_modules/.bin')
+        : await mkdtemp(join(tmpdir(), 'launcher-candidate-'))
+      if (changed !== 'root-tool-shadow') roots.push(directory)
+      await mkdir(directory, { recursive: true })
+      if (changed === 'node-absent') {
+        for (const name of ['git', 'bash', 'sh', 'python3', 'bun']) {
+          const selected = Bun.which(name)!
+          await symlink(selected, join(directory, name))
+        }
+        process.env.PATH = directory
+      } else {
+        const name = changed === 'root-tool-shadow' ? 'awk' : changed.split('-')[0]!
+        await writeFile(join(directory, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+        if (changed !== 'root-tool-shadow') process.env.PATH = `${directory}:${originalPath}`
+      }
+    } else process.env[changed] = 'uncharacterized-fixture-input'
+    const refused = await measureSuiteIdentity(root, undefined, command)
+    expect(refused?.identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(refused?.portableIdentity).toBeUndefined()
+  } finally {
+    restoreEnvironment()
+  }
+})
+
+test('package closure excludes inherited BASH_ENV and binds a measured ordinary environment change', async () => {
+  const { root, command } = await packageLauncherFixture()
+  const before = await measureSuiteIdentity(root, undefined, command)
+  expect(before?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  const previous = process.env.BASH_ENV, input = process.env.LAUNCHER_FIXTURE_INPUT
+  try {
+    process.env.BASH_ENV = '/unread/fixture-startup'
+    expect((await measureSuiteIdentity(root, undefined, command))?.portableIdentity).toBe(before!.portableIdentity)
+    process.env.LAUNCHER_FIXTURE_INPUT = 'changed controlled input'
+    const after = await measureSuiteIdentity(root, undefined, command)
+    expect(after?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+    expect(after?.portableIdentity).not.toBe(before!.portableIdentity)
+    expect(JSON.stringify(after)).not.toContain('changed controlled input')
+  } finally {
+    if (previous === undefined) delete process.env.BASH_ENV; else process.env.BASH_ENV = previous
+    if (input === undefined) delete process.env.LAUNCHER_FIXTURE_INPUT; else process.env.LAUNCHER_FIXTURE_INPUT = input
+  }
+})
+
 test('manifest resolution refuses incomplete successful output but accepts a complete empty mapping', async () => {
   const { root } = await fixture()
   const toolDir = await mkdtemp(join(tmpdir(), 'suite-resolution-tool-'))
