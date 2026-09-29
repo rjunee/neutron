@@ -15,11 +15,13 @@ import { reconcileClaudeNativeDispatches, type ClaudeNativeDispatchReconcileOpti
 import { reapProjectBuildState, PROJECT_BUILD_STATE_RETENTION_MS } from '../project-build-state-reaper.ts'
 import { buildOpenGraphComposer } from '../../composer.ts'
 import * as recoveryScheduler from '../project-chat-recovery.ts'
+import { bindReviewRequest, claimReviewReceipt } from '@neutronai/trident/project-review-receipt.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
 
-async function fixture(projectId: string | null = null, submitted: boolean | 'bound' = false) {
+async function fixture(projectId: string | null = null, submitted: boolean | 'bound' = false,
+  panel?: { role: 'review' | 'synthesis'; change?: (request: BoundedWorkRequest) => void }) {
   const dir = await mkdtemp(join(tmpdir(), 'native-boot-proof-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const dbPath = join(dir, 'project.db'); seedMigratedDb(dbPath)
@@ -33,6 +35,16 @@ async function fixture(projectId: string | null = null, submitted: boolean | 'bo
   const request: BoundedWorkRequest = { run_id: run.id, step_id: `${run.id}:plan:0`, role: 'plan', model_id: 'model', effort: null,
     cwd: join(dir, 'code'), writable: true, network: true, tools: 'edit-and-run', brief: { path: join(dir, 'brief'), integrity: 'digest' },
     result: { path: join(state, 'plan.result'), schema: 'project-plan-v2' }, thread: null, budget: { wall_ms: 100 }, needs_approval_decision: false }
+  if (panel) {
+    const identity = 'a'.repeat(64)
+    const directory = join(state, `review-${identity}`)
+    Object.assign(request, { role: panel.role, step_id: `review-${identity}:1:0`, writable: false, tools: 'read-only',
+      brief: { path: join(directory, 'brief.json'), integrity: 'digest' }, result: { schema: 'verdict', path: join(directory, 'result.json') } })
+    panel.change?.(request)
+    await claimReviewReceipt(directory, identity)
+    await bindReviewRequest(directory, identity, createHash('sha256').update(JSON.stringify(request)).digest('hex'))
+    await writeFile(join(directory, 'request.json'), JSON.stringify(request))
+  }
   const key = { run_id: run.id, step_id: request.step_id, attempt_id: 'dispatch' }
   await attempts.admit({ ...key, phase: 'decomposition', task_id: 'task', head_sha: 'a'.repeat(40), role: request.role, review_seat: null,
     provider: 'anthropic', requested_model: 'model', resolved_model: 'model', placement: 'in-repl', queued_at: 1 })
@@ -68,6 +80,58 @@ function lateResult(request: BoundedWorkRequest) {
       topTask: '- [ ] T1 record a note', executionSpec: 'Record the requested note.', complexity: 'mechanical', remainingTasks: 0,
     } } }
 }
+
+function panelResult(request: BoundedWorkRequest, kind = 'completed') {
+  return { schema: request.result.schema, run_id: request.run_id, step_id: request.step_id, kind,
+    on: kind === 'blocked' ? 'Owner input required' : undefined,
+    result: kind === 'blocked' ? undefined : { verdict: 'APPROVE', findings: [] } }
+}
+
+for (const role of ['review', 'synthesis'] as const) for (const kind of ['completed', 'blocked'])
+test(`late panel ${role} ${kind} releases only the signed original lease without reviving work`, async () => {
+  const f = await fixture('general', 'bound', { role })
+  await f.admission.forNativeChild('general').admit(f.run.id, f.request.step_id)
+  await f.admission.forNativeChild('other').admit(f.run.id, f.request.step_id)
+  expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: 0, kept: 3 })
+  const attempt = f.attempts.get(f.key)
+  await writeFile(f.request.result.path, JSON.stringify(panelResult(f.request, kind)))
+  expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: 1, kept: 2 })
+  expect(f.admission.listLeases('liveChild').some(row => row.token === f.child.lease.token)).toBe(false)
+  expect(f.runs.get(f.run.id)?.phase).toBe('failed')
+  expect(f.attempts.get(f.key)).toEqual(attempt)
+  expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: 0, kept: 2 })
+})
+
+for (const role of ['review', 'synthesis'] as const)
+for (const evidence of ['foreign-step', 'foreign-schema', 'invalid-payload', 'malformed-json', 'unarmed', 'missing-reservation',
+  'forged-receipt', 'wrong-token', 'wrong-generation', 'live-run', 'foreign-path', 'foreign-identity', 'invalid-round',
+  'invalid-attempt', 'missing-claim', 'foreign-claim', 'changed-request', 'invalidated-claim'] as const)
+test(`late panel ${role} preserves ownership on ${evidence}`, async () => {
+  const f = await fixture('general', 'bound', { role, change: request => {
+    if (evidence === 'foreign-path') Object.assign(request, { result: { ...request.result, path: request.result.path + '.foreign' } })
+    if (evidence === 'foreign-identity') Object.assign(request, { step_id: request.step_id.replace('a'.repeat(64), 'b'.repeat(64)) })
+    if (evidence === 'invalid-round') Object.assign(request, { step_id: request.step_id.replace(':1:0', ':0:0') })
+    if (evidence === 'invalid-attempt') Object.assign(request, { step_id: request.step_id.replace(':1:0', ':1:2') })
+  } })
+  const result = panelResult(f.request)
+  if (evidence === 'foreign-step') result.step_id += ':foreign'
+  if (evidence === 'foreign-schema') result.schema = 'project-review'
+  if (evidence === 'invalid-payload') result.result = { verdict: 'INVALID', findings: [] }
+  if (evidence === 'unarmed') await writeFile(f.reservation, JSON.stringify(f.request))
+  if (evidence === 'missing-reservation') await rm(f.reservation)
+  if (evidence === 'forged-receipt') await writeFile(f.path, (await readFile(f.path, 'utf8')).replaceAll('original-child', 'forged-child'))
+  if (evidence === 'wrong-token') f.db.runSync('UPDATE project_admission_leases SET token = ?', ['sibling-token'])
+  if (evidence === 'wrong-generation') f.db.runSync('UPDATE project_admission_leases SET generation = generation + 1')
+  if (evidence === 'live-run') await f.runs.update(f.run.id, { phase: 'forge-init' })
+  const directory = join(f.state, `review-${'a'.repeat(64)}`)
+  const claim = join(directory, 'receipt.json')
+  if (evidence === 'missing-claim') await rm(claim)
+  if (evidence === 'foreign-claim') await writeFile(claim, (await readFile(claim, 'utf8')).replace('a'.repeat(64), 'b'.repeat(64)))
+  if (evidence === 'changed-request') await writeFile(join(directory, 'request.json'), JSON.stringify({ ...f.request, model_id: 'other' }))
+  if (evidence === 'invalidated-claim') await writeFile(claim, JSON.stringify({ ...JSON.parse(await readFile(claim, 'utf8')), invalidated: 'input-changed' }))
+  await writeFile(f.request.result.path, evidence === 'malformed-json' ? '{' : JSON.stringify(result))
+  expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: 0, kept: 1 })
+})
 
 for (const kind of ['completed', 'blocked']) test(`late ${kind} releases only its authenticated token, without changing the failed run`, async () => {
   const f = await fixture('general', 'bound')
@@ -176,10 +240,11 @@ test('unreadable and malformed native census cannot discard expired original rec
   expect(await Bun.file(f.path).exists()).toBe(true)
 })
 
-for (const submitted of [false, 'bound'] as const) for (const availableAtBoot of [true, false]) test(`actual Open composition consumes terminal evidence without a turn: submitted=${submitted}, present-at-boot=${availableAtBoot}`, async () => {
-  const f = await fixture(null, submitted)
+for (const role of ['plan', 'review', 'synthesis'] as const)
+for (const submitted of (role === 'plan' ? [false, 'bound'] : ['bound']) as (false | 'bound')[]) for (const availableAtBoot of [true, false]) test(`actual Open composition consumes terminal evidence without a turn: role=${role}, submitted=${submitted}, present-at-boot=${availableAtBoot}`, async () => {
+  const f = await fixture(null, submitted, role === 'plan' ? undefined : { role })
   const artifact = submitted ? f.request.result.path : f.path
-  if (submitted) await writeFile(artifact, JSON.stringify(lateResult(f.request)))
+  if (submitted) await writeFile(artifact, JSON.stringify(role === 'plan' ? lateResult(f.request) : panelResult(f.request)))
   const bytes = await readFile(artifact, 'utf8')
   if (!availableAtBoot) await rm(artifact)
   const env: NodeJS.ProcessEnv = { ...process.env, NEUTRON_HOME: f.dir, OWNER_HOME: f.dir, NEUTRON_DB_PATH: f.dbPath,

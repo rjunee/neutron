@@ -80,6 +80,7 @@ import { dispatchBoardBoundBuild, type BoardBoundBuildDeps } from '@neutronai/tr
 import { DispatchHoldStore } from '@neutronai/trident/dispatch-holds.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
+import { reconcileClaudeNativeDispatches } from '../wiring/claude-native-dispatch-reconcile.ts'
 import { replaceProjectGeneration, type ProjectMaintenancePorts } from '@neutronai/gateway/project-generation-replacement.ts'
 import { runProjectLivenessCensus, type ProjectLivenessProbes } from '@neutronai/gateway/project-liveness-census.ts'
 import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
@@ -3836,8 +3837,8 @@ test('workspace scratch churn permits host receipt reuse while generated content
   expect(f.world.dispatches).toHaveLength(0)
 }, 120_000)
 
-async function preparedPanelFixture() {
-  const f = await fixture()
+async function preparedPanelFixture(options: Parameters<typeof fixture>[0] = {}) {
+  const f = await fixture(options)
   f.register()
   await f.prepare()
   const worktree = f.store.get(f.row.id)!.worktree!
@@ -3855,6 +3856,54 @@ async function preparedPanelFixture() {
   }
   return { ...f, move, observe }
 }
+
+for (const role of ['review', 'synthesis'] as const) for (const kind of ['completed', 'blocked'] as const)
+test(`passive late panel ${role} ${kind} consumes original live artifacts without redispatch`, async () => {
+  const f = await preparedPanelFixture({ nativeUsage: true })
+  const session = (await pool.get(f.key))!
+  const submit = session.child.submitLine!.bind(session.child)
+  let request!: BoundedWorkRequest
+  let completed = ''
+  let turns = 0
+  session.child.submitLine = async line => {
+    turns++
+    await submit(line)
+    const spec = JSON.parse(line.slice(line.indexOf('{')))
+    const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
+    const data = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
+    const current: BoundedWorkRequest = JSON.parse(data.slice('Request (data): '.length))
+    if (current.role === role && current.result.schema === 'verdict') {
+      request = current
+      completed = await readFile(request.result.path, 'utf8')
+      // The native child has been bound, but its result is not yet readable as
+      // a validated envelope when the bounded host observation finishes.
+      await writeFile(request.result.path, '{}')
+    }
+  }
+  expect((await f.observe()).kind).not.toBe('observed')
+  expect(request.role).toBe(role)
+  expect(request.result.path).toMatch(/\/review-[a-f0-9]{64}\/result\.json$/)
+  const owned = f.admission.listLeases('liveChild')
+  expect(owned).toHaveLength(1)
+  const attempt = f.context.attempts.get({ run_id: request.run_id, step_id: request.step_id, attempt_id: 'dispatch' })
+  expect(attempt?.outcome).toBe('unknown')
+  await f.store.update(f.row.id, { phase: 'failed' })
+  const reconcile = () => reconcileClaudeNativeDispatches({ stateRoot: f.context.stateRoot, admission: f.admission,
+    runs: f.store, attempts: f.context.attempts, projectIdForRun: () => null, listProjectIds: () => [] })
+  expect(await reconcile()).toMatchObject({ released: 0, kept: 1 })
+  await rm(request.result.path)
+  expect(await reconcile()).toMatchObject({ released: 0, kept: 1 })
+  const envelope = JSON.parse(completed)
+  await writeFile(request.result.path, JSON.stringify({ ...envelope, step_id: 'foreign' }))
+  expect(await reconcile()).toMatchObject({ released: 0, kept: 1 })
+  await writeFile(request.result.path, kind === 'completed' ? completed
+    : JSON.stringify({ schema: request.result.schema, run_id: request.run_id, step_id: request.step_id, kind, on: 'Fixture child finished blocked.' }))
+  expect(await reconcile()).toMatchObject({ released: 1, kept: 0 })
+  expect(await reconcile()).toMatchObject({ released: 0, kept: 0 })
+  expect(f.store.get(f.row.id)?.phase).toBe('failed')
+  expect(f.context.attempts.get({ run_id: request.run_id, step_id: request.step_id, attempt_id: 'dispatch' })).toEqual(attempt)
+  expect(turns).toBe(role === 'review' ? 1 : 2)
+}, 30_000)
 
 for (const changed of ['none', 'head', 'round', 'task', 'model', 'effort', 'credential', 'desired-credential', 'file-credential'] as const)
 test(`prepared panel recovery purchases only the work invalidated by ${changed}`, async () => {
