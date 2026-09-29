@@ -86,3 +86,27 @@ release native-child leases, or prove unattended recovery across an actual
 gateway, terminal-host or machine restart.
 
 Live acceptance: [sequence and publication witness](../as-built/trident-sequence-and-publication-live-acceptance.md).
+
+## Card lineage after an intermediate failure
+
+Tracked by #1418. An intermediate terminal attempt can become the card's linked
+run without creating a PR. That attempt must not erase an earlier witnessed
+publication for the same card, repository and generated branch. Ownership may
+come only from a durable `published_pr` on an earlier terminal PR-mode run in the
+card's terminal-attempt ledger, anchored to the exact currently linked run. Both
+run start order and ledger insertion order must precede that anchor. Observed
+PR numbers never grant ownership. This carries publication ownership only;
+completed-build reuse still follows the existing checkpoint and task bindings.
+
+- [x] The real board retry can retain an earlier same-card creation receipt
+  across an intermediate failed attempt, while its discovered-PR sibling remains
+  unowned and unmerged. Verify: `salvaged publication` consuming cases in
+  `open/__tests__/project-build-e2e.test.ts`.
+- [x] Changed repository, branch, project, card, missing anchor, later start,
+  later ledger entry, local mode and nonterminal owners cannot supply a receipt.
+  Direct linked-run receipts remain scoped to their original repository and
+  branch. Verify: `earlier card publication provenance` in `trident/store.test.ts`
+  and the linked-receipt controls in `trident/board-dispatch.test.ts`.
+- [x] Removing valid lineage inheritance or substituting an observational PR
+  fails the corresponding consuming control; removing the SQL mode, chronology
+  or anchor boundary fails its refusal control with the valid sibling passing.

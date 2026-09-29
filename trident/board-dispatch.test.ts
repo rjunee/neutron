@@ -1771,16 +1771,15 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     expect(tipReads).toEqual([[tmp, BRANCH]])
   })
 
-  test('an EDITED same card still carries its own published-PR provenance', async () => {
+  test('a text-only edit on the same card and branch still carries its published-PR provenance', async () => {
     // The ladder's rule is that the LINK decides identity and the TEXT decides only
     // whether the COMMIT may be adopted. The provenance carry used to add
-    // `prior.task === input.task`, so an owner clarifying the design doc between two
-    // presses dropped it — and the retry then reached fresh admission with no
-    // `owned_pr` and was refused against ITS OWN published PR. Clarifying the doc is
-    // the most likely thing an owner does, which made this the common path.
+    // `prior.task === input.task`, so even a capitalization edit on the same
+    // branch dropped it — and the retry then reached fresh admission with no
+    // `owned_pr` and was refused against ITS OWN published PR.
     await priorRun({ phase: 'failed', pr: 7, published_pr: 7 })
 
-    const { result } = await dispatchSeeding(async () => HEAD, { task: `${TASK} — now with the acceptance spelled out` })
+    const { result } = await dispatchSeeding(async () => HEAD, { task: 'BUILD the thing' })
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -1793,6 +1792,17 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
     // The edited text still declines the COMMIT carry — the asymmetry is the point,
     // so this test cannot pass by weakening the commit rule instead.
     expect(result.run.inner_checkpoint).toBeNull()
+  })
+
+  test.each(['branch', 'repository'] as const)('a linked receipt from a different %s cannot authorize this branch', async scope => {
+    const prior = await priorRun({ phase: 'failed', pr: 7, published_pr: 7 })
+    if (scope === 'branch') await store.update(prior.id, { branch: 'trident/another-card-branch' })
+    else await db.run('UPDATE code_trident_runs SET repo_path = ? WHERE id = ?', [`${tmp}-foreign`, prior.id])
+    const { result } = await dispatchSeeding(async () => HEAD, { merge_mode: 'pr' })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.published_pr).toBeNull()
+    expect(result.run.pr).toBeNull()
   })
 
   test("a card BOUND TO A DIFFERENT RUN does not inherit that run's commit, byte-identical task text and all", async () => {

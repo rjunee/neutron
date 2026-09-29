@@ -33,6 +33,44 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+describe('earlier card publication provenance', () => {
+  for (const fault of ['none', 'observed-only', 'local-owner', 'later-start', 'later-ledger',
+    'missing-anchor', 'wrong-anchor', 'foreign-card', 'foreign-project', 'owner-project',
+    'owner-repo', 'owner-branch', 'linked-project', 'linked-repo', 'live-owner', 'invalid-receipt'] as const) {
+    test(`only an earlier witnessed receipt at the exact terminal anchor qualifies: ${fault}`, async () => {
+      const store = new TridentRunStore(db)
+      const board = new WorkBoardStore(db)
+      const card = await board.create('project', { title: 'publication lineage' })
+      const owner = await store.create({ slug: 'original', project_slug: 'project', repo_path: '/repo', task: 'original task',
+        branch: 'trident/original', merge_mode: fault === 'local-owner' ? 'local' : 'pr' })
+      await store.update(owner.id, { phase: 'failed', pr: 7, published_pr: fault === 'observed-only' ? null : fault === 'invalid-receipt' ? 0 : 7 })
+      await db.run('UPDATE code_trident_runs SET started_at = ? WHERE id = ?', [fault === 'later-start' ? 300 : 100, owner.id])
+      const recordOwner = async () => {
+        await board.attachRun('project', card.id, owner.id)
+        await board.detachRun('project', owner.id, 'failed', { pr: 7, pr_url: null })
+      }
+      if (fault !== 'later-ledger') await recordOwner()
+      const linked = await store.create({ slug: 'intermediate', project_slug: 'project', repo_path: '/repo', task: 'changed retry task',
+        branch: 'trident/intermediate', merge_mode: 'pr' })
+      await store.update(linked.id, { phase: 'failed', pr: 7 })
+      await db.run('UPDATE code_trident_runs SET started_at = ? WHERE id = ?', [200, linked.id])
+      await board.attachRun('project', card.id, linked.id)
+      if (fault !== 'missing-anchor') await board.detachRun('project', linked.id, 'failed', { pr: 7, pr_url: null })
+      if (fault === 'later-ledger') await recordOwner()
+      if (fault === 'owner-project') await db.run('UPDATE code_trident_runs SET project_slug = ? WHERE id = ?', ['foreign', owner.id])
+      if (fault === 'owner-repo') await db.run('UPDATE code_trident_runs SET repo_path = ? WHERE id = ?', ['/foreign', owner.id])
+      if (fault === 'owner-branch') await store.update(owner.id, { branch: 'trident/foreign' })
+      if (fault === 'linked-project') await db.run('UPDATE code_trident_runs SET project_slug = ? WHERE id = ?', ['foreign', linked.id])
+      if (fault === 'linked-repo') await db.run('UPDATE code_trident_runs SET repo_path = ? WHERE id = ?', ['/foreign', linked.id])
+      if (fault === 'live-owner') await store.update(owner.id, { phase: 'task-build' })
+      const receipt = new TridentRunStore(db).earlierCardPublication(
+        fault === 'foreign-project' ? 'foreign' : 'project', fault === 'foreign-card' ? 'another-card' : card.id,
+        fault === 'wrong-anchor' ? owner.id : linked.id, '/repo', 'trident/original')
+      expect(receipt).toBe(fault === 'none' ? 7 : null)
+    })
+  }
+})
+
 describe('persisted execution selection', () => {
   for (const strategy of ['single', 'task_sequence'] as const) {
     test(`${strategy} persists before build and survives stale saves, terminal reconcile and a cleared card link`, async () => {

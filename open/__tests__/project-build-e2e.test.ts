@@ -4936,8 +4936,8 @@ async function driveUntilTheProcessDies(f: Awaited<ReturnType<typeof fixture>>, 
   host.deps, new AbortController().signal)
 }
 
-for (const owned of [true, false]) test(`salvaged publication ${owned ? 'carries its creation receipt' : 'does not adopt a discovered PR'} into the real retry consumer`, async () => {
-  const task = 'Record a note in NOTES.md and verify the note survives publication and retry without rebuilding'
+for (const owned of [true, false]) for (const intermediate of [false, true]) test(`salvaged publication ${owned ? 'carries its creation receipt' : 'does not adopt a discovered PR'} into the real retry consumer${intermediate ? ' across an intermediate failed card attempt' : ''}`, async () => {
+  const task = 'Record a note in NOTES.md and verify the note survives publication and retry'
   const f = await fixture({ dispatchTask: task })
   const firstHost = await createProjectBuildHost(await f.prepare())
   firstHost.deps.publishGate = async () => ({ kind: 'blocked', on: 'fixture proof infrastructure unavailable' })
@@ -4968,22 +4968,54 @@ for (const owned of [true, false]) test(`salvaged publication ${owned ? 'carries
   // launch claims the same branch; the saved build checkpoint survives cleanup.
   expect((await spawnCapture(['git', '-C', f.repo, 'worktree', 'remove', '--force', prior.worktree!], f.repo)).ok).toBe(true)
   await f.store.save({ ...salvaged!, worktree: null })
-  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'salvage-retry-card' }, {
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create('project', { title: task })
+  await board.attachRun('project', card.id, prior.id)
+  await board.detachRun('project', prior.id, 'failed', { pr: salvaged!.pr, pr_url: null })
+  let missedRunId: string | null = null
+  if (intermediate) {
+    // The real failure shape: a later attempt at the same card died before it
+    // could publish, on a different generated branch. Its observational PR is
+    // deliberately populated; only the older run's receipt can authorize reuse.
+    const missed = await f.store.create({ slug: 'continue-existing-card', project_slug: 'project',
+      repo_path: f.repo, task: 'Continue the existing card after provider capacity returns',
+      branch: 'trident/continue-existing-card', merge_mode: 'pr',
+      execution_strategy: prior.execution_strategy })
+    await f.store.update(missed.id, { phase: 'failed', pr: 1 })
+    await board.attachRun('project', card.id, missed.id)
+    await board.detachRun('project', missed.id, 'failed', { pr: 1, pr_url: null })
+    missedRunId = missed.id
+    expect(board.get('project', card.id)?.linked_run_id).toBe(missed.id)
+  }
+  const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: card.id }, {
     store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
-    board: { get: () => ({ id: 'salvage-retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
+    board,
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
   })
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
   if (!dispatched.ok) return
-  expect(dispatched.run.published_pr).toBe(owned ? 1 : null)
+  // A fresh launch pins the remote base before preparing the build host. The
+  // fixture calls the host directly, so reproduce that host-owned pin here.
+  if (intermediate) await f.store.update(dispatched.run.id, { base_sha: prior.base_sha })
   f.world.dispatches.length = 0
-  f.input.run = dispatched.run
+  f.input.run = f.store.get(dispatched.run.id)!
   const host = await createProjectBuildHost(await f.prepare())
-  const outcome = await host.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
-  expect(outcome.kind, why(f, outcome)).toBe(owned ? 'merged' : 'unknown')
-  expect(f.world.dispatches.some(call => ['plan', 'build'].includes(call.role))).toBe(false)
+  const outcome = await host.run({ mode: 'implementation', start: intermediate ? 'fresh' : 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe(owned ? 'merged' : intermediate ? 'blocked' : 'unknown')
+  if (!intermediate) expect(f.world.dispatches.some(call => ['plan', 'build'].includes(call.role))).toBe(false)
+  if (intermediate && !owned) {
+    expect(outcome).toMatchObject({ on: 'Fresh build already has a PR' })
+    expect(f.world.dispatches).toEqual([])
+  }
   expect(f.github.prs[0]!.state).toBe(owned ? 'MERGED' : 'OPEN')
   expect(f.github.prs).toHaveLength(1)
+  if (missedRunId !== null) {
+    expect(f.store.earlierCardPublication('project', card.id, missedRunId, f.repo, prior.branch!))
+      .toBe(owned ? 1 : null)
+    expect(f.store.earlierCardPublication('project', 'another-card', missedRunId, f.repo, prior.branch!)).toBeNull()
+    expect(f.store.earlierCardPublication('project', card.id, missedRunId, `${f.repo}-foreign`, prior.branch!)).toBeNull()
+    expect(f.store.earlierCardPublication('project', card.id, missedRunId, f.repo, 'trident/foreign')).toBeNull()
+  }
 }, 30_000)
 
 /** The state a restarted driver actually reads back (`production-host-effects.ts:235`). */
