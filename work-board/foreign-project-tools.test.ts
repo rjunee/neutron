@@ -55,6 +55,17 @@ test('runtime enumeration covers every registered work_board tool with foreign a
       const result = await tool.handler({ title: 'local addition' }, context) as { ok: boolean; item: { project_slug: string } }
       expect(result.ok).toBe(true)
       expect(result.item.project_slug).toBe('local')
+    } else if (tool.name === 'work_board_replan_build') {
+      // This recovery-only tool must reject both scopes before parsing a card
+      // or touching either board: this plain test context has no authenticated
+      // project-chat turn. Its authorized foreign-card control lives in the
+      // recovery authority tests, not in this unauthenticated enumeration.
+      const beforeLocal = store.list('local')
+      for (const id of [foreign.id, local.id]) {
+        const refused = await tool.handler({ board_item_id: id }, context) as { ok: boolean; error: string }
+        expect(refused).toEqual({ ok: false, error: 'Authenticated project-chat orchestrator invocation required' })
+      }
+      expect(store.list('local')).toEqual(beforeLocal)
     } else {
       const args: Record<string, unknown> = {
         id: foreign.id, board_item_id: foreign.id, title: 'changed',
@@ -74,7 +85,7 @@ test('runtime enumeration covers every registered work_board tool with foreign a
   console.log('Executed work_board surface:', [...covered].join(', '))
   expect([...covered].sort()).toEqual([
     'work_board_add', 'work_board_complete', 'work_board_dispatch_build', 'work_board_list',
-    'work_board_remove', 'work_board_reorder', 'work_board_start', 'work_board_update',
+    'work_board_remove', 'work_board_reorder', 'work_board_replan_build', 'work_board_start', 'work_board_update',
   ])
 })
 
