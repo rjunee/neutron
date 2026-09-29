@@ -81,9 +81,11 @@ export interface ReplacementObservation {
   admissionGeneration: number | undefined
   toolSurface: string
   toolBridgeActive: boolean
+  /** Spawned role, or argv-corroborated role after adoption; never inferred here. */
+  plannerRole?: string | undefined
   adopted: boolean
   /** The persisted registry row's view; undefined when there is no row (or no registry). */
-  registry: { sessionId: string; admission_generation: number | undefined; tool_surface: string | undefined; tool_bridge: boolean | undefined } | undefined
+  registry: { sessionId: string; admission_generation: number | undefined; tool_surface: string | undefined; tool_bridge: boolean | undefined; planner_profile?: string | undefined } | undefined
 }
 
 /** Injection seams for tests; production uses the real pool machinery. */
@@ -213,6 +215,7 @@ export function observePooledSession(sessionKey: string): ReplacementObservation
     admissionGeneration: session.admissionGeneration,
     toolSurface: session.toolSurface,
     toolBridgeActive: session.toolBridgeActive,
+    plannerRole: session.plannerRole,
     adopted: session.adopted,
     registry: row === undefined
       ? undefined
@@ -221,6 +224,7 @@ export function observePooledSession(sessionKey: string): ReplacementObservation
           admission_generation: row.admission_generation,
           tool_surface: row.reuse?.tool_surface,
           tool_bridge: row.reuse?.tool_bridge,
+          planner_profile: row.reuse?.planner_profile,
         },
   }
 }

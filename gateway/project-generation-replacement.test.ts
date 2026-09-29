@@ -16,6 +16,7 @@ import type {
   ReplacementResult,
 } from '@neutronai/runtime/adapters/claude-code/persistent/generation-replacement.ts'
 import type { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
+import { PLANNER_PROFILE_ID, PLANNER_ROLE } from '@neutronai/runtime/workers/planner-work.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectAdmission } from './project-admission.ts'
 import { decideProjectLiveness, walkProcessDescendants, type CensusEvidence, type ParentObservation, type ProjectLivenessCensus } from './project-liveness-census.ts'
@@ -67,8 +68,8 @@ function censusOf(admission: ProjectAdmission, parent: ParentSpec, over: Partial
 function observationFor(generation: number, over: Partial<ReplacementObservation> = {}): ReplacementObservation {
   return {
     sessionId: OLD.sessionId, childGeneration: 'gen-new', pid: 5151, exited: false, identified: true,
-    admissionGeneration: generation, toolSurface: SURFACE, toolBridgeActive: true, adopted: false,
-    registry: { sessionId: OLD.sessionId, admission_generation: generation, tool_surface: SURFACE, tool_bridge: true },
+    admissionGeneration: generation, toolSurface: SURFACE, toolBridgeActive: true, plannerRole: PLANNER_ROLE, adopted: false,
+    registry: { sessionId: OLD.sessionId, admission_generation: generation, tool_surface: SURFACE, tool_bridge: true, planner_profile: PLANNER_PROFILE_ID },
     ...over,
   }
 }
@@ -325,6 +326,10 @@ describe('the attestation table', () => {
   })
 
   const cases: Array<[string, ReplacementObservation | undefined, string]> = [
+    ['missing planner role', observationFor(3, { plannerRole: undefined }), 'current registered planner role'],
+    ['stale planner role', observationFor(3, { plannerRole: 'old-role' }), 'current registered planner role'],
+    ['missing planner profile', observationFor(3, { registry: { ...observationFor(3).registry!, planner_profile: undefined } }), 'current planner profile'],
+    ['stale planner profile', observationFor(3, { registry: { ...observationFor(3).registry!, planner_profile: 'old-profile' } }), 'current planner profile'],
     ['absent observation', undefined, 'no fulfilled pooled replacement'],
     ['wrong conversation', observationFor(3, { sessionId: 'other' }), 'did not resume the same conversation'],
     ['same child generation', observationFor(3, { childGeneration: 'gen-old' }), 'same child generation'],
@@ -394,6 +399,21 @@ describe('restart continuity', () => {
     const outcome = await resumeProjectMaintenance({ admission, ports: restartPorts(admission, { admissionGeneration: generation, childGeneration: 'gen-new' }) }, null)
     expect(outcome).toEqual({ status: 'reopened', generation })
     expect(admission.inspect(null)?.phase).toBe('open')
+  })
+
+  for (const defect of ['role', 'profile', 'none'] as const) test(`adopted planner attestation at restart: ${defect}`, async () => {
+    const { path, generation } = await fencedAt('replacing')
+    const admission = restarted(path)
+    const outcome = await resumeProjectMaintenance({
+      admission,
+      ports: restartPorts(admission, { admissionGeneration: generation, childGeneration: 'gen-new' },
+        (g) => observationFor(g, { adopted: true,
+          ...(defect === 'role' ? { plannerRole: undefined } : {}),
+          ...(defect === 'profile' ? { registry: { ...observationFor(g).registry!, planner_profile: 'old-profile' } } : {}),
+        })),
+    }, null)
+    expect(outcome).toMatchObject(defect === 'none' ? { status: 'reopened', generation } : { status: 'held', phase: 'attesting' })
+    expect(admission.inspect(null)?.phase).toBe(defect === 'none' ? 'open' : 'attesting')
   })
 
   test('a replacing fence with no replacement parent is HELD, never reopened blind (guard)', async () => {

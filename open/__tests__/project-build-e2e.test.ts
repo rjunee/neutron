@@ -8287,14 +8287,15 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
     descendants: async () => ({ verdict: 'idle', reasons: [] }),
   })
   const replacedWith: string[] = []
+  const { PLANNER_PROFILE_ID } = await import('@neutronai/runtime/workers/planner-work.ts')
   const ports = (admissionGeneration: number | undefined): ProjectMaintenancePorts => ({
     census: (projectId) => runProjectLivenessCensus({ admission: restarted, probes: probes(admissionGeneration) }, projectId),
     replace: async (expected) => { replacedWith.push(expected.childGeneration); return { status: 'replaced', session: {} as never } },
     observe: () => {
       const g = restarted.inspect(null)!.generation
       return { sessionId: 'conversation-e2e', childGeneration: 'gen-e2e-new', pid: 5151, exited: false, identified: true,
-        admissionGeneration: g, toolSurface: 'Read,Agent', toolBridgeActive: true, adopted: false,
-        registry: { sessionId: 'conversation-e2e', admission_generation: g, tool_surface: 'Read,Agent', tool_bridge: true } }
+        admissionGeneration: g, toolSurface: 'Read,Agent', toolBridgeActive: true, plannerRole: PLANNER_ROLE, adopted: false,
+        registry: { sessionId: 'conversation-e2e', admission_generation: g, tool_surface: 'Read,Agent', tool_bridge: true, planner_profile: PLANNER_PROFILE_ID } }
     },
     identity: () => ({ start_ticks: 1, boot_id: 'e2e' }),
     expectedProfile: () => ({ toolSurface: 'Read,Agent', toolBridge: true }),
@@ -8349,4 +8350,25 @@ test('project admission end to end: fenced dispatch queues, reopened dispatch le
   expect(legacy.status).toBe('protected')
   expect(replacedWith).toEqual(['gen-e2e-old'])
   expect(restarted.inspect(null)?.phase).toBe('open')
+
+  // A completed swap cannot reopen admission with an old planner profile. Boot
+  // may reopen the same fence only after observing both current attestations.
+  const { resumeProjectMaintenance } = await import('@neutronai/gateway/project-generation-replacement.ts')
+  for (const defect of ['role', 'profile'] as const) {
+    const stale = ports(restarted.inspect(null)!.generation)
+    const currentObserve = stale.observe
+    stale.observe = (key) => {
+      const observation = currentObserve(key)!
+      return defect === 'role'
+        ? { ...observation, plannerRole: undefined }
+        : { ...observation, registry: { ...observation.registry!, planner_profile: 'old-profile' } }
+    }
+    expect((await replaceProjectGeneration({ admission: restarted, ports: stale }, null)).status).toBe('attestation-failed')
+    expect(restarted.inspect(null)?.phase).toBe('attesting')
+    const refused = await restarted.forNativeChild(null).admit(f.row.id, `fenced-${defect}`)
+    expect(refused.status).not.toBe('admitted')
+    const generation = restarted.inspect(null)!.generation
+    expect(await resumeProjectMaintenance({ admission: restarted, ports: ports(generation) }, null)).toEqual({ status: 'reopened', generation })
+    expect(restarted.inspect(null)?.phase).toBe('open')
+  }
 }, 120_000)
