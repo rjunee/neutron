@@ -2412,6 +2412,112 @@ test('attempt accounting consumes a full build with missing metadata and attribu
   for (const interval of intervals) expect(interval.ended_at).toBeGreaterThanOrEqual(interval.started_at)
 })
 
+test.each(['standalone', 'synthesis', 'standalone-throws'] as const)('review stage measures the admitted producer join wall interval: %s finishes last', async last => {
+  const f = await fixture()
+  f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
+  const options = await f.prepare()
+  const epoch = Date.now()
+  let now = epoch, settled = false
+  const clock = spyOn(Date, 'now').mockImplementation(() => now)
+  const latch = () => {
+    let release!: () => void
+    return { promise: new Promise<void>(resolve => { release = resolve }), release: () => release() }
+  }
+  const holds = { standalone: latch(), seats: latch(), synthesis: latch() }
+  const entered = latch(), synthesisEntered = latch(), standaloneDone = latch(), panelDone = latch()
+  const starts: string[] = [], ends: string[] = []
+  const events = (kind: string) => f.store.stageEvents(f.row.id).filter(event => event.stage === kind)
+    .map(event => JSON.parse(event.meta!)).filter(event => event.stage === 'review-and-synthesis')
+  const execute = async <T>(seat: string, operation: () => Promise<T>): Promise<T> => {
+    starts.push(seat)
+    // The durable interval precedes every producer, including synthesis.
+    expect(events('build-stage-started')).toHaveLength(1)
+    expect(events('build-stage-ended')).toEqual([])
+    if (seat === 'synthesis') {
+      expect(ends.sort()).toEqual(expect.arrayContaining(['review_adversarial', 'review_rubric']))
+      synthesisEntered.release()
+    } else if (starts.length === 3) entered.release()
+    await holds[seat === 'standalone' || seat === 'synthesis' ? seat : 'seats'].promise
+    try {
+      if (seat === 'standalone' && last === 'standalone-throws') throw Error('scripted standalone failure')
+      return await operation()
+    } finally {
+      ends.push(seat)
+      if (seat === 'standalone') standaloneDone.release()
+    }
+  }
+  const runner = options.substrate.inRepl!
+  options.substrate.inRepl = { ...runner, run: (...args) => args[0].role === 'review' && args[0].result.schema !== 'verdict'
+    ? execute('standalone', () => runner.run(...args)) : runner.run(...args) }
+  const runnerFor = options.policy.review!.runnerFor
+  options.policy.review!.runnerFor = (...args) => {
+    const selected = runnerFor(...args)
+    return selected && { ...selected, run: (...runArgs) => execute(args[1].id, () => selected.run(...runArgs)) }
+  }
+  let running: Promise<ProjectBuildOutcome> | undefined
+  let deadline: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    deadline = setTimeout(() => reject(Error(`Review timing barrier incomplete: ${starts}; ${ends}`)), 10_000)
+  })
+  const wait = (barrier: ReturnType<typeof latch>) => Promise.race([barrier.promise, timeout])
+  try {
+    const host = await createProjectBuildHost(options)
+    const artifact = host.deps.reviewArtifact!
+    host.deps.reviewArtifact = async (...args) => {
+      expect(events('build-stage-started')).toEqual([])
+      const result = await artifact(...args)
+      now = epoch + 200
+      return result
+    }
+    const panel = host.deps.observeReview
+    host.deps.observeReview = async (...args) => {
+      try { return await panel(...args) } finally { panelDone.release() }
+    }
+    const ci = host.deps.reviewCi!
+    host.deps.reviewCi = async (...args) => {
+      // Post-join CI must not inflate the producer interval.
+      if (starts.length) now = epoch + 900
+      return ci(...args)
+    }
+    running = host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+      .then(outcome => { settled = true; return outcome })
+    await wait(entered)
+    expect(starts.sort()).toEqual(['review_adversarial', 'review_rubric', 'standalone'])
+    now = epoch + 220
+    holds.seats.release()
+    await wait(synthesisEntered)
+    now = epoch + 240
+    holds[last === 'synthesis' ? 'standalone' : 'synthesis'].release()
+    await wait(last === 'synthesis' ? standaloneDone : panelDone)
+    expect(events('build-stage-ended')).toEqual([])
+    expect(settled).toBe(false)
+    now = epoch + 270
+    holds[last === 'synthesis' ? 'synthesis' : 'standalone'].release()
+    const outcome = await running
+    expect(outcome.kind, why(f, outcome)).toBe(last === 'standalone-throws' ? 'blocked' : 'merged')
+    if (last === 'standalone-throws') expect(outcome).toMatchObject({ on: expect.stringContaining('scripted standalone failure') })
+    const intervals = events('build-stage-ended')
+    expect(events('build-stage-started')).toHaveLength(1)
+    expect(intervals).toHaveLength(1)
+    const standalone = f.context.attempts.list(f.row.id).find(row => row.role === 'review' && row.review_seat === null)!
+    expect(intervals[0]).toMatchObject({ run_id: f.row.id, task_id: `${f.row.id}:task:0`,
+      head_sha: standalone.head_sha, step_id: standalone.step_id, round: 1,
+      started_at: epoch + 200, ended_at: epoch + 270 })
+    // Concurrent producer durations overlap; wall time is the enclosing interval.
+    expect(intervals[0].ended_at - intervals[0].started_at).toBe(70)
+    const attempts = f.context.attempts.list(f.row.id).filter(row => row.role === 'review' || row.role === 'synthesis')
+    expect(attempts.reduce((sum, row) => sum + row.ended_at! - row.started_at!, 0)).toBeGreaterThan(70)
+    expect(attempts.every(row => row.started_at! >= intervals[0].started_at && row.ended_at! <= intervals[0].ended_at)).toBe(true)
+    expect(starts).toHaveLength(4)
+    expect(ends).toHaveLength(4)
+  } finally {
+    for (const hold of Object.values(holds)) hold.release()
+    await running
+    clearTimeout(deadline)
+    clock.mockRestore()
+  }
+}, 30_000)
+
 test.each(['valid', 'wrong-run'] as const)('attempt accounting retains actual headless transport usage with %s result identity', async codexReview => {
   const f = await fixture({ codexReview })
   const result = await drive(f)
@@ -5095,18 +5201,21 @@ test(`consuming host admission overlaps without early dispatch or cleanup: ${fir
   }
 }, 60_000)
 
-test.each(['readiness', 'ci', 'artifact'] as const)('unavailable admission prevents every review producer in the consuming host: %s', async stop => {
+test.each(['readiness', 'suite', 'ci', 'artifact'] as const)('unavailable admission prevents every review producer in the consuming host: %s', async stop => {
   const started: string[] = []
   const f = await fixture({ reviewChild: async (_request, seat) => { started.push(seat) } })
   f.input.phase_models = { ...f.input.phase_models, review_rubric: { model: 'fable' } }
   const host = await createProjectBuildHost(await f.prepare())
   if (stop === 'readiness') host.deps.reviewReadiness = async () => ({ kind: 'unknown', detail: 'fixture readiness unavailable' })
+  if (stop === 'suite') host.deps.reviewSuite = async () => ({ kind: 'unknown', detail: 'fixture suite unavailable' })
   if (stop === 'ci') host.deps.reviewCi = async () => ({ kind: 'blocked', on: 'fixture CI unavailable' })
   if (stop === 'artifact') host.deps.reviewArtifact = async () => ({ kind: 'unknown', detail: 'fixture artifact unavailable' })
   const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
   expect(outcome.kind).toBe(stop === 'ci' ? 'blocked' : 'unknown')
   expect(started).toEqual([])
   expect(f.world.dispatches.map(call => call.role)).toEqual(['plan', 'build'])
+  expect(f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-stage-started' || event.stage === 'build-stage-ended')
+    .map(event => JSON.parse(event.meta!)).filter(event => event.stage === 'review-and-synthesis')).toEqual([])
 }, 30_000)
 
 /** Same task, providers, gates and scripted verdicts in both schedules. The

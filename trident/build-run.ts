@@ -226,6 +226,9 @@ export interface BuildRunDeps {
   publicationSuite(snapshot: BuildSnapshot): Promise<SuiteAssessment>
   // reviewGate owns panel provenance and severity, and records evidence before filtering.
   observeReview(snapshot: BuildSnapshot, round: number): Promise<ReviewPanelObservation>
+  /** Observe the admitted producer join, including synthesis and recovery. Does
+   * not authorize work; the project host supplies advisory stage accounting. */
+  timeReview?<T>(identity: { head_sha: string; round: number; step_id: string }, operation: () => Promise<T>): Promise<T>
   reviewGate(payload: unknown, observation: ReviewPanelObservation, snapshot: BuildSnapshot, round: number, replansUsed?: number, recordProgress?: (value: ReviewProgress) => void): Promise<ReviewDecision>
   // publishGate owns mutation proof and publication readiness; mergeGate owns CI,
   // base drift and pinned-head merge eligibility. Both run on host observations.
@@ -698,24 +701,31 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       let outcome: BoundedWorkOutcome
       let review: ReviewPanelObservation | undefined
       try {
-        if (role === 'review' && recovery) {
-          // Reconcile the original worker before starting any other producer. A
-          // missing reservation cannot fall through to an ordinary dispatch.
-          outcome = await execute(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
-          if (outcome.kind === 'completed') review = await deps.observeReview(structuredClone(snapshot), round)
-        } else if (role === 'review') {
-          if (!deps.observeReview) return { stop: unknown('Review observation host is missing') }
-          // Readiness, CI, suite and artifact preparation have all passed. Start
-          // every independent producer before awaiting a verdict, and drain both
-          // sides even when one rejects. No fix or merge can race a live reviewer.
-          const [standalone, panel] = await Promise.allSettled([
-            Promise.resolve().then(() => execute(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)),
-            Promise.resolve().then(() => deps.observeReview(structuredClone(snapshot), round)),
-          ])
-          if (standalone.status === 'rejected') throw standalone.reason
-          if (panel.status === 'rejected') throw panel.reason
-          outcome = standalone.value
-          review = panel.value
+        if (role === 'review') {
+          if (!recovery && !deps.observeReview) return { stop: unknown('Review observation host is missing') }
+          const produce = async () => {
+            if (recovery) {
+              // Reconcile the original worker before starting any other producer.
+              // Missing reservations cannot fall through to ordinary dispatch.
+              const outcome = await execute(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
+              const review = outcome.kind === 'completed' ? await deps.observeReview(structuredClone(snapshot), round) : undefined
+              return { outcome, review }
+            }
+            // Readiness, CI, suite and artifact preparation have all passed. Start
+            // every independent producer before awaiting a verdict, and drain both
+            // sides even when one rejects. No fix or merge can race a live reviewer.
+            const [standalone, panel] = await Promise.allSettled([
+              Promise.resolve().then(() => execute(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)),
+              Promise.resolve().then(() => deps.observeReview(structuredClone(snapshot), round)),
+            ])
+            if (standalone.status === 'rejected') throw standalone.reason
+            if (panel.status === 'rejected') throw panel.reason
+            return { outcome: standalone.value, review: panel.value }
+          }
+          // One wall interval around the whole join, never a sum of overlapping
+          // attempts or only the panel (the standalone can finish last).
+          ;({ outcome, review } = await (deps.timeReview
+            ? deps.timeReview({ head_sha: snapshot.head, round, step_id: boundedRequest.step_id }, produce) : produce()))
         } else outcome = await execute(boundedRequest, placementFor(runner.provider, input.repl_provider), signal)
       } catch (error) {
         if (role === 'review') return { stop: blocked(unknownCause('infra-only: Review producer failed during the review join', error, input.run_id).slice(0, TERMINAL_CAUSE_MAX)) }

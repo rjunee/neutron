@@ -1385,7 +1385,17 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) for (const reser
       f.input.start = 'resume'
       if (f.snapshot.pr) f.input.owned_pr = f.snapshot.pr.number
       f.input.workers[role].runner = makeRunner()
+      const timed: { head_sha: string; round: number; step_id: string }[] = []
+      let timingSettled = 0
+      f.deps.timeReview = async (identity, operation) => {
+        timed.push(identity)
+        try { return await operation() } finally { timingSettled++ }
+      }
       expect(await f.run()).toMatchObject({ kind: missingReservation ? 'unknown' : 'merged' })
+      if (role === 'review') {
+        expect(timed).toEqual([{ head_sha: saved.pending.recovery.snapshot.head, round: saved.pending.recovery.round, step_id: original!.step_id }])
+        expect(timingSettled).toBe(1)
+      }
       expect(providerTurns).toBe(1)
       expect(requests).toEqual([original!, original!])
       expect(f.prepared.filter(value => value.role === role)).toHaveLength(preparedBefore)
