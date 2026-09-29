@@ -8924,9 +8924,9 @@ test('Claude MCP handler drain does not release a delegated build or native chil
   // re-register and the existing covered ledger remains usable after adoption.
   session.adopted = true
   sink.register(identity.sessionId, session)
-  expect(ledger.proof(identity).status).toBe('unknown')
+  expect((await ledger.proof(identity)).status).toBe('unknown')
   await ledger.close(identity)
-  expect(ledger.proof(identity)).toEqual({ status: 'mcp-handlers-drained', downstreamEffects: 'unknown' })
+  expect(await ledger.proof(identity)).toEqual({ status: 'mcp-handlers-drained', downstreamEffects: 'unknown' })
   expect((await (await handle(request())).json() as { ok: boolean }).ok).toBe(false)
   expect(invocations).toBe(1)
   expect(admission.listLeases()).toEqual(leases)

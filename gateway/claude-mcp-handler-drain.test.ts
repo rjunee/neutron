@@ -31,12 +31,12 @@ test('open executes once; exact close refuses; returned downstream work is not e
   })).toEqual({ status: 'dispatched', run_id: 'downstream-run' })
   await expect(ledger.dispatch(identity, call, 'work_board_start', () => true, async () => count++)).rejects.toThrow('Duplicate')
   await expect(ledger.dispatch(identity, call, 'other', () => true, async () => count++)).rejects.toThrow('Conflicting')
-  expect(ledger.proof(identity).status).toBe('unknown')
+  expect((await ledger.proof(identity)).status).toBe('unknown')
   await ledger.close(identity)
-  expect(ledger.proof(identity)).toEqual({ status: 'mcp-handlers-drained', downstreamEffects: 'unknown' })
+  expect(await ledger.proof(identity)).toEqual({ status: 'mcp-handlers-drained', downstreamEffects: 'unknown' })
   await expect(ledger.dispatch(identity, call + '2', 'other', () => true, async () => count++)).rejects.toThrow('closed')
   expect(count).toBe(1)
-  expect(ledger.proof({ ...identity, childGeneration: 'foreign' }).status).toBe('unknown')
+  expect((await ledger.proof({ ...identity, childGeneration: 'foreign' })).status).toBe('unknown')
 })
 
 test('accepted unsettled call survives reopen as unknown; closure waits for durable outcome', async () => {
@@ -47,9 +47,9 @@ test('accepted unsettled call survives reopen as unknown; closure waits for dura
   const running = ledger.dispatch(identity, call, 'args', () => true, async () => { entered(); await gate; return 'done' })
   await start; await ledger.close(identity)
   const reopened = ProjectDb.open(db.path); cleanups.push(() => reopened.close())
-  expect(new ClaudeMcpHandlerDrain(reopened, 'owner').proof(identity).status).toBe('unknown')
+  expect((await new ClaudeMcpHandlerDrain(reopened, 'owner').proof(identity)).status).toBe('unknown')
   release(); await running
-  expect(new ClaudeMcpHandlerDrain(reopened, 'owner').proof(identity).status).toBe('mcp-handlers-drained')
+  expect((await new ClaudeMcpHandlerDrain(reopened, 'owner').proof(identity)).status).toBe('mcp-handlers-drained')
 })
 
 test('revocation and foreign admission generation refuse without invoking; legacy coverage stays unknown', async () => {
@@ -61,7 +61,7 @@ test('revocation and foreign admission generation refuse without invoking; legac
   const adopted = { ...identity, childGeneration: 'legacy', adopted: true }
   await ledger.dispatch(adopted, call, 'args', () => true, async () => count++)
   await ledger.close(adopted)
-  expect(ledger.proof(adopted).status).toBe('unknown')
+  expect((await ledger.proof(adopted)).status).toBe('unknown')
   expect(count).toBe(1)
 })
 
@@ -70,7 +70,7 @@ test('unserializable returned outcome leaves durable acceptance unknown, never r
   const cyclic: { value?: unknown } = {}; cyclic.value = cyclic
   await expect(ledger.dispatch(identity, call, 'args', () => true, async () => cyclic)).rejects.toThrow()
   await ledger.close(identity)
-  expect(ledger.proof(identity).status).toBe('unknown')
+  expect((await ledger.proof(identity)).status).toBe('unknown')
 })
 
 test('same covered parent survives adoption; a stale admission generation cannot reopen', async () => {
@@ -82,7 +82,7 @@ test('same covered parent survives adoption; a stale admission generation cannot
   await db.run('UPDATE project_admission_fences SET generation = generation + 1', [])
   await expect(restarted.dispatch(adopted, call + '3', 'third', () => true, async () => 'wrong')).rejects.toThrow()
   await restarted.close(adopted)
-  expect(restarted.proof(adopted).status).toBe('mcp-handlers-drained')
+  expect((await restarted.proof(adopted)).status).toBe('mcp-handlers-drained')
 })
 
 test('failed durable outcome and malformed evidence remain unknown', async () => {
@@ -93,15 +93,64 @@ test('failed durable outcome and malformed evidence remain unknown', async () =>
   await expect(ledger.dispatch(identity, call, 'args', () => true, async () => ++calls)).rejects.toThrow()
   expect(calls).toBe(1)
   await ledger.close(identity)
-  expect(ledger.proof(identity).status).toBe('unknown')
+  expect((await ledger.proof(identity)).status).toBe('unknown')
   await db.exec('DROP TRIGGER fail_handler_outcome')
   await db.run("UPDATE claude_mcp_handler_calls SET outcome = 'not-evidence'", [])
-  expect(ledger.proof(identity).status).toBe('unknown')
+  expect((await ledger.proof(identity)).status).toBe('unknown')
 })
 
 test('closing an unobserved identity cannot manufacture coverage or permit its first call', async () => {
   const { ledger } = await fixture()
   await ledger.close(identity)
-  expect(ledger.proof(identity).status).toBe('unknown')
+  expect((await ledger.proof(identity)).status).toBe('unknown')
   await expect(ledger.dispatch(identity, call, 'args', () => true, async () => 'wrong')).rejects.toThrow('closed')
+})
+
+for (const commit of [false, true]) {
+  test(`proof waits for settlement ${commit ? 'commit and then accepts' : 'rollback and remains unknown'}`, async () => {
+    const { ledger, db } = await fixture()
+    let handlerEntered!: () => void; let releaseHandler!: () => void
+    const entered = new Promise<void>(resolve => { handlerEntered = resolve })
+    const handlerGate = new Promise<void>(resolve => { releaseHandler = resolve })
+    const running = ledger.dispatch(identity, call, 'args', () => true, async () => {
+      handlerEntered(); await handlerGate; return 'returned'
+    }).then(() => 'returned', () => 'rejected')
+    await entered
+    await ledger.close(identity)
+    let settlementEntered!: () => void; let releaseSettlement!: () => void
+    const settling = new Promise<void>(resolve => { settlementEntered = resolve })
+    const settlementGate = new Promise<void>(resolve => { releaseSettlement = resolve })
+    const transaction = db.transaction.bind(db)
+    let intercept = true
+    db.transaction = <R>(fn: (tx: ProjectDb) => R | Promise<R>): Promise<R> => transaction(async tx => {
+      const value = await fn(tx)
+      if (intercept) {
+        intercept = false
+        settlementEntered(); await settlementGate
+        if (!commit) throw new Error('simulated settlement rollback before COMMIT')
+      }
+      return value
+    })
+    releaseHandler(); await settling
+    let proofResolved = false
+    const proof = ledger.proof(identity).then(value => { proofResolved = true; return value })
+    try {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      expect(proofResolved).toBe(false)
+    } finally { releaseSettlement() }
+    expect(await running).toBe(commit ? 'returned' : 'rejected')
+    expect((await proof).status).toBe(commit ? 'mcp-handlers-drained' : 'unknown')
+    expect((await ledger.proof(identity)).status).toBe(commit ? 'mcp-handlers-drained' : 'unknown')
+  })
+}
+
+test('nested transaction cannot attest its own uncommitted snapshot or disturb its caller', async () => {
+  const { ledger, db } = await fixture()
+  await ledger.dispatch(identity, call, 'args', () => true, async () => 'done')
+  await ledger.close(identity)
+  await db.transaction(async tx => {
+    expect((await ledger.proof(identity)).status).toBe('unknown')
+    expect(tx.get<{ count: number }>('SELECT COUNT(*) AS count FROM claude_mcp_handler_calls', [])?.count).toBe(1)
+  })
+  expect((await ledger.proof(identity)).status).toBe('mcp-handlers-drained')
 })

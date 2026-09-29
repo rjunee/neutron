@@ -53,7 +53,11 @@ fence is not a process fence or proof that native shell/file effects ended.
 - [ ] The read-only exact-generation proof distinguishes a closed, affirmatively
       handler-complete generation from unknown. An adopted generation with no
       previous coverage ledger remains unknown even after its observed calls
-      return. Downstream effects remain unknown in both cases.
+      return. Proof waits for the database mutex and reads a committed snapshot;
+      a concurrently held settlement that rolls back cannot transiently certify
+      drain, while a successful commit permits it. A proof requested inside a
+      caller's uncommitted transaction remains unknown. Downstream effects remain
+      unknown in all cases.
 - [ ] Both-direction tests cover authorized execution and closure/refusal,
       delayed-body revocation, duplicate/conflicting calls, crash gaps, persistence
       failure and generation isolation. Consuming coverage in

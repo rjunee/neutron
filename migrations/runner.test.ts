@@ -229,6 +229,7 @@ test('first apply runs all migrations in order and records them in _migrations',
     162,
     163,
     164,
+    165,
   ])
   expect(result.skipped).toEqual([])
 

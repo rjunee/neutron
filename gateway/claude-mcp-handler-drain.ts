@@ -77,25 +77,30 @@ export class ClaudeMcpHandlerDrain implements ClaudeToolHandlerAdmission {
   }
 
   /** Read-only, exact identity. Never a native-lease release or recovery authority. */
-  proof(input: ClaudeToolGeneration): { status: 'mcp-handlers-drained' | 'unknown'; downstreamEffects: 'unknown' } {
+  async proof(input: ClaudeToolGeneration): Promise<{ status: 'mcp-handlers-drained' | 'unknown'; downstreamEffects: 'unknown' }> {
+    // A caller's uncommitted transaction cannot supply a committed proof. Do not
+    // re-enter it (or begin a nested transaction) through ProjectDb's mutex bypass.
+    if (this.db.isInTransaction()) return { status: 'unknown', downstreamEffects: 'unknown' }
     try {
       const id = this.identity(input)
-      const row = this.db.get<{ closed: number; covered: number; pending: number; identity: string }>(
-        `SELECT g.closed, g.covered, g.identity,
-          (SELECT COUNT(*) FROM claude_mcp_handler_calls c WHERE c.generation_key = g.generation_key AND c.outcome IS NULL) AS pending
-          FROM claude_mcp_handler_generations g WHERE generation_key = ?`, [id.key])
-      const outcomesValid = this.db.all<{ outcome: string | null }>(
-        'SELECT outcome FROM claude_mcp_handler_calls WHERE generation_key = ?', [id.key]).every(call => {
-        if (call.outcome === null) return false
-        const value: unknown = JSON.parse(call.outcome)
-        if (typeof value !== 'object' || value === null) return false
-        const receipt = value as { kind?: unknown; sha256?: unknown }
-        return (receipt.kind === 'returned' || receipt.kind === 'threw')
-          && typeof receipt.sha256 === 'string' && /^[a-f0-9]{64}$/.test(receipt.sha256)
+      return await this.db.transaction(tx => {
+        const row = tx.get<{ closed: number; covered: number; pending: number; identity: string }>(
+          `SELECT g.closed, g.covered, g.identity,
+            (SELECT COUNT(*) FROM claude_mcp_handler_calls c WHERE c.generation_key = g.generation_key AND c.outcome IS NULL) AS pending
+            FROM claude_mcp_handler_generations g WHERE generation_key = ?`, [id.key])
+        const outcomesValid = tx.all<{ outcome: string | null }>(
+          'SELECT outcome FROM claude_mcp_handler_calls WHERE generation_key = ?', [id.key]).every(call => {
+          if (call.outcome === null) return false
+          const value: unknown = JSON.parse(call.outcome)
+          if (typeof value !== 'object' || value === null) return false
+          const receipt = value as { kind?: unknown; sha256?: unknown }
+          return (receipt.kind === 'returned' || receipt.kind === 'threw')
+            && typeof receipt.sha256 === 'string' && /^[a-f0-9]{64}$/.test(receipt.sha256)
+        })
+        return { status: row?.identity === id.identity && row.closed === 1 && row.covered === 1 && row.pending === 0
+          && outcomesValid
+          ? 'mcp-handlers-drained' as const : 'unknown' as const, downstreamEffects: 'unknown' as const }
       })
-      return { status: row?.identity === id.identity && row.closed === 1 && row.covered === 1 && row.pending === 0
-        && outcomesValid
-        ? 'mcp-handlers-drained' : 'unknown', downstreamEffects: 'unknown' }
     } catch { return { status: 'unknown', downstreamEffects: 'unknown' } }
   }
 }
