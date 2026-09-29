@@ -22,6 +22,8 @@
  * Probed live against claude 2.1.198's own parser warning. An out-of-set value
  * is silently ignored by the CLI, so tests pin membership.
  */
+import { PLANNER_PROFILE } from '../../../workers/planner-work.ts'
+
 export const CLAUDE_EFFORT_VALUES = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 
 // REASONING-EFFORT PIN — #345's twin, Claude side. Unpinned, the REPL runs at
@@ -127,6 +129,8 @@ export interface BuildReplArgvInput {
   allowedMcpTools?: ReadonlyArray<string>
   /** Token budget to pass when the installed CLI advertises `--autocompact`. */
   autocompactTokens?: number
+  /** Host profile is registered only with the project operation bridge. */
+  plannerRole?: boolean
 }
 
 /** Build the interactive `claude` argv as a plain string array (no shell, no
@@ -144,6 +148,7 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   argv.push('--dangerously-load-development-channels', `server:${input.channelName}`)
   argv.push('--mcp-config', input.mcpConfigPath)
   argv.push('--settings', input.settingsPath)
+  if (input.plannerRole) argv.push('--agents', PLANNER_PROFILE)
   // Default-deny tool surface (SECURITY-CRITICAL — see `tools` field docs).
   // Empty/undefined → `--tools ""` (disables every built-in); populated →
   // `--tools <comma-list>` so only the named built-ins survive.

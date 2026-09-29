@@ -180,6 +180,8 @@ export interface ReplReuseProperties {
   tool_surface: string
   /** `session.toolBridgeActive`: was the native-MCP tool bridge attached at spawn. */
   tool_bridge: boolean
+  /** Digest of the exact host-owned native planner --agents profile. */
+  planner_profile?: string
   /** `session.authFingerprint`: see {@link ReplRegistryRecord.reuse}. */
   auth_fingerprint: string
 }

@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises'
 import type { AgentSpec } from '../substrate.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bounded-work.ts'
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
+import { PLANNER_ROLE, PLANNER_NATIVE_TOOL, requiresPlannerWork } from './planner-work.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
 
 
@@ -49,7 +50,7 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
         if (held.kind === 'dispatch') {
           if (signal.aborted || Date.now() >= deadline) return unseen('Cancelled or out of time before dispatch.')
           const args = {
-            subagent_type: 'general-purpose',
+            subagent_type: requiresPlannerWork(req) ? PLANNER_ROLE : 'general-purpose',
             description: `${req.role}: ${req.step_id}`,
             model: req.model_id,
             run_in_background: true,
@@ -60,8 +61,11 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
               ...(req.role === 'review' || req.role === 'synthesis' ? [
                 'For a JSON review/synthesis brief, use structured field selection to inspect instruction, resultFile, verdictSchema, round, repair (when present), and panel metadata first. Then consume the complete measured snapshot.diff and every supplied seat verdict once, without truncating evidence. Avoid an initial whole JSON dump followed by rereading the same fields just to find instructions. If the brief uses another format, read it as supplied.',
               ] : []),
-              'Write the result directly with the harness file tool to result.path, using result.schema.',
-              'Write via a temporary file and rename on completion. The host reads this file; do not relay the result through the parent reply.',
+              ...(requiresPlannerWork(req) ? [
+                `Use ${PLANNER_NATIVE_TOOL} with the supplied secret capability and exact run_id and step_id. Start with brief(). Operations: brief; list(path); read(path); state; write(path,content); probe(path,kind,uncertainty) with kind syntax or json; publish(payload) or publish(blocked).`,
+                'Only the host publishes the result atomically. Preparatory edits remain uncommitted; the builder retains and validates them. No candidate tests or programs may execute during planning.',
+              ] : ['Write the result directly with the harness file tool to result.path, using result.schema.',
+                'Write via a temporary file and rename on completion. The host reads this file; do not relay the result through the parent reply.']),
             ].join('\n'),
           }
           // model_preference chooses the dispatch turn; model above independently

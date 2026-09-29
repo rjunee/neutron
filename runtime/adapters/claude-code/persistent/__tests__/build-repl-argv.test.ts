@@ -24,6 +24,11 @@ const base = {
 }
 
 describe('buildReplArgv', () => {
+  it('registers the closed native planner with exactly its host tool, independent of bypass permissions', () => {
+    const argv = buildReplArgv({ ...base, resume: false, tools: ['Agent', 'Bash'], skipPermissions: true, plannerRole: true })
+    expect(JSON.parse(argv[argv.indexOf('--agents') + 1]!)['neutron-planner-v1'].tools).toEqual(['mcp__neutron__planner_work'])
+    expect(argv).toContain('--dangerously-skip-permissions')
+  })
   it('uses the built-in native child route without injecting a spawn-only profile', () => {
     const argv = buildReplArgv({ ...base, resume: false,
       tools: ['Agent', 'Read', 'Bash', 'Write', 'Edit', 'ToolSearch'], allowedMcpTools: ['mcp__neutron'] })

@@ -7,6 +7,9 @@ import { claudeInReplRunner } from './claude-in-repl.ts'
 import { codexInReplRunner, type CodexResultTransport } from './codex-in-repl.ts'
 import { piInReplRunner } from './pi-in-repl.ts'
 import { unknownCause } from '../refusal-cause.ts'
+import { requiresPlannerWork } from './planner-work.ts'
+import { createHash } from 'node:crypto'
+import { readArmedTrailerReservation } from './trailer-slot.ts'
 
 export interface ProjectConversation {
   readonly project_id: string
@@ -133,9 +136,19 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
       return runner.supports(role, placement)
     },
     async run(request, placement, signal) {
+      if (requiresPlannerWork(request) && runner.provider !== 'anthropic') {
+        return { kind: 'refused', reason: 'capability-unsupported' }
+      }
       const supported = this.supports(request.role, placement)
       if (!supported.ok) return { kind: 'refused', reason: supported.reason }
       if (request.run_id !== runId) return unknown('Request run_id does not match the host run.')
+      if (request.role === 'plan' && !requiresPlannerWork(request)) {
+        const prefix = runner.provider === 'anthropic' ? 'claude' : runner.provider === 'openai-codex' ? placement === 'headless' ? 'codex-headless' : 'codex' : 'pi'
+        const hash = createHash('sha256').update(JSON.stringify([request.run_id, request.step_id])).digest('hex')
+        const held = await readArmedTrailerReservation(join(stateDir, `${prefix}-step-${hash}.json`), JSON.stringify(request), { signal })
+        if (held.kind !== 'resume' || !runner.recover) return { kind: 'refused', reason: 'capability-unsupported' }
+        return runner.recover(request, placement, signal)
+      }
       return runner.run(request, placement, signal)
     },
     ...(runner.recover ? {

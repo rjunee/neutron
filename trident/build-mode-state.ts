@@ -278,7 +278,9 @@ function completedBuildBindings(store: TridentRunStore, run: TridentRun, build: 
     for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       const worker = bindings.workers[role]
       if (!worker) return null
-      const version = role === 'plan' ? 'v4' : 'v3'
+      const closedPlanner = role === 'plan' && worker.request.tools === 'edit'
+      const version = role === 'plan' ? closedPlanner ? 'v5' : 'v4' : 'v3'
+      if (closedPlanner && (worker.provider !== 'anthropic' || worker.request.network !== false || worker.request.writable !== true)) return null
       const brief = evidence.read(join(root, `${role}.strategy-${version}.brief`))
       const hosted = evidence.read(worker.request.brief.path)
       if (dirname(worker.request.brief.path) !== root || !brief.startsWith(`${run.task}\n\n`)
