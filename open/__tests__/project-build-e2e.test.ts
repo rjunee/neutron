@@ -69,6 +69,10 @@ import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-stor
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 // eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
 import { summarizeUsageCoverage } from '../../tests/fixtures/trident-usage-coverage/summarize.ts'
+// eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
+import { decodeLedger } from '../../tests/fixtures/trident-ledger-delta/decode.ts'
+// eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
+import { compareLedgerDelta } from '../../tests/fixtures/trident-ledger-delta/compare.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { retryModeSource, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
@@ -5561,6 +5565,15 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   expect(f.world.dispatches.map(dispatch => dispatch.role)).toEqual(['plan', 'build'])
   expect(f.github.prs).toEqual([])
   const interruptedHead = lastCheckpoint(f).head
+  // The accepted plan persisted by the host's strategy selection, read before
+  // recovery (the resumed host re-selects and may replace it).
+  const acceptedPlan = JSON.parse(f.store.get(f.row.id)!.strategy_plan!) as { implementationPlan: unknown }
+  const acceptedLedger = decodeLedger(acceptedPlan.implementationPlan)
+  expect(acceptedLedger).toEqual({ ok: true, ledger: { tasks: [
+    { label: 'T1 record the note', completed: false },
+    { label: 'T2 record another note', completed: false },
+  ] } })
+  if (!acceptedLedger.ok) throw new Error(acceptedLedger.reason)
   if (boundary === 'zero-conflict') {
     const event = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state').at(-1)!
     const state = JSON.parse(event.meta!)
@@ -5605,6 +5618,18 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   const ledger = `.trident/ledgers/${f.store.get(f.row.id)!.branch}.md`
   const committed = await spawnCapture(['git', '-C', f.repo, 'show', `${lastCheckpoint(f).head}:${ledger}`], f.repo)
   expect(committed.stdout.trim()).toBe('- [x] T1 record the note\n- [ ] T2 record another note')
+  // The recovered branch-owned ledger bytes (spawnCapture already trims) must be
+  // exactly the accepted plan with task one, and only task one, completed.
+  const recoveredLedger = decodeLedger(committed.stdout)
+  if (!recoveredLedger.ok) throw new Error(recoveredLedger.reason)
+  const delta = compareLedgerDelta(acceptedLedger.ledger, recoveredLedger.ledger)
+  expect(delta).toEqual({ ok: true, completedLabel: 'T1 record the note',
+    after: { completed: 1, remaining: 1, firstUnchecked: '- [ ] T2 record another note' } })
+  if (!delta.ok) throw new Error(delta.reason)
+  const wrongOrder = decodeLedger('- [ ] T1 record the note\n- [x] T2 record another note')
+  if (!wrongOrder.ok) throw new Error(wrongOrder.reason)
+  expect(compareLedgerDelta(acceptedLedger.ledger, wrongOrder.ledger))
+    .toEqual({ ok: false, reason: 'task 0: first unchecked task not completed' })
   const main = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'main:NOTES.md'], f.repo)
   expect(main.stdout.trim()).toBe('seed')
 
@@ -5614,6 +5639,7 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   expect(terminal.kind, why(f, terminal)).toBe('merged')
   expect(f.world.plannerChoices).toEqual(['full', 'next'])
   expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note', '- [ ] T2 record another note'])
+  expect(delta.after.firstUnchecked).toBe(f.world.selectedTasks[1]!)
   expect(f.world.dispatches[0]).toMatchObject({ role: 'plan', step_id: `${f.row.id}:task:1:plan:0` })
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
 }, 300_000)
