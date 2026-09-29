@@ -208,7 +208,7 @@ async function toolCall(credential: string, callId: string, sessionId = SESSION)
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
     body: JSON.stringify({ session_id: sessionId, tool_name: 'work_board_add',
-      args: { title: `board item ${callId}` }, call_id: callId, project_id: 'forged-project' }),
+      args: { title: `board item ${callId}` }, call_id: callId.padEnd(16, '_'), project_id: 'forged-project' }),
   })
   return { status: response.status, body: await response.json() as Record<string, unknown> }
 }
@@ -257,6 +257,13 @@ test('production graph grants two project survivors only after bridge wiring, wi
     [secondKey]: registryRow(secondKey, SECOND_HANDLE, SECOND_GENERATION, secondDevChannel.port!,
       { session: SECOND_SESSION, channel: SECOND_CHANNEL, pid: SECOND_PID }),
   }
+  // These two tool-capable survivors carry their original durable generation;
+  // legacy unstamped rows in the other tests deliberately remain unknown.
+  const originalAdmission = new ProjectAdmission({ db: db!, ownerHandle: 'owner', bootId: 'prior-boot' })
+  for (const [key, project] of [[goodKey, PROJECT], [secondKey, SECOND_PROJECT]] as const) {
+    await originalAdmission.maintenance.register(originalAdmission.scopeFor(project))
+    registry[key]!.admission_generation = originalAdmission.inspect(project)!.generation
+  }
   writeFileSync(paths.replRegistryPath, JSON.stringify(registry, null, 2))
 
   // Only phase-spec prewarm reaches this seam: adoption itself constructs no
@@ -297,7 +304,7 @@ test('production graph grants two project survivors only after bridge wiring, wi
     expect((await pool.get(secondKey))?.child.paneHandle).toBe(SECOND_HANDLE)
     const accepted = await toolCall(childCredential, 'good')
     expect(accepted.status).toBe(200)
-    expect(accepted.body['ok']).toBe(true)
+    expect(accepted.body['ok'], JSON.stringify(accepted.body)).toBe(true)
     const secondAccepted = await toolCall(secondCredential, 'second', SECOND_SESSION)
     expect(secondAccepted.status).toBe(200)
     expect(secondAccepted.body['ok']).toBe(true)
@@ -673,6 +680,12 @@ test('stable credential IDs adopt only when the surviving child still has the cu
   const cursorBefore = credentials.cursor
   const dispatched: Array<{ project_id: string | null | undefined }> = []
   setReplToolBridge({
+    // Credential-adoption routing fixture; the production graph test above and
+    // project-build E2E exercise the real durable handler ledger.
+    claudeHandlerAdmission: { dispatch: async (_identity, _id, _binding, current, handler) => {
+      if (!current()) throw new Error('revoked')
+      return await handler()
+    } },
     listToolSchemas: () => [{ name: 'work_board_add', description: 'capture project', input_schema: { type: 'object' } }],
     dispatch: async (input) => { dispatched.push({ project_id: input.project_id }); return { project_id: input.project_id } },
   })

@@ -1,4 +1,5 @@
 import type { CallToolRequest } from '@modelcontextprotocol/sdk/types.js'
+import { randomUUID } from 'node:crypto'
 import { interpretSinkToolResponse, type SinkToolResponse } from './tools-bridge-response.ts'
 
 interface ToolCallConfig {
@@ -16,8 +17,9 @@ export function createToolCallHandler(config: ToolCallConfig, fetchImpl: typeof 
    * (reminder_create, note, dispatch_agent, …) ran by the sink handler must not
    * be re-executed if the loopback connection drops AFTER the handler ran but
    * BEFORE the response is read (fetch would reject and a retry would double-write).
-   * `/tool-call` carries no idempotency key, so a failed POST surfaces as an
-   * `isError` tool_result the model can retry DELIBERATELY (vs. a silent duplicate).
+   * `/tool-call` carries a unique invocation ID and the sink journals admission,
+   * but a missing reply still does not prove an effect failed. A failed POST
+   * surfaces as an `isError` result; this bridge never automatically replays it.
    * This is the deliberate divergence from the dev-channel's retried `/reply`
    * (which is idempotent — turn-id correlated, and a stale re-post is rejected).
    *
@@ -45,7 +47,7 @@ export function createToolCallHandler(config: ToolCallConfig, fetchImpl: typeof 
         session_id: config.sessionId,
         tool_name: toolName,
         args,
-        call_id: `${config.sessionId}:${toolName}`,
+        call_id: randomUUID(),
       })
       // THE HTTP STATUS IS PART OF THE ANSWER. It used to be discarded here, and
       // that is how a 401 from a sink that no longer knows this child reached the

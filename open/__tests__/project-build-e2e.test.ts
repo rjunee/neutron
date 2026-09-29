@@ -8872,6 +8872,67 @@ test('no terminal host: cross-provider workers run unplaced with the reason on r
   for (const receipt of receipts) expect(receipt).toEqual({ state: 'unplaced', reason: 'herdr-unconfigured' })
 }, 300_000)
 
+test('Claude MCP handler drain does not release a delegated build or native child (#1416)', async () => {
+  const f = await fixture({})
+  const { ClaudeMcpHandlerDrain } = await import('@neutronai/gateway/claude-mcp-handler-drain.ts')
+  const { ReplSink, replToolBridgeRef } = await import('@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts')
+  const { ReplSession } = await import('@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts')
+  const admission = new ProjectAdmission({ db: f.db, ownerHandle: 'handler-owner', bootId: 'handler-boot' })
+  await admission.maintenance.register(admission.scopeFor(null))
+  const ledger = new ClaudeMcpHandlerDrain(f.db, 'handler-owner')
+  const identity = { sessionId: 'handler-parent', childGeneration: 'handler-birth', projectId: null,
+    admissionGeneration: admission.inspect(null)!.generation, adopted: false }
+  const session = new ReplSession('handler-key', identity.childGeneration, identity.sessionId, 'channel', f.dir)
+  session.toolBridgeActive = true; session.admissionGeneration = identity.admissionGeneration
+  const sink = new ReplSink()
+  // Exercise the production request handler without opening a network listener.
+  // Explicit isolated token avoids any ambient sink/token file.
+  Reflect.set(sink, 'tokenValue', 'isolated-handler-test-token')
+  const previous = replToolBridgeRef.current
+  let invocations = 0
+  replToolBridgeRef.current = {
+    listToolSchemas: () => [], claudeHandlerAdmission: ledger,
+    dispatch: async () => {
+      invocations++
+      return await dispatchBoardBoundBuild({ task: 'Verify the handler boundary without releasing retained work.', board_item_id: 'handler-card' }, {
+        store: f.store, projectAdmission: admission.forDispatch(null, 'work-board'), project_slug: 'project', repo_path: f.repo,
+        board: { get: () => ({ id: 'handler-card', title: 'Verify the handler boundary without releasing retained work, preserving original child ownership and all existing review gates.', design_doc_ref: null, linked_run_id: null }), attachRun: async () => {} },
+        resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', hostRunner: f.context.runHost,
+      })
+    },
+  }
+  cleanups.push(() => { sink.unregister(identity.sessionId); replToolBridgeRef.current = previous })
+  sink.register(identity.sessionId, session)
+  const handle = (request: Request): Promise<Response> => Reflect.get(sink, 'handle').call(sink, request)
+  const request = () => new Request('http://localhost/tool-call', { method: 'POST',
+    headers: { 'X-Sink-Token': sink.credentialFor(session) },
+    body: JSON.stringify({ tool_name: 'work_board_start', call_id: '14160000-0000-4000-8000-000000000001', args: {} }) })
+  const response = await (await handle(request())).json() as { ok: boolean; result: { ok: boolean; run: { id: string } } }
+  expect(response.ok, JSON.stringify(response)).toBe(true); expect(response.result.ok, JSON.stringify(response.result)).toBe(true)
+  const runId = response.result.run.id
+  expect((await admission.forNativeChild(null).admit(runId, 'retained-step')).status).toBe('admitted')
+  const leases = admission.listLeases()
+  // Authentication occurs before JSON parsing; revoke while the body is pending.
+  const delayedRequest = request()
+  let provideBody!: (value: unknown) => void
+  Reflect.set(delayedRequest, 'json', () => new Promise(resolve => { provideBody = resolve }))
+  const delayed = handle(delayedRequest)
+  sink.unregister(identity.sessionId)
+  provideBody({ tool_name: 'work_board_start', call_id: '14160000-0000-4000-8000-000000000002', args: {} })
+  expect((await delayed).status).toBe(401)
+  // Local eviction is NOT durable generation closure; the surviving parent can
+  // re-register and the existing covered ledger remains usable after adoption.
+  session.adopted = true
+  sink.register(identity.sessionId, session)
+  expect(ledger.proof(identity).status).toBe('unknown')
+  await ledger.close(identity)
+  expect(ledger.proof(identity)).toEqual({ status: 'mcp-handlers-drained', downstreamEffects: 'unknown' })
+  expect((await (await handle(request())).json() as { ok: boolean }).ok).toBe(false)
+  expect(invocations).toBe(1)
+  expect(admission.listLeases()).toEqual(leases)
+  expect(f.store.get(runId)?.phase).not.toBe('stopped')
+}, 300_000)
+
 test('project admission end to end: fenced dispatch queues, reopened dispatch leases run.id, terminal chain releases, restart re-leases (#1237)', async () => {
   const f = await fixture({})
   // The composer's wiring, over the fixture's own database: the board scope key

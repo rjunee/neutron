@@ -1315,6 +1315,12 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     const dispatched: string[] = []
     const tapped: string[] = []
     setReplToolBridge({
+      // These tests isolate credential routing; durable admission is exercised
+      // with the real ledger in the consuming project-build suite.
+      claudeHandlerAdmission: { dispatch: async (_identity, _id, _binding, current, handler) => {
+        if (!current()) throw new Error('revoked')
+        return await handler()
+      } },
       listToolSchemas: () => [
         { name: 'note', description: 'write a note', input_schema: { type: 'object' } },
       ],
