@@ -130,7 +130,9 @@ dated rollout, applies only that source's options, and returns observations,
 coverage, private source identity, scan byte counts and a serializable checkpoint.
 The initial backfill covers at most 1 GiB of source bytes; later calls read only
 bytes after the checkpoint's captured byte boundary. Each new range is fingerprinted
-and then parsed in 64 KiB chunks, rejecting changed bytes even when timestamps alias.
+and then parsed in 64 KiB chunks. A digest mismatch between the two passes refuses,
+even when timestamps alias. Rewrites completed before fingerprinting begins or made
+after the parsing pass ends can remain undetected when metadata also permits them.
 `scan.readBytes` reports total physical bytes read, the sum of `parsedBytes` and
 `verificationBytes`; a successful nonempty range is read twice. Only importer-consumed receipt fields are
 retained in a private journal capped at 128 MiB and one million records. Command
@@ -155,7 +157,8 @@ to recover even after checkpoint persistence. Keep both journals private: checkp
 records include native receipt details and paths. Export only observations and
 aggregate coverage. Report coverage as registered-source scope; unregistered
 history is unknown, not zero. Missing checkpoints trigger bounded backfill;
-invalid checkpoints, replacements, truncation and same-size rewrites refuse.
+invalid checkpoints, replacements and truncation refuse. Same-size rewrites refuse
+when metadata changes or the two passes produce different digests.
 Append-only growth is assumed for the durable checkpoint prefix, which is never
 reread. Rewriting that earlier prefix while growing the file, or a same-size
 rewrite whose timestamps alias, cannot be detected by stat identity checks.

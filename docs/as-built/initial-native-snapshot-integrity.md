@@ -1,11 +1,13 @@
 ## 2026-09-28 — Verify newly consumed native snapshot bytes
 
-A same-size, valid-JSON rewrite between descriptor validation and an initial
-registered read could be accepted when filesystem timestamps aliased. Metadata
-alone did not bind the captured range to the bytes parsed. Both directory
-snapshot capture and registered import now fingerprint their newly consumed range
-before the existing race boundary and compare it with the captured or parsed
-bytes (`scripts/build-timeline-codex-discover.ts:35`, `:56`, `:139`, `:166`).
+Metadata alone could accept same-size, valid-JSON rewrites when filesystem
+timestamps aliased. Directory snapshot capture and registered import now
+fingerprint their newly consumed range and reject a digest mismatch with the
+bytes subsequently captured or parsed
+(`scripts/build-timeline-codex-discover.ts:56`, `:66`, `:139`, `:166`).
+This comparison does not detect rewrites completed before fingerprinting begins
+or made after the capture or parsing pass ends; those rewrites can remain
+undetected when metadata also permits them.
 Reads use at most 64 KiB per chunk. A checkpointed import starts both passes at
 the saved offset; an unchanged range performs no file reads. Checkpoint version,
 custody, path checks, limits and receipt projection retain their existing contract.
@@ -35,3 +37,18 @@ permission after the sandbox rejected its ephemeral listener. Root and Trident
 `bun install --frozen-lockfile --offline`. Full-suite and publication validation
 remain with the integrating change; no deployment or private consumer change is
 claimed here.
+
+The first coordinated integration check on `9ae1928c12fffe7fae55ccf0fdea0e09a027a4f3`
+passed all 51 TypeScript projects but failed this pre-existing rewrite control.
+The unchanged base and candidate carried identical guard and test blobs. After
+this repair, `bash scripts/check-shared-host.sh` on the frozen integrated code
+revision `a6b70aa328a02036121ce5ece73477a5ed269e4a` exited zero on 2026-09-29:
+all 51 TypeScript projects and all 1,751 discovered test files across 19 lanes
+passed. Its before/after suite-input identity remained
+`2a20e9db0bd2335103e28999e4da5b2df1a0e862994cafb20a67144e6d379e72`.
+Independent native review passed. Complete-diff Claude Fable review found no
+runtime or test blocker, but required narrower claims about the comparison
+window; bounded arbitration accepted the exact corrected wording above.
+Only documentation and these new records changed after that code validation.
+The final publication head still requires its own CI; this is not a portable
+receipt, deployment proof or completion of #1313.

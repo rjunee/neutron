@@ -62,3 +62,18 @@ remained enabled. Full matrix and full partitioned-suite publication checks are
 reserved for the coordinated publication run; no full-suite completion is claimed
 by this focused receipt. No deployment or live worker measurement was performed,
 so this record claims no time or token saving and does not close #1196.
+
+The frozen combined code revision `a6b70aa328a02036121ce5ece73477a5ed269e4a`
+subsequently passed `bash scripts/check-shared-host.sh` on 2026-09-29: all 51
+TypeScript projects and all 1,751 discovered test files across 19 lanes, with
+before/after suite-input identity
+`2a20e9db0bd2335103e28999e4da5b2df1a0e862994cafb20a67144e6d379e72` unchanged.
+Independent native and complete-diff Claude Fable review passed the combined
+nomination/worker-scope code. Bounded canonical privacy screening found zero
+introduced findings in its tracked changes and outgoing commit messages. The
+earlier whole tracked-tree scans still failed with 451 byte-identical inherited
+findings; this does not claim a whole-local purity pass or equivalence with the
+CI denylist. Required final-head purity CI remains binding.
+Only documentation and these new records changed after the passing code check.
+Publication, deployment and measured live worker compliance remain unproved;
+neither this receipt nor CI alone establishes a time or token saving.
