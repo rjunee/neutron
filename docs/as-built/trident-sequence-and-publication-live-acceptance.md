@@ -29,15 +29,19 @@ merged implementations, not a claim that the present efficiency batch is served.
 
 ### Fresh adopted-chat witness
 
-A fresh adopted-project-chat dispatch produced run
+A fresh Work Board card dispatched through its adopted project chat produced run
 `8083aef9-507c-47fb-bab0-361381c53f0e`, strategy `task_sequence`, three tasks.
 Its canonical terminal state is DONE/APPROVE with no failure reason. It reused
 eligible completed-task evidence without replaying planning or building, then
-obtained fresh head-bound suite proof and reviews after a necessary fixture fix.
+obtained fresh head-bound suite proof and reviews after Trident's own in-run
+fix worker corrected the fixture. Its original task-2 fix attempt completed
+between 05:44:53 and 05:49:19 UTC; no human or external orchestrator edited the
+build branch to supply that fix.
 Trident itself merged PR #1408 unattended at **2026-09-29 06:15:42 UTC**, from
 reviewed head `6454883ebfe919237eaee9ad1e23272a0fc307ba` to merge
 `48f84e7264870534090058a4c956a541c0cf2fa6`. The orchestrator independently read
-the canonical run and GitHub merge receipt; no manual merge satisfied this test.
+the canonical run, linked Work Board card and GitHub merge receipt. The run
+reached merge without human intervention; no manual merge satisfied this test.
 
 ### Served-source and absence controls
 

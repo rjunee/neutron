@@ -340,7 +340,8 @@ test('package fixture cleanup restores present and absent keys without restoring
       process.env.ENV = 'changed fixture input'
       process.env.LAUNCHER_FIXTURE_INPUT = 'during fixture'
       restore()
-      expect(process.env.ENV).toBe(original)
+      if (original === undefined) expect(process.env.ENV).toBeUndefined()
+      else expect(process.env.ENV).toBe(original)
       expect(Object.hasOwn(process.env, 'ENV')).toBe(original !== undefined)
       expect(process.env.LAUNCHER_FIXTURE_INPUT).toBe('during fixture')
     }

@@ -103,7 +103,7 @@ identity fixture's blanket environment restoration. The fixture now preserves
 only the one finite environment key its scenario changes: `ENV`, `BASHOPTS`,
 `SHELLOPTS`, `BUN_OPTIONS`, `npm_config_script_shell`, or `PATH`; scenarios that
 change files preserve no environment key
-(`open/__tests__/project-suite-identity.test.ts:321`, `:360`, `:395`). The explicit
+(`open/__tests__/project-suite-identity.test.ts:321`, `:361`, `:396`). The explicit
 cleanup control checks both an originally present value and an originally absent
 key, and proves an unrelated environment change survives cleanup (`:331`).
 This is a test-fixture repair; the live-proof switch guard remains unchanged.
@@ -122,3 +122,9 @@ Focused repair evidence on the integrated candidate based on
 
 The publication owner consolidates the required final checks; this focused
 repair does not claim a new full-suite, consuming E2E or TypeScript matrix result.
+
+The integrated TypeScript matrix caught a type error in the new control's
+union-valued expected argument. Its absent-key branch now uses `toBeUndefined()`;
+the present-key branch retains the exact-value assertion. Neither behavior nor
+the live-proof guard is weakened. Final publication checks remain separate from
+the earlier Bun compilation evidence.
