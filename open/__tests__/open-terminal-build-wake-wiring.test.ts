@@ -211,6 +211,97 @@ const wakeFrames = (frames: Array<Record<string, unknown>>): Array<Record<string
   )
 
 describe('Open terminal-build wake observer wiring', () => {
+  test.each(['none', 'read', 'observer'] as const)('five held wakes cannot starve the sixth ready project; held wakes retry within the sweep cap (%s fault)', async (fault) => {
+    seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+    const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+    await seedProject(db, 'held')
+    await seedProject(db, 'ready')
+    let stamp = 1_700_000_000_000
+    const runs = new TridentRunStore(db, () => new Date(stamp += 1000).toISOString())
+    const ids: string[] = []
+    for (let i = 0; i < 6; i++) {
+      const project = i < 5 ? 'held' : 'ready'
+      const run = await runs.create({ slug: `fair-wake-${i}`, project_slug: workBoardScopeKey('owner', project),
+        repo_path: '/tmp/repo', task: 'terminal decision', chat_id: `app:owner:${project}`, channel_kind: 'app_socket' })
+      await runs.update(run.id, { phase: 'done' })
+      ids.push(run.id)
+    }
+    let sweep: SupervisedLoop | undefined
+    const start = SupervisedLoop.prototype.start
+    const capture = spyOn(SupervisedLoop.prototype, 'start').mockImplementation(function(this: SupervisedLoop) {
+      if (this.describe().name === 'terminal-build-decisions') sweep = this
+      return start.call(this)
+    })
+    const composition = await buildOpenGraphComposer({ env: process.env, ownerBearer: OWNER_BEARER,
+      substrateFactory: recordingSubstrate })({ db, project_slug: 'owner' })
+    capture.mockRestore()
+    const checked: string[] = []
+    const completed = TridentRunStore.prototype.agentWakeCompleted
+    const attempts = spyOn(TridentRunStore.prototype, 'agentWakeCompleted').mockImplementation(function(this: TridentRunStore, id) {
+      checked.push(id)
+      return completed.call(this, id)
+    })
+    try {
+      const admission = composition.project_admission!
+      const scope = admission.scopeFor('held')
+      await admission.maintenance.register(scope)
+      let fence = (await admission.maintenance.beginMaintenance(scope))!
+      await sweep!.runOnce()
+      expect(checked.splice(0)).toEqual(ids.slice(0, 5))
+      expect(wakeDispatches).toHaveLength(0)
+      if (fault === 'read') {
+        const read = spyOn(TridentRunStore.prototype, 'listPendingAgentWakes').mockImplementationOnce(() => {
+          throw new Error('synthetic inbox read failure')
+        })
+        try {
+          expect(await sweep!.runOnce()).toEqual({ ran: false, skipped: false })
+          expect(checked).toEqual([])
+        } finally { read.mockRestore() }
+      }
+      if (fault === 'observer') {
+        attempts.mockImplementationOnce((id) => {
+          checked.push(id)
+          throw new Error('synthetic observer read failure')
+        })
+        expect(await sweep!.runOnce()).toEqual({ ran: false, skipped: false })
+        expect(checked.splice(0)).toEqual([ids[5]!])
+        // The failed attempt advanced the cursor: retry the earlier held rows,
+        // then wrap back to the still-pending ready row on the following sweep.
+        await sweep!.runOnce()
+        expect(checked.splice(0)).toEqual(ids.slice(0, 5))
+        expect(completed.call(runs, ids[5]!)).toBe(false)
+      }
+      await sweep!.runOnce()
+      const second = checked.splice(0)
+      expect(second.length).toBeLessThanOrEqual(5)
+      expect(second).toContain(ids[5]!)
+      expect(completed.call(runs, ids[5]!)).toBe(true)
+      expect(wakeDispatches.map(wake => wake.project_id)).toEqual(['ready'])
+      expect(db.all('SELECT topic_id FROM button_prompts WHERE body = ?', [wakeReply]))
+        .toEqual([{ topic_id: 'app:owner:ready' }])
+      for (const id of ids.slice(0, 5)) expect(completed.call(runs, id)).toBe(false)
+      expect(admission.inspect('held')).toMatchObject({ phase: 'draining', leases: 0 })
+
+      for (let i = 0; i < 3; i++) fence = (await admission.maintenance.advance(fence))!
+      expect(await admission.maintenance.reopen(fence)).toBe(true)
+      for (let i = 0; i < 2; i++) {
+        await sweep!.runOnce()
+        const retried = checked.splice(0)
+        expect(retried.length).toBeLessThanOrEqual(5)
+        expect(retried).not.toContain(ids[5]!)
+      }
+      for (const id of ids) expect(completed.call(runs, id)).toBe(true)
+      expect(wakeDispatches).toHaveLength(6)
+      expect(db.all('SELECT topic_id FROM button_prompts WHERE body = ?', [wakeReply])).toHaveLength(6)
+      await sweep!.runOnce()
+      expect(checked).toEqual([])
+    } finally {
+      attempts.mockRestore()
+      for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
+      db.close()
+    }
+  }, 30_000)
+
   test('board termination claims and posts exactly one wake turn to the originating chat', async () => {
     harness = await startHarness()
     await seedProject(harness.db, 'acme')

@@ -624,6 +624,9 @@ const TERMINAL_PHASE_SQL = "('done', 'failed', 'stopped')"
  *  post, so this is the rate the owner experiences a drain at, not a query cost. */
 const PENDING_AGENT_WAKE_LIMIT = 5
 
+/** Ordering position, independent of whether the selected run still exists. */
+export type PendingAgentWakeCursor = Pick<TridentRun, 'last_advanced_at' | 'id'>
+
 /**
  * A full git object id, the ONLY shape a seeded head or base pin may take. The
  * same literal as `builtButNeverReviewedSeed`'s (trident/run-disposition.ts) and
@@ -1795,26 +1798,27 @@ export class TridentRunStore {
     return won ? this.get(id) : null
   }
 
-  /** Terminal rows are the durable inbox; completion is written only after admission. */
   /**
-   * Terminal runs still owed a project decision turn, OLDEST FIRST.
-   *
-   * BOUNDED, and the bound is not a performance knob. Each row this returns costs
-   * one owner-facing decision turn, so an unbounded sweep converts any backlog —
-   * a migration that left rows unstamped, an outage, a boot after downtime — into
-   * that many posts at once, on a 60 s cadence. The limit paces the drain instead:
-   * the queue still empties, oldest first, and the owner sees it arrive rather
-   * than all of it landing in one minute. 0143 settled the one backlog that
-   * existed when this shipped; this is what keeps the next one from mattering.
+   * Terminal rows are the durable inbox; selection never completes a wake.
+   * Read at most five owed turns in circular (last_advanced_at, id) order,
+   * starting just after the caller's last attempted row. Without a cursor start
+   * oldest first. Refused rows remain eligible on wraparound, and a removed or
+   * completed cursor row cannot shift the position as an OFFSET would.
+   * The caller retains its cursor on a failed read and resets it on restart.
    */
-  listPendingAgentWakes(limit: number = PENDING_AGENT_WAKE_LIMIT): TridentRun[] {
-    return this.db.prepare<TridentRunDbRow, [number]>(
+  listPendingAgentWakes(
+    limit: number = PENDING_AGENT_WAKE_LIMIT,
+    after?: PendingAgentWakeCursor,
+  ): TridentRun[] {
+    if (!Number.isInteger(limit) || limit < 0) throw new RangeError('Invalid pending wake limit')
+    return this.db.prepare<TridentRunDbRow, [string, string, number]>(
       `SELECT ${COLS} FROM code_trident_runs
        WHERE phase IN ${TERMINAL_PHASE_SQL} AND agent_waked_at IS NULL
          AND chat_id <> ''
-       ORDER BY last_advanced_at ASC
+       ORDER BY CASE WHEN (last_advanced_at, id) > (?, ?) THEN 0 ELSE 1 END,
+                last_advanced_at ASC, id ASC
        LIMIT ?`,
-    ).all(limit).map(rowToRun)
+    ).all(after?.last_advanced_at ?? '', after?.id ?? '', Math.min(limit, PENDING_AGENT_WAKE_LIMIT)).map(rowToRun)
   }
 
   agentWakeCompleted(id: string): boolean {
