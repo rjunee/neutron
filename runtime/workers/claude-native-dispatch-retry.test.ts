@@ -9,7 +9,7 @@ test('nonaborted same-step refusal retry cannot invoke actor again; a new step c
   const dir = await mkdtemp(join(tmpdir(), 'native-retry-control-'))
   try {
     const request: BoundedWorkRequest = { run_id: 'run', step_id: 'step', role: 'plan', model_id: 'model', effort: null,
-      cwd: dir, writable: false, network: false, tools: 'read-only', brief: { path: join(dir, 'brief'), integrity: 'digest' },
+      cwd: dir, writable: true, network: false, tools: 'edit', brief: { path: join(dir, 'brief'), integrity: 'digest' },
       result: { path: join(dir, 'result'), schema: 'schema' }, thread: null, budget: { wall_ms: 100 }, needs_approval_decision: false }
     let calls = 0
     const options: ProjectRunnersOptions = { conversation: { project_id: 'project', topic_id: 'topic', provider: 'anthropic',

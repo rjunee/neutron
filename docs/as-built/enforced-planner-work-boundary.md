@@ -61,6 +61,15 @@ adapter tests and 22 focused consuming recovery cases, including actual headless
 reservations, missing/foreign refusal, restored recovery without replay, and old
 schema/policy controls. Earlier red historical fixtures are not counted as passes.
 
+The subsequent integration run exposed a retry fixture still using an unsupported
+fresh read-only planner request. Its request now uses the writable `edit` grant
+with network disabled (`runtime/workers/claude-native-dispatch-retry.test.ts:12`).
+Production code and all retry assertions are unchanged: first refusal invokes
+the actor once, a live-signal same-step retry stays unknown without another call,
+and a distinct step invokes the actor again. The correction passed 44 native
+runner/retry tests and four focused project-runner controls. The failed integration
+run remains red evidence, not a completed full-suite pass.
+
 The local full-tree privacy scan remained red. An independent immutable-tree
 comparison found the same 451 findings at the base and first frozen candidate;
 the linked worktree added one untracked administrative-pointer finding. The
