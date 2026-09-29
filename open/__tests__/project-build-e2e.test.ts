@@ -1897,6 +1897,7 @@ test('restart sweep still salvages an ordinary failed build with real unpushed G
   }, { writesDiffOutput: true as const })
   const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('sweep must not fire workers') },
     db_path: f.input.db_path, base_branch: 'main', run_host: runHost, sleep: async () => {},
+    recovery_salvage_protected: id => f.store.isOrchestratorRecoverySalvageProtected(id),
     persist_refire_reset: async (id, patch) => { await f.store.update(id, patch) },
     leak_preflight: async input => ({ status: 'clean', head: input.head,
       findings: [], skipped_rules: [], attempts: 0, note: 'fixture scanner' }) })
@@ -2433,6 +2434,74 @@ test('fake GitHub projection freshly resolves each exact ref and preserves missi
   expect(await git(f.origin, ['rev-parse', 'refs/heads/main'])).toBe(moved)
   expect(f.github.prs[0]!.state).toBe('MERGED')
 })
+
+test('a pre-fire failed recovery successor cannot be re-dispatched as an ordinary build', async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const admitted = await s.dispatch()
+  expect(admitted.ok, JSON.stringify(admitted)).toBe(true)
+  if (!admitted.ok) return
+  const originalHost = s.f.context.runHost
+  await prepareRecoveryBranch(admitted.run, s.request.expected_head, originalHost,
+    s.f.store.orchestratorRecovery(admitted.run.id)!)
+  const publisherCalls: string[] = []
+  let ancestryFailed = false
+  const guardedHost = Object.assign(async (...args: Parameters<typeof originalHost>) => {
+    const argv = args[0]
+    if ((argv[0] === 'gh' && argv[1] === 'pr' && (argv[2] === 'create' || (ancestryFailed && argv[2] === 'list')))
+      || (argv[0] === 'git' && argv.includes('push'))) publisherCalls.push(argv.join(' '))
+    // Recovery's own base ancestry has already passed. Fail the ordinary
+    // launch containment probe, after both exact-head probes, and move origin
+    // so an accidental salvage publisher has real work it would try to push.
+    if (argv.includes('merge-base') && argv.includes('--is-ancestor')
+      && argv.at(-2) === s.request.expected_head && argv.at(-1) === s.request.expected_base) {
+      if (!ancestryFailed) await gitOut(originalHost, s.f.repo, ['push', '--force', 'origin',
+        `${s.f.baseSha}:refs/heads/${s.prior.branch}`])
+      ancestryFailed = true
+      return { ok: false, exit_code: 128, stdout: '', stderr: 'fixture ancestry object unreadable' }
+    }
+    return originalHost(...args)
+  }, { writesDiffOutput: true as const })
+  const orch = buildTridentOrchestrator({
+    fire_workflow: async () => { throw Error('generic pre-fire recovery refusal must not fire') },
+    db_path: s.f.input.db_path, base_branch: 'main', run_host: guardedHost, sleep: async () => {},
+    read_run: id => s.f.store.get(id), list_stage_events: id => s.f.store.stageEvents(id),
+    read_orchestrator_recovery: run => {
+      readOrchestratorRecovery(s.f.store, run)
+      return s.f.store.orchestratorRecovery(run.id)
+    },
+    record_recovery_refusal: (id, reason) => s.f.store.recordOrchestratorRecoveryRefusal(id, reason),
+    recovery_salvage_protected: id => s.f.store.isOrchestratorRecoverySalvageProtected(id),
+  })
+  const beforeDispatches = s.f.world.dispatches.length
+  const refused = await orch.step(admitted.run)
+  expect(ancestryFailed).toBe(true)
+  expect(refused.run.phase).toBe('failed')
+  expect(refused.run.failure_reason).toStartWith('trident infra:')
+  expect(refused.run.failure_reason).toContain('ancestry is UNKNOWN')
+  expect(publisherCalls).toEqual([])
+  expect(await s.f.store.saveIfActive(refused.run)).toBe(true)
+  // Startup must protect the successor even before the card observer has
+  // materialized a refusal string. The durable claim is sufficient evidence.
+  await sweepStrandedFailures({ store: s.f.store, reconcile: orch.reconcile_stranded })
+  expect(publisherCalls).toEqual([])
+  const card = await s.board.detachRun(s.prior.project_slug, admitted.run.id, 'failed')
+  expect(card).toMatchObject({ status: 'blocked', linked_run_id: admitted.run.id,
+    recovery_refusal: expect.stringContaining('ancestry is UNKNOWN') })
+  await sweepStrandedFailures({ store: s.f.store, reconcile: orch.reconcile_stranded })
+  await orch.reconcile_stranded(s.f.store.get(admitted.run.id)!)
+  expect(publisherCalls).toEqual([])
+  expect(s.f.store.orchestratorRecovery(admitted.run.id)?.request).toEqual(s.request)
+  expect(await gitOut(originalHost, s.f.origin, ['rev-parse', `refs/heads/${s.prior.branch}`])).toBe(s.f.baseSha)
+  // Even an explicit move to upcoming cannot turn a consumed one-use recovery
+  // into an unbound ordinary review of the same rejected head.
+  await s.board.update(s.prior.project_slug, s.card.id, { status: 'upcoming' })
+  const before = s.f.db.prepare<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()!.n
+  const ordinary = await dispatchBoardBoundBuild({ task: s.prior.task, board_item_id: s.card.id }, s.deps)
+  expect(ordinary).toMatchObject({ ok: false, code: 'card_blocked' })
+  expect(s.f.db.prepare<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()!.n).toBe(before)
+  expect(s.f.world.dispatches).toHaveLength(beforeDispatches)
+  expect(s.f.github.prs[0]!.state).toBe('OPEN')
+}, 300_000)
 
 test('codegen_cancel stops the actual host suite and its detached test child without approving the run', async () => {
   const f = await fixture()

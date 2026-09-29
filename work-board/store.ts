@@ -1499,16 +1499,26 @@ export class WorkBoardStore {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.getByRunId(project_slug, run_id)
       if (current === null) return null
-      // The host may refuse a published recovery head after a successor was
-      // admitted but before launch. Only a proven authorization row for THIS
-      // run, card and board may turn that terminal failure into a blocked card.
-      // No caller/model-provided failure string gets this authority.
-      const authorizedRefusal = outcome === 'done' ? null : tx.get<{ refusal: string }>(
-        `SELECT refusal FROM code_trident_orchestrator_recoveries
-          WHERE run_id = ? AND project_slug = ? AND item_id = ?
-            AND refusal IS NOT NULL AND length(trim(refusal)) > 0`,
+      // ANY failed authorized recovery successor must stay blocked. A pre-fire
+      // infrastructure failure can occur before launch records a specific
+      // refusal; treating that as an ordinary failed build would let a later
+      // dispatch re-seed the one-use rejected checkpoint without authority.
+      // Only the durable row for THIS run, board and card has this effect.
+      const recovery = outcome === 'done' ? null : tx.get<{ refusal: string | null; failure_reason: string | null }>(
+        `SELECT recovery.refusal, run.failure_reason
+           FROM code_trident_orchestrator_recoveries AS recovery
+           JOIN code_trident_runs AS run ON run.id = recovery.run_id
+          WHERE recovery.run_id = ? AND recovery.project_slug = ? AND recovery.item_id = ?`,
         [run_id, project_slug, current.id],
-      )?.refusal.replace(/\s+/g, ' ').trim().slice(0, 2048) ?? null
+      ) ?? null
+      const authorizedRefusal = recovery === null ? null : (
+        recovery.refusal?.trim() ||
+        `Orchestrator recovery stopped before completion: ${recovery.failure_reason?.trim() || 'the run failed before a specific refusal was recorded'}`
+      ).replace(/\s+/g, ' ').trim().slice(0, 2048)
+      if (recovery !== null && !recovery.refusal?.trim()) {
+        await tx.run('UPDATE code_trident_orchestrator_recoveries SET refusal = ? WHERE run_id = ?',
+          [authorizedRefusal, run_id])
+      }
       const resolvedOutcome: RunReconcileOutcome = authorizedRefusal === null ? outcome : 'blocked'
       await tx.run(
         `INSERT INTO work_board_terminal_attempts

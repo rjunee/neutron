@@ -24,14 +24,20 @@ rechecks publication after launch setup awaits. A launch refusal retains the
 successor/source link and durably blocks the card; both phone and web render the
 reason even when admission created no run.
 
-The startup failed-run sweep excludes a predecessor as soon as its one-use
-recovery claim is consumed: the successor owns that published branch. A
-recovery-specific launch refusal is also excluded at the central salvage entry
-point, before any Git or publisher call. An invalid imported canonical checkpoint
-records that refusal instead of falling into the ordinary failed-build salvage
-path. The real-Git consumer first demonstrated an unsafe force-with-lease push
-of the predecessor's rejected head after remote movement, then observed zero
-publisher calls with these guards while an unrelated failed build still salvaged.
+Immediate and startup salvage consult the same durable recovery-lineage predicate:
+both predecessor and successor are excluded as soon as the claim commits.
+Publication for those runs belongs to the governed recovery review loop, not the
+ordinary stranded-work publisher. Failure-reason text cannot authorize or bypass
+this rule. An invalid imported canonical checkpoint records a visible refusal;
+generic pre-fire failures also acquire a durable card/ledger refusal at terminal
+reconciliation. Ordinary redispatch checks that refusal independently of the
+editable card lane and rejects a linked consumed successor.
+
+The real-Git consumer exercises an actual generic launch ancestry-UNKNOWN failure
+after the exact-head probes, with a retained local branch and moved remote. It
+asserts no immediate, direct or startup publication, both before and after card
+refusal storage, then rejects ordinary dispatch after moving the card upcoming.
+The ordinary failed-build positive control still publishes its unpushed work.
 
 The driver imports the review baseline and counters, spends the sole re-plan
 allowance before the planner, and performs a full plan/build/fresh-review cycle.
@@ -59,3 +65,12 @@ decreasing-findings merge. Restored controls passed 3/3. The source-salvage
 mutation was the pre-fix production path: the consuming real-Git restart test
 went red with actual push/PR calls, and its ordinary-salvage positive control
 remained green before and after the fix.
+
+The generic-failure salvage predicate was also mutated in both directions.
+Returning false triggered the consumer's zero-publisher assertion with actual
+PR publisher calls; returning true prevented the ordinary-build positive control
+from producing its expected PR. Both restored controls passed. These controls
+cover the shared durable predicate, not a claim about live provider behavior.
+After restoring those mutations, four focused Open consumer tests passed with
+65 assertions, and 49 focused recovery, board and orchestrator tests passed with
+190 assertions. Root and Trident TypeScript checks passed on this revision.

@@ -1,4 +1,5 @@
 import { projectBuildDriverReservation, projectBuildMeasuredUnknown, projectBuildPending } from './project-launcher.ts'
+import { ORCHESTRATOR_RECOVERY_STAGE } from './orchestrator-recovery-contract.ts'
 import {
   DEFAULT_MAX_INFRA_RETRIES,
   INFRA_RETRY_BACKOFF_MS,
@@ -206,6 +207,8 @@ export interface BuildTridentOrchestratorOptions {
   /** Host-owned one-use table reader; a stage event alone never authorizes recovery. */
   read_orchestrator_recovery?: (run: TridentRun) => import('./orchestrator-recovery-contract.ts').OrchestratorRecoveryDecision | null
   record_recovery_refusal?: (run_id: string, reason: string) => Promise<void>
+  /** Durable recovery lineage cannot authorize ordinary stranded publication. */
+  recovery_salvage_protected?: (run_id: string) => boolean
   /** Review-only executor seam. Production uses `executeBoundReview`; tests may
    *  inject a recording executor without running a live review panel. */
   execute_bound_review?: typeof executeBoundReview
@@ -756,7 +759,7 @@ export interface StrandedReconcileOptions {
 }
 
 export interface StrandedFailureSweepDeps {
-  store: Pick<TridentRunStore, 'listFailedPrRuns' | 'listNonTerminal' | 'update' | 'hasConsumedOrchestratorRecoverySource'>
+  store: Pick<TridentRunStore, 'listFailedPrRuns' | 'listNonTerminal' | 'update' | 'isOrchestratorRecoverySalvageProtected'>
   reconcile: (
     run: TridentRun,
     options?: StrandedReconcileOptions,
@@ -789,10 +792,9 @@ export async function sweepStrandedFailures({
   }
   for (const row of rows) {
     try {
-      // The one-use recovery claim transfers ownership of the published branch
-      // from the failed source to its successor. In particular, a refused
-      // successor cannot make boot replay the source's old rejected head.
-      if (store.hasConsumedOrchestratorRecoverySource(row.id)) continue
+      // The one-use recovery claim reserves publication for the governed
+      // recovery loop. Neither its source nor successor may use boot salvage.
+      if (store.isOrchestratorRecoverySalvageProtected(row.id)) continue
       const salvaged = await reconcile(row, {
         inspect_worktree:
           liveWorktreeScopes !== null && !liveWorktreeScopes.has(strandedWorktreeScope(row)),
@@ -1517,10 +1519,13 @@ export function buildTridentOrchestrator(
     options: StrandedReconcileOptions = {},
   ): Promise<TridentRun | null> {
     try {
-      // Startup calls this reconciler directly, without passing through step's
-      // refusal guard. A rejected recovery retains the old published branch as
-      // evidence, never as stranded work eligible for another push.
-      if (run.merge_mode !== 'pr' || run.failure_reason?.startsWith('Orchestrator recovery refused:')) return null
+      // Immediate failure and direct reconciliation use the same durable
+      // predicate as startup. Failure prose is not publication authority.
+      if (run.merge_mode !== 'pr' || opts.recovery_salvage_protected?.(run.id)) return null
+      // An older composition with recovery evidence but no durable predicate
+      // cannot prove that the ordinary publisher owns this branch either.
+      if (!opts.recovery_salvage_protected && opts.list_stage_events?.(run.id)
+        .some(event => event.stage === ORCHESTRATOR_RECOVERY_STAGE)) return null
       const branch = run.branch ?? `trident/${run.slug}`
 
       const local = await opts.run_host(
@@ -3058,13 +3063,7 @@ export function buildTridentOrchestrator(
     } else if (out.waiting && worker.state !== 'unknown') {
       out.note += `; worker=${worker.state}; ${worker.detail}`
     }
-    // The authenticated recovery's pre-fire refusal is terminal by design. It
-    // has not produced new work, and treating its inherited published branch as
-    // stranded work could invoke the ordinary PR publisher after the source
-    // failed its second remote check. The source/card refusal is already durable.
-    const recoverySourceRefused =
-      out.run.failure_reason?.startsWith('Orchestrator recovery refused:') === true
-    if (out.changed && out.run.phase === 'failed' && !isTerminalPhase(run.phase) && !recoverySourceRefused) {
+    if (out.changed && out.run.phase === 'failed' && !isTerminalPhase(run.phase)) {
       const salvaged = await reconcile_stranded(out.run)
       if (salvaged !== null) {
         const publishedNow =

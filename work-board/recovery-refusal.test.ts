@@ -217,6 +217,35 @@ test('a host-authorized late launch refusal blocks its successor card and preser
   expect(board.listActive('board').map(row => row.id)).toContain(card.id)
 })
 
+test('a recovery successor failing before a specific refusal is recorded is still durably blocked', async () => {
+  const board = new WorkBoardStore(db)
+  const runs = new TridentRunStore(db)
+  const card = await board.create('board', { title: 'Pre-fire recovery failure' })
+  const source = await runs.create({ slug: 'source-early', project_slug: 'board', repo_path: '/repo', task: 'Source' })
+  const successor = await runs.create({ slug: 'successor-early', project_slug: 'board', repo_path: '/repo', task: 'Recovery' })
+  await runs.recordStageEvent(source.id, 'review-rejected')
+  const event = db.get<{ id: number }>(
+    'SELECT id FROM code_trident_stage_events WHERE run_id = ? ORDER BY id DESC LIMIT 1', [source.id],
+  )!
+  await db.run(
+    `INSERT INTO code_trident_orchestrator_recoveries
+       (source_run_id, source_event_id, run_id, project_slug, item_id, call_id, decision, refusal, consumed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
+    [source.id, event.id, successor.id, 'board', card.id, 'call-early', '{}', '2026-09-29T00:00:00Z'],
+  )
+  await board.attachRun('board', card.id, successor.id)
+  await runs.update(successor.id, { phase: 'failed', failure_reason: 'trident infra: ancestry UNKNOWN' })
+  const result = await board.detachRun('board', successor.id, 'failed')
+  expect(result).toMatchObject({ status: 'blocked', linked_run_id: successor.id,
+    recovery_refusal: expect.stringContaining('ancestry UNKNOWN'),
+    attempts: [{ run_id: successor.id, outcome: 'blocked' }] })
+  const saved = board.get('board', card.id)?.recovery_refusal
+  expect(saved).toContain('ancestry UNKNOWN')
+  expect(db.get<{ refusal: string }>(
+    'SELECT refusal FROM code_trident_orchestrator_recoveries WHERE run_id = ?', [successor.id],
+  )?.refusal).toBe(saved)
+})
+
 test('a refusal row for another card cannot relabel a failed successor or make a completed run blocked', async () => {
   const board = new WorkBoardStore(db)
   const runs = new TridentRunStore(db)

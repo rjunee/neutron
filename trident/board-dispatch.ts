@@ -358,6 +358,7 @@ export interface TridentBoardBinder {
     strategy_rationale?: string | null
     strategy_plan?: string | null
     strategy_source?: 'planner' | 'legacy' | null
+    recovery_refusal?: string | null
     task_iteration?: number
     max_task_iterations?: number | null
     task_total?: number | null
@@ -813,6 +814,14 @@ async function dispatchUnderAdmission(
       code: 'unknown_board_item',
       message: `No Plan item "${board_item_id}" on this project's board. Use work_board_list to find the item id.`,
     }
+  }
+
+  // A recorded recovery refusal is stronger than the card's editable lane.
+  // Moving BLOCKED back to upcoming may clear its run link, but must not turn
+  // a consumed one-use recovery into an ordinary fresh build.
+  if (!recovery && typeof item.recovery_refusal === 'string' && item.recovery_refusal.trim()) {
+    return { ok: false, code: 'card_blocked', message:
+      'This card has a durable orchestrator-recovery refusal. An ordinary dispatch cannot restart or bypass the consumed recovery; inspect the card refusal and resolve it explicitly.' }
   }
 
   // (2a) THE CARD IS BLOCKED. Checked immediately after the item is found and
@@ -1657,6 +1666,17 @@ async function dispatchUnderAdmission(
       prior = await deps.store.reconcileTaskSpend(prior.id) ?? prior
     } catch {
       return { ok: false, code: 'backend_error', message: 'The previous run has an invalid iteration checkpoint. Nothing was dispatched.' }
+    }
+    // A one-use orchestrator recovery cannot become an ordinary retry after a
+    // pre-fire failure. The successor's projected fix-round seed is not proof
+    // that another unauthenticated re-plan may consume the rejected head.
+    try {
+      if (deps.store.orchestratorRecovery(prior.id) !== null) {
+        return { ok: false, code: 'card_blocked', message:
+          'This card already consumed its authorized orchestrator recovery. An ordinary retry cannot re-use that rejected checkpoint or start a fresh fallback build. Inspect the linked recovery run and its refusal.' }
+      }
+    } catch {
+      return { ok: false, code: 'backend_error', message: 'Recovery lineage is unreadable. Nothing was dispatched.' }
     }
     if (execution_strategy !== null && prior.execution_strategy !== null && execution_strategy !== prior.execution_strategy) {
       return { ok: false, code: 'backend_error', message: 'The card and prior run disagree about the immutable execution strategy. Nothing was dispatched.' }

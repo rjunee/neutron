@@ -1187,12 +1187,13 @@ export class TridentRunStore {
     return record ? JSON.parse(record.decision) : null
   }
 
-  /** A consumed recovery owns this source's published branch. Boot salvage must
-   * never publish the old source again, even if the successor later refuses. */
-  hasConsumedOrchestratorRecoverySource(sourceRunId: string): boolean {
+  /** Recovery owns publication through its governed review loop. Neither the
+   * consumed source nor its successor grants the ordinary salvage publisher
+   * authority, including generic pre-fire failures with no refusal text yet. */
+  isOrchestratorRecoverySalvageProtected(runId: string): boolean {
     return this.db.prepare<{ present: number }, [string]>(
-      'SELECT 1 AS present FROM code_trident_orchestrator_recoveries WHERE source_run_id = ?',
-    ).get(sourceRunId) != null
+      'SELECT 1 AS present FROM code_trident_orchestrator_recoveries WHERE source_run_id = ?1 OR run_id = ?1',
+    ).get(runId) != null
   }
 
   async recordOrchestratorRecoveryRefusal(runId: string, reason: string): Promise<void> {

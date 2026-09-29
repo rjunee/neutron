@@ -145,10 +145,14 @@ without resetting it. Approval and provider receipts are never inherited.
 Every refusal stays visible on the card and preserves its source binding and
 BLOCKED lane. Delivering that refusal surface requires the dispatch API, durable
 board reason storage and both card renderers, beyond the terminal transport fix.
-Once the one-use source claim commits, startup salvage must not publish the
-consumed predecessor's branch again, including after a successor launch refusal
-and gateway restart. Ordinary failed builds with no consumed recovery remain
-eligible for their existing bounded salvage.
+Once the one-use source claim commits, immediate and startup salvage must not
+publish either the consumed predecessor or its successor's branch. Recovery
+publication belongs to its governed review loop; generic infrastructure failures
+before fire do not grant ordinary publication authority. This protection follows
+the durable source claim, including before a card observer records refusal text.
+Ordinary failed builds with no consumed recovery remain eligible for their
+existing bounded salvage. A recorded recovery refusal also blocks ordinary
+redispatch after the card is moved to upcoming.
 
 `work_board_replan_build` takes `board_item_id`, `source_run_id`,
 `source_event_id`, `expected_head`, `expected_base`, `published_pr`, and `direction`.
