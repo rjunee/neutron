@@ -723,6 +723,17 @@ export class WorkBoardStore {
     }
   }
 
+  /** A card CAS needs a new version even when two writes share a wall-clock ms. */
+  private timestampAfter(previous: string): string {
+    const wall = this.now()
+    const oldMillis = Date.parse(previous)
+    const wallMillis = Date.parse(wall)
+    if (Number.isFinite(oldMillis) && Number.isFinite(wallMillis) && wallMillis <= oldMillis) {
+      return new Date(oldMillis + 1).toISOString()
+    }
+    return wall
+  }
+
   /** Restore a completed card to its stored active-lane ordinal. Active siblings
    * keep their relative order; only their integer ranks are compacted around the
    * insertion. A non-positive/non-integer legacy value has no trustworthy prior
@@ -1329,12 +1340,47 @@ export class WorkBoardStore {
            recovery_refusal = ?, updated_at = ?
            WHERE project_slug = ? AND id = ? AND status = ?
              AND linked_run_id IS ? AND updated_at = ?`,
-        [text, this.now(), project_slug, id, expected.status, expected.linked_run_id, expected.updated_at],
+        [text, this.timestampAfter(current.updated_at), project_slug, id, expected.status, expected.linked_run_id, expected.updated_at],
       )
       return result.changes === 1
     })
     if (recorded) this.emitChange(project_slug)
     return recorded
+  }
+
+  /** Bind a recovered run inside the caller's claim/create transaction. The
+   * caller must notify only after commit. This synchronous CAS prevents a
+   * source claim from committing while a newer card binding wins the race. */
+  attachRecoveryRunInTransaction(
+    tx: ProjectDb,
+    project_slug: string,
+    id: string,
+    run_id: string,
+    expected: WorkBoardRecoveryRefusalTarget,
+  ): boolean {
+    const current = tx.get<WorkBoardItemDbRow>(
+      `SELECT ${COLS} FROM work_board_items WHERE project_slug = ? AND id = ?`,
+      [project_slug, id],
+    )
+    if (current === null || !['failed', 'blocked', 'upcoming'].includes(expected.status) ||
+        current.status !== expected.status || current.linked_run_id !== expected.linked_run_id ||
+        current.updated_at !== expected.updated_at || current.inline_active === 1 ||
+        current.linked_run_id === run_id ||
+        (current.linked_run_id !== null && this.isRunLive?.(current.linked_run_id))) return false
+    const result = tx.runSync(
+      `UPDATE work_board_items SET linked_run_id = ?, inline_active = 0,
+         status = 'in_progress', pr = NULL, pr_url = NULL,
+         recovery_refusal = NULL, updated_at = ?
+         WHERE project_slug = ? AND id = ? AND status = ?
+           AND linked_run_id IS ? AND updated_at = ?`,
+      [run_id, this.timestampAfter(current.updated_at), project_slug, id, expected.status, expected.linked_run_id, expected.updated_at],
+    )
+    return result.changes === 1
+  }
+
+  /** Call only after the transaction containing attachRecoveryRunInTransaction commits. */
+  notifyRecoveryBindingCommitted(project_slug: string): void {
+    this.emitChange(project_slug)
   }
 
   /** Clear a bound trident run — but ONLY if `run_id` is still the run bound to

@@ -131,3 +131,43 @@ test('blank refusal reasons refuse before mutation and multiline reasons are bou
   expect(reason.startsWith('Recovery refused: ')).toBe(true)
   expect(reason).toHaveLength(2048)
 })
+
+test('recovery bind joins its claim transaction and only publishes after commit', async () => {
+  const notifications: string[] = []
+  const store = new WorkBoardStore(db, { onChange: board => notifications.push(board) })
+  const card = await store.create('board', { title: 'Atomic recovery' })
+  await store.attachRun('board', card.id, 'source')
+  await store.detachRun('board', 'source', 'blocked', { pr: 17, pr_url: 'https://example.test/pull/17' })
+  const before = store.get('board', card.id)!
+  expect(await store.recordRecoveryRefusal('board', card.id, observed(before), 'Recovery refused: stale head.')).toBe(true)
+  const refusal = store.get('board', card.id)!
+  notifications.length = 0
+  await db.transaction(async tx => {
+    expect(store.attachRecoveryRunInTransaction(tx, 'foreign', card.id, 'new', observed(refusal))).toBe(false)
+    expect(store.attachRecoveryRunInTransaction(tx, 'board', card.id, 'new', observed(before))).toBe(false)
+    expect(store.attachRecoveryRunInTransaction(tx, 'board', card.id, 'source', observed(refusal))).toBe(false)
+    expect(store.attachRecoveryRunInTransaction(tx, 'board', card.id, 'new', observed(refusal))).toBe(true)
+    expect(store.attachRecoveryRunInTransaction(tx, 'board', card.id, 'second', observed(refusal))).toBe(false)
+    // The caller has not committed its source claim yet, so a push is premature.
+    expect(notifications).toEqual([])
+  })
+  store.notifyRecoveryBindingCommitted('board')
+  expect(notifications).toEqual(['board'])
+  expect(store.get('board', card.id)).toMatchObject({
+    status: 'in_progress', linked_run_id: 'new', recovery_refusal: null,
+    pr: null, pr_url: null, attempts: refusal.attempts,
+    task_iteration: refusal.task_iteration, max_task_iterations: refusal.max_task_iterations,
+  })
+})
+
+test('a rolled back recovery transaction leaves its refusal and source untouched', async () => {
+  const store = new WorkBoardStore(db)
+  const card = await store.create('board', { title: 'Rollback' })
+  expect(await store.recordRecoveryRefusal('board', card.id, observed(card), 'Recovery refused.')).toBe(true)
+  const before = store.get('board', card.id)!
+  await expect(db.transaction(async tx => {
+    expect(store.attachRecoveryRunInTransaction(tx, 'board', card.id, 'new', observed(before))).toBe(true)
+    throw new Error('claim failed')
+  })).rejects.toThrow('claim failed')
+  expect(store.get('board', card.id)).toEqual(before)
+})
