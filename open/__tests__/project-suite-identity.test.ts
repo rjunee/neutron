@@ -298,6 +298,26 @@ test('portable package launcher observes its inner closure and retains package P
   expect((await measureSuiteIdentity(retry, undefined, command))?.portableIdentity).toBe(first!.portableIdentity)
 })
 
+test('nested package measurement refuses ancestor shell execution before launching its probe', async () => {
+  const { root, git, command } = await packageLauncherFixture()
+  const nested = join(root, '.trident-worktrees/retry')
+  await git('worktree', 'add', '--detach', nested, 'HEAD')
+  await mkdir(join(root, 'node_modules/.bin'), { recursive: true })
+  await writeFile(join(root, 'node_modules/.bin/unrelated'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+  const before = await measureSuiteIdentity(nested, undefined, command)
+  expect(before?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  const marker = join(root, 'node_modules/shadow-executed')
+  const wrapper = join(root, 'node_modules/.bin/bash')
+  await writeFile(wrapper, `#!/bin/sh\nprintf 'executed' > '${marker}'\nexec /bin/bash "$@"\n`, { mode: 0o755 })
+  expect((await spawnCapture([wrapper, '-c', 'true'], nested)).ok).toBe(true)
+  expect(await readFile(marker, 'utf8')).toBe('executed')
+  await rm(marker)
+  expect((await measureSuiteIdentity(nested, undefined, command))?.portableIdentity).toBeUndefined()
+  expect(await Bun.file(marker).exists()).toBe(false)
+  await rm(wrapper)
+  expect((await measureSuiteIdentity(nested, undefined, command))?.portableIdentity).toBe(before!.portableIdentity)
+})
+
 for (const changed of ['pretest', 'posttest', 'config', 'dotenv', 'ENV', 'BASHOPTS', 'SHELLOPTS',
   'BUN_OPTIONS', 'npm_config_script_shell', 'bash-shadow', 'sh-shadow', 'zsh-shadow', 'node-absent', 'root-tool-shadow'] as const)
 test(`portable package launcher refuses ${changed} and accepts its unchanged sibling`, async () => {

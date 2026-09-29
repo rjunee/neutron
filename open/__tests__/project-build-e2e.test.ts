@@ -53,7 +53,7 @@ import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agen
 import { routeCodegenCancel } from '@neutronai/gateway/codegen-cancel-router.ts'
 import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/codegen-core'
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
-import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
+import { projectInstallAvailableBytes, projectSuiteIdentityMeasurement } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { appendFile, chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -3508,7 +3508,17 @@ test(`prepared cross-run ${launcher} suite proof handles ${changed} inputs in a 
     // An ancestor PATH shadow must invalidate even though it is outside the
     // destination's dependency tree and its Git revision has not moved.
     const shell = changed === 'tool-resolution' ? 'sh' : 'bash'
-    await writeFile(join(f.repo, `node_modules/.bin/${shell}`), `#!/bin/sh\nexec /bin/${shell} "$@"\n`, { mode: 0o755 })
+    const wrapper = join(f.repo, `node_modules/.bin/${shell}`), marker = join(f.dir, 'launcher-shadow-ran')
+    const markerArg = `'${marker.replaceAll("'", "'\\''")}'`
+    await writeFile(wrapper, `#!/bin/sh\nprintf 'executed' > ${markerArg}\nexec /bin/${shell} "$@"\n`, { mode: 0o755 })
+    // Prove the wrapper really writes before asking measurement to refuse it.
+    expect((await spawnCapture([wrapper, '-c', 'true'], destination)).ok).toBe(true)
+    expect(await readFile(marker, 'utf8')).toBe('executed')
+    await rm(marker)
+    const observation = await projectSuiteIdentityMeasurement(destination, undefined, 'bun run test')
+    expect(observation?.identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(observation?.portableIdentity).toBeUndefined()
+    expect(await Bun.file(marker).exists()).toBe(false)
   }
   if (changed === 'node-absent') {
     const directory = join(f.dir, 'without-node'), previous = process.env.PATH
@@ -3545,6 +3555,7 @@ test(`prepared cross-run ${launcher} suite proof handles ${changed} inputs in a 
     if (assessment.kind === 'known') expect(assessment.findings.length).toBe(changed === 'red' ? 1 : 0)
   }
   expect(suites).toBe(changed === 'none' ? 1 : 2)
+  if (changed === 'bash-shadow') expect(await readFile(join(f.dir, 'launcher-shadow-ran'), 'utf8')).toBe('executed')
   const adopted = JSON.parse(f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-suite-receipt').at(-1)!.meta!)
   expect(adopted.receipt).toMatchObject({ runId: dispatched.run.id, head: measured.value.head, round: 1, scope: 'full-suite' })
   if (changed === 'none') expect(adopted.adoptedFrom).toEqual({ runId: f.row.id, eventId: source.id, round: 1 })

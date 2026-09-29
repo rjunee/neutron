@@ -11,7 +11,7 @@ launcher. It supersedes that command limitation in the immutable
 The package-manager contract remains at `trident/test-strategy.ts:46` and
 `trident/test-strategy.ts:173`.
 
-`open/wiring/project-build-dependencies.ts:408` admits exact `bun run test` with
+`open/wiring/project-build-dependencies.ts:426` admits exact `bun run test` with
 known numeric tuning exports only when `scripts.test` is exactly
 `bash scripts/run-tests.sh`, lifecycle hooks are absent, and the existing
 runner/helper byte checks pass. Two fresh controlled sibling packages observe
@@ -31,7 +31,7 @@ mandatory. Missing Node, generated aliases, unsupported configuration or
 environment transformations, startup injection and shadowed tools refuse the
 portable key while the normal fresh suite remains available. No Bun-version
 allowlist, tracing privilege or new runtime launcher is introduced
-(`open/wiring/project-build-dependencies.ts:375`).
+(`open/wiring/project-build-dependencies.ts:348`).
 
 The consuming test begins at `buildTestStrategyDetail`, prepares real Bun
 workspace dependencies from an offline tarball, executes the original complete
@@ -45,6 +45,9 @@ require fresh proof. Focused identity tests cover the paired closed-launcher
 controls and preserve the existing bare-Bun/Bash cases
 (`open/__tests__/project-build-e2e.test.ts:3407`,
 `open/__tests__/project-suite-identity.test.ts:278`).
+The revision-changing and environment-changing consuming variants establish
+overall non-adoption, not which individual launcher guard caused refusal;
+the focused identity cases separately exercise those policy refusals.
 
 The tiny consuming fixture contains one real passing test named with the
 runner's discovery sentinel. Bun 1.3.13 omits its `across N file` summary when
@@ -73,3 +76,24 @@ suite or a live deployment receipt:
 Existing receipts are not retrofitted. No predecessor approval or mutation proof
 is inherited. Independent code review, the combined repository checks, publication
 and a served-revision witness remain separate requirements.
+
+Independent review of author commit `dc8f29c5bdbf568a0878f0e0b934818f673d1c7e`
+found that the probe could execute an ancestor-bin shell before its observed
+PATH was rejected. The correction derives the admitted package/ancestor/inherited
+PATH first and validates every potentially selected shell and tool before each
+probe launch (`open/wiring/project-build-dependencies.ts:348`, `:386`). Each
+actual observed vector and tool-byte record must still match that admission;
+both normalized observations remain mandatory. Harmless ancestor bin directories
+are still supported.
+
+The additional focused nested-worktree sentinel proves an executable ancestor
+wrapper writes its marker independently, never writes during identity-only
+measurement, and leaves portability intact when removed. The consuming Bash
+shadow case also proves that the wrapper runs when the governed fresh suite is
+subsequently requested. The affected checks passed 17 focused cases and three
+consuming cases; both root and Trident typechecks passed. These supplement the
+earlier 44-case and 26-case evidence rather than claiming a new complete run.
+Two further valid-program mutants exercise the ordering guard in both
+directions: disabling preflight fails the consuming marker-absence assertion;
+inverting admission loses legitimate original portable proof. Both were killed
+by behavioral assertions, and the restored consuming controls passed.

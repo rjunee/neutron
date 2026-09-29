@@ -345,6 +345,36 @@ async function bunPackageLauncherIdentity(worktree: string, command: string): Pr
   const systemPath = '/usr/bin:/bin'
   const systemBash = Bun.which('bash', { PATH: systemPath })
   if (!systemBash || bash !== await realpath(systemBash)) return null
+  const measureTools = async (vector: string[]): Promise<[string, string | null][] | null> => {
+    const effectivePath = vector.join(':')
+    const tools: [string, string | null][] = []
+    for (const name of [...BUN_SYSTEM_SHELL_CANDIDATES, 'bun', 'node', 'python3', ...PORTABLE_RUNNER_TOOLS]) {
+      const selected = Bun.which(name, { PATH: effectivePath })
+      const inherited = Bun.which(name, { PATH: inheritedPath })
+      if (selected !== inherited) return null
+      if (BUN_SYSTEM_SHELL_CANDIDATES.includes(name)) {
+        const system = Bun.which(name, { PATH: systemPath })
+        if (Boolean(selected) !== Boolean(system) || selected && await realpath(selected) !== await realpath(system!)) return null
+      }
+      if (!selected && !['zsh', 'sysctl', 'nproc'].includes(name)) return null
+      tools.push([name, selected ? await toolContentIdentity(selected) : null])
+    }
+    if (process.env.SHELL && !await Promise.all(BUN_SYSTEM_SHELL_CANDIDATES.map(async name => {
+      const selected = Bun.which(name, { PATH: effectivePath })
+      return selected !== null && await realpath(process.env.SHELL!) === await realpath(selected)
+    })).then(values => values.some(Boolean))) return null
+    return tools
+  }
+  // Admission precedes execution: a sibling probe inherits the same ancestor
+  // bins, so discovering a shadow only from its output would already run it.
+  // Derive only the admitted PATH rule, then require the actual observation to
+  // match this vector and these tool bytes after each probe.
+  const prospectivePath = [join(root, 'node_modules/.bin'), join(root, 'node_modules/.bin')]
+  for (let parent = dirname(root);; parent = dirname(parent)) {
+    prospectivePath.push(join(parent, 'node_modules/.bin'))
+    if (dirname(parent) === parent) break
+  }
+  prospectivePath.push(...inheritedPath.split(':'))
   const baseline = Object.fromEntries(Object.entries({ ...process.env, ...HOST_SUITE_ENV })
     .filter((entry): entry is [string, string] => entry[1] !== undefined).map(([name, value]) => [name, digest(value)]))
   for (const line of command.split('\n').slice(0, -1)) {
@@ -353,6 +383,8 @@ async function bunPackageLauncherIdentity(worktree: string, command: string): Pr
   }
   const observations: string[] = []
   for (let attempt = 0; attempt < 2; attempt++) {
+    const admittedTools = await measureTools(prospectivePath)
+    if (!admittedTools) return null
     // Same parent preserves every ancestor PATH slot. No project file is changed.
     const probe = await mkdtemp(join(dirname(root), '.suite-launcher-probe-'))
     try {
@@ -376,23 +408,9 @@ async function bunPackageLauncherIdentity(worktree: string, command: string): Pr
       // Ancestor bin coordinates remain exact external PATH inputs. Their
       // presence is not installation evidence. They may not supply any member
       // of the first-party launcher's measured executable closure below.
-      const effectivePath = vector.join(':')
-      const tools: [string, string | null][] = []
-      for (const name of [...BUN_SYSTEM_SHELL_CANDIDATES, 'bun', 'node', 'python3', ...PORTABLE_RUNNER_TOOLS]) {
-        const selected = Bun.which(name, { PATH: effectivePath })
-        const inherited = Bun.which(name, { PATH: inheritedPath })
-        if (selected !== inherited) return null
-        if (BUN_SYSTEM_SHELL_CANDIDATES.includes(name)) {
-          const system = Bun.which(name, { PATH: systemPath })
-          if (Boolean(selected) !== Boolean(system) || selected && await realpath(selected) !== await realpath(system!)) return null
-        }
-        if (!selected && !['zsh', 'sysctl', 'nproc'].includes(name)) return null
-        tools.push([name, selected ? await toolContentIdentity(selected) : null])
-      }
-      if (process.env.SHELL && !await Promise.all(BUN_SYSTEM_SHELL_CANDIDATES.map(async name => {
-        const selected = Bun.which(name, { PATH: effectivePath })
-        return selected !== null && await realpath(process.env.SHELL!) === await realpath(selected)
-      })).then(values => values.some(Boolean))) return null
+      if (JSON.stringify(vector) !== JSON.stringify(prospectivePath)) return null
+      const tools = await measureTools(vector)
+      if (!tools || JSON.stringify(tools) !== JSON.stringify(admittedTools)) return null
       const version = await spawnCapture([bun, '--version'], probe, HOST_SUITE_ENV, 5000)
       const nodeVersion = await spawnCapture([node, '--version'], probe, HOST_SUITE_ENV, 5000)
       if (!version.ok || !/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?\n?$/.test(version.stdout)
