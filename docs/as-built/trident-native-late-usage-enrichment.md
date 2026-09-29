@@ -126,8 +126,10 @@ The complete gate, including TypeScript checks, took 25 minutes 11.672 seconds
 (09:25:21.683–09:50:33.355 UTC).
 
 This receipt records that exact tested candidate. The subsequent publication
-commit only updates this record; it changes no runtime, tests, configuration or
-suite input. It does not claim that the later documentation commit ran this
+commit only updates this record. It changes no runtime, tests or configuration.
+The canonical identity is HEAD-bound, so the publication commit has its own
+identity and does not inherit the tested candidate’s receipt.
+It does not claim that the later documentation commit ran this
 gate or transfer suite authority to another checkout. Required CI must pass on
 the exact final publication head. Deployment, served controls, live acceptance
 and measured efficiency savings remain unverified; #1196 stays open.
