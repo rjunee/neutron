@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS code_trident_orchestrator_recoveries (
     item_id TEXT NOT NULL REFERENCES work_board_items(id),
     call_id TEXT NOT NULL,
     decision TEXT NOT NULL,
+    refusal TEXT,
     consumed_at TEXT NOT NULL,
     UNIQUE (project_slug, call_id)
 ) STRICT;
