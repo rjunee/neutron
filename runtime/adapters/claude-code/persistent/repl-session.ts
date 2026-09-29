@@ -33,7 +33,7 @@ export class ReplSession {
    *  the literal project "general" identically; MCP authority uses toolProjectId. */
   projectId: string | undefined
   /** Canonical MCP admission scope. Undefined is unknown, null is General;
-   * legacy pool labels cannot establish either General or a literal project. */
+   * legacy labels alone cannot establish General or projects named "general"/"default". */
   toolProjectId: string | null | undefined
 
   bindToolProjectScope(options: { conversationProjectId?: string | null; project_id?: string }): void {
