@@ -37,3 +37,23 @@ No live provider turn, account rotation or deployment was performed. Genuine
 A-only native failure, old-account reset and post-B still-capped evidence remain
 unperformed. The live proof text now follows approved Managed custody and normal
 selection, without a copied isolated credential bank or manual shared-account swap.
+
+Independent review found that re-merging current host environment could not
+establish a surviving parent's auth source. The follow-up adds a fresh-only,
+credential-free launch observation in `native-file-auth.ts`, retained in the
+original signed launch and independently held with the measured process identity.
+Known socket/descriptor/host routes and helper/env settings refuse; settings
+identity changes revoke the observation. Implicit profile and legacy key sources
+are refused, not resolved by guessed precedence. Adoption's executable/argv
+observation cannot mint this authority, so adopted/legacy parents without it
+remain UNKNOWN. The previous adopted-positive fixture is now a refusal control.
+
+The revised runtime controls passed 73 cases with 178 assertions; consuming
+controls passed 27 cases with 152 assertions. Both auth allow-all and deny-all
+mutations fail the consuming inherited-socket refusal and clean fresh positive,
+respectively. The earlier full consuming run was explicitly stopped after more
+than 200 passing cases to fix this finding; it is not a full-suite acceptance
+receipt. Preclaim failure preserves the opportunity; postclaim expiry or lost
+transport remains spent and observation-only, an explicit liveness limitation.
+These checks do not establish a complete installed-CLI effective-auth attestation
+or resolve the default alias blocker.

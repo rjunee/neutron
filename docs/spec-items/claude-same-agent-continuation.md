@@ -34,7 +34,9 @@ survivor's kernel executable, exact argv and process-start identity, cross-check
 the pane host, and record the observation only after ownership publication. That
 observation enters the new child's signed original receipt. Mutable registry
 labels alone never provide launch evidence; an Agent-only survivor remains
-unavailable.
+unavailable. Executable/argv adoption does not authenticate the survivor's
+effective authentication. Without the original fresh host file-auth observation,
+capacity admission stays UNKNOWN even when the tool launch is known.
 
 A lost acknowledgement or restart makes the saved attempt observation-only.
 Authorized startup restoration may change the parent process generation while
@@ -62,9 +64,9 @@ stable regular-file reader; symlinks, FIFOs and changing snapshots refuse safely
       merge gates. Known-unavailable and foreign launch profiles refuse with no replacement
       `Agent`, no merge and the original child lease retained.
       Verify: `bun test open/__tests__/project-build-e2e.test.ts`.
-- [ ] A new child dispatched after independently observed parent adoption can
-      continue on its same ID and reach merge. An adopted Agent-only parent refuses
-      without continuation input or replacement. Verify: the same consuming suite.
+- [ ] An adopted parent without a fresh host authentication observation refuses
+      capacity input, as does an adopted Agent-only parent. Independently observed
+      executable/argv alone cannot authorize selection. Verify: the same consuming suite.
 - [ ] Completed and invalid current results take precedence; ordinary errors,
       foreign request/receipt/lease/launch, fencing and expired budget cannot send.
       A concurrent claimant, lost acknowledgement and a newly constructed observer
@@ -119,10 +121,19 @@ provisioned, protected public verification material binds the host, instance,
 socket and canonical credential directory. Open verifies the signature, current
 boot, fresh challenge, request digest, original lease, native child, provider-event
 digest and observation freshness. Competing authentication sources refuse.
+Admission additionally requires a fresh host observation of the actual launch
+environment and explicit settings sources, bound to the measured parent process
+identity and preserved in the signed original launch. Known socket, descriptor,
+helper, profile and settings-env routes refuse. Changed observed sources revoke
+admission. This conservative observation is not a claim of complete native
+effective-auth attestation; unknown sources and legacy/adopted parents without
+the original observation remain unavailable.
 `available` retains the direct connection through bounded submission and saves
 the signed opaque account generation in the durable claim; this is selection
-evidence only. `all-full`, `unknown`, missing authority and transport failure
-neither spend the claim nor release the child. Original-result harvesting and
+evidence only. Before a claim, `all-full`, `unknown`, missing authority and
+transport failure neither spend the claim nor release the child. After a claim,
+transport loss, freshness expiry and unknown submission remain spent: they
+cannot license another input. Original-result harvesting and
 spent-claim reconciliation remain independent of current capacity.
 
 - [ ] Real-socket consuming controls exercise signed availability, all-full,

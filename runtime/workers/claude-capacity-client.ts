@@ -3,6 +3,7 @@ import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, rea
 import { createConnection } from 'node:net'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
+import { hasCompetingClaudeAuth } from '../adapters/claude-code/persistent/native-file-auth.ts'
 
 /** Public verification material only. Provisioned outside instance-writable ancestry. */
 export interface ClaudeCapacityPin {
@@ -67,11 +68,7 @@ function validPin(pin: ClaudeCapacityPin): boolean {
  * Only canonical file authentication is eligible; this reads no credentials. */
 export function claudeCapacityFileAuth(pin: ClaudeCapacityPin, input: Pick<ClaudeCapacityInput, 'configDir' | 'env'>): boolean {
   try {
-    const competing = ['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR', 'CCR_OAUTH_TOKEN_FILE',
-      'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_CUSTOM_HEADERS',
-      'CLAUDE_CODE_API_KEY_HELPER', 'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'CLAUDE_CODE_USE_BEDROCK',
-      'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY']
-    if (competing.some(key => Boolean(input.env[key]))) return false
+    if (hasCompetingClaudeAuth(input.env)) return false
     if (input.env.CLAUDE_CONFIG_DIR && resolve(input.env.CLAUDE_CONFIG_DIR) !== pin.claudeConfigDir) return false
     return resolve(input.configDir) === pin.claudeConfigDir && realpathSync(input.configDir) === pin.claudeConfigDir
   } catch { return false }

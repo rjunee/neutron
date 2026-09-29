@@ -15,6 +15,7 @@ import { reserveTrailerSlot } from './trailer-slot.ts'
 import { CLAUDE_CONTINUATION_PROFILE, continueClaudeNativeChild, type ClaudeContinuationOptions } from './claude-native-continuation.ts'
 import { decodeProjectTrailer } from './project-runners.ts'
 import { capacityFixture } from './claude-capacity-client.test-support.ts'
+import { observeNativeFileAuth } from '../adapters/claude-code/persistent/native-file-auth.ts'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
@@ -37,7 +38,9 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
   session.attachChild({ pid: process.pid, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
     submitLine: async line => { inputs.push(line) } })
   if (profile === 'unavailable' || profile === 'adopted-unavailable') session.toolSurface = 'Agent'
+  const auth = observeNativeFileAuth({ cwd, argv: [], env: { CLAUDE_CONFIG_DIR: capacity.configDir, HOME: dir } })!
   const launch: NativeParentLaunchEvidence = { version: 1, sessionId: profile === 'foreign' ? 'another' : 'parent', childGeneration: 'generation', projectId: 'project',
+    fileAuth: auth.evidence,
     executable: { realPath: '/opt/claude', ...CLAUDE_CONTINUATION_PROFILE,
       ...(profile === 'wrong-digest' ? { sha256: '0'.repeat(64) } : {}), ...(profile === 'wrong-version' ? { version: '0.0.0' } : {}) },
     argv: ['/opt/claude', '--session-id', 'parent', '--tools', session.toolSurface], tools: session.toolSurface.split(',') }
@@ -49,7 +52,7 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
       observeExecutable: async () => ({ executable: launch.executable, isCurrent: () => true }),
     })
     observed?.record(session)
-  } else if (profile !== 'missing') recordNativeParentLaunchEvidence(session, launch)
+  } else if (profile !== 'missing') recordNativeParentLaunchEvidence(session, launch, auth)
   const admit = (session: ReplSession) => admitNativeChildWorkspace({ session, request, runId: 'run', worktree: cwd, branch: 'work', generation: 0,
     pending: () => [{ runId: 'run', stepId: 'build:0', generation: 0 }],
     git: async args => args[0] === 'symbolic-ref' ? 'refs/heads/work' : args.includes('--show-toplevel') ? cwd : args.includes('--absolute-git-dir') ? gitDir : common })
@@ -92,7 +95,7 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
     const restored = new ReplSession('key', 'restored-generation', 'parent', 'channel', cwd)
     restored.attachChild(session.child)
     restored.toolSurface = session.toolSurface
-    if (observe) recordNativeParentLaunchEvidence(restored, { ...launch, childGeneration: generation })
+    if (observe) recordNativeParentLaunchEvidence(restored, { ...launch, childGeneration: generation }, auth)
     const workspace = await admit(restored)
     cleanup.push(async () => completeNativeChildWorkspace(workspace))
     return { ...options, session: restored, workspace }
@@ -155,9 +158,9 @@ test.each(['adopted', 'adopted-unavailable'] as const)('a new child after %s par
   const f = await fixture(profile)
   const available = profile === 'adopted'
   expect(readNativeParentLaunchEvidence(f.session) !== undefined).toBe(available)
-  expect(await f.invoke()).toEqual(available ? { kind: 'submitted', evidence: 'terminal-acknowledgement' } : { kind: 'unknown', reason: 'tool-unavailable' })
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: available ? 'capacity-unavailable' : 'tool-unavailable' })
   await f.invoke()
-  expect(f.inputs).toHaveLength(available ? 1 : 0)
+  expect(f.inputs).toHaveLength(0)
 })
 
 test('authorized same-session restoration requires the current generation launch before input', async () => {
@@ -189,8 +192,8 @@ test('adoption without fresh launch memory requires the exact signed original pr
   expect(await f.invoke(adopted)).toEqual({ kind: 'unknown', reason: 'launch-unknown' })
   expect(f.inputs).toHaveLength(0)
   adopted.session.attachChild(f.session.child)
-  expect(await f.invoke(adopted)).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
-  expect(f.inputs).toHaveLength(1)
+  expect(await f.invoke(adopted)).toEqual({ kind: 'unknown', reason: 'capacity-unavailable' })
+  expect(f.inputs).toHaveLength(0)
 })
 
 test('a reconstructed workspace continues the same yielded native child in its live session', async () => {

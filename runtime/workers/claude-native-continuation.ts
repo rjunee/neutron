@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from 'node:util'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
-import { readNativeParentLaunchEvidence, type NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
+import { readNativeParentLaunchEvidence, readNativeParentFileAuth, type NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
 import { isProcessIdentity, readProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
 import { claudeComposerEmpty } from './claude-composer.ts'
 import { claudeChildQuotaEvent } from './claude-child-rate-limit.ts'
@@ -159,7 +159,10 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
       if (!ownsNativeChildWorkspace(options.workspace, session, request) || !nativeChildContinuationCensusKnown(options.workspace)
         || !isDeepStrictEqual(await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request), quota)) return unknown('identity-unknown')
       if (!currentParentKnown()) return unknown('launch-unknown')
-      if (!options.capacity) return unknown('capacity-unavailable')
+      const auth = readNativeParentFileAuth(session)
+      if (!options.capacity || !auth || !parent.launch?.fileAuth
+        || parent.launch.fileAuth.configDir !== auth.evidence.configDir
+        || options.capacity.configDir !== auth.evidence.configDir) return unknown('capacity-unavailable')
       const capacity = await (options.capacity.acquire ?? acquireClaudeCapacity)({ request, leaseId: authority.lease.token,
         childId: agentId, eventDigest: quota.digest, configDir: options.capacity.configDir, env: options.capacity.env,
         signal, deadline: options.deadline })
@@ -167,7 +170,7 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
       try {
       const afterCapacity = await result()
       if (afterCapacity) return afterCapacity
-      if (!capacity.current() || !isDeepStrictEqual(await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request), quota)) return unknown('capacity-unavailable')
+      if (!auth.current() || !capacity.current() || !isDeepStrictEqual(await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request), quota)) return unknown('capacity-unavailable')
       const boundary = await readBoundary(transcript)
       if (!boundary) return unknown('submission-unknown')
       const nonce = randomUUID()
@@ -176,10 +179,10 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
         sessionId: session.sessionId, childGeneration: session.childGeneration, agentId, quota, nonce, args, boundary, capacity: capacity.receipt }
       const line = `Invoke ${SUBAGENT_CONTINUATION_TOOL_NAME} exactly once with these JSON arguments, then end this parent turn: ${JSON.stringify(args)}`
       const before = async () => {
-        if (expired() || !currentParentKnown() || !capacity.current()) throw new Error('Continuation budget, capacity or parent identity unavailable')
+        if (expired() || !currentParentKnown() || !auth.current() || !capacity.current()) throw new Error('Continuation budget, capacity or parent identity unavailable')
         if (session.child.paneHandle !== undefined && (!session.child.readScreen || !claudeComposerEmpty(await session.child.readScreen()))) throw new Error('Composer unavailable')
         // Commit before Enter. Failure, timeout or restart never refunds this claim.
-        if (expired() || !capacity.current() || !await authority.claim(JSON.stringify(preparation)) || expired() || !capacity.current()) throw new Error('Continuation already claimed, fenced or expired')
+        if (expired() || !auth.current() || !capacity.current() || !await authority.claim(JSON.stringify(preparation)) || expired() || !auth.current() || !capacity.current()) throw new Error('Continuation already claimed, fenced or expired')
       }
       const timeout = AbortSignal.timeout(Math.max(1, options.deadline - Date.now()))
       const stopped = AbortSignal.any([signal, timeout])

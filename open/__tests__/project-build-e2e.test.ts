@@ -56,6 +56,7 @@ import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/per
 import { CLAUDE_CONTINUATION_PROFILE } from '@neutronai/runtime/workers/claude-native-continuation.ts'
 import { capacityFixture } from '@neutronai/runtime/workers/claude-capacity-client.test-support.ts'
 import { getBestModel, setBestModelOverride } from '@neutronai/runtime/models.ts'
+import { observeNativeFileAuth } from '@neutronai/runtime/adapters/claude-code/persistent/native-file-auth.ts'
 import { reserveTrailerSlot } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { createClaudeNativeDispatchReceipt } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { PLANNER_ROLE, dispatchPlannerWork, requiresPlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
@@ -1354,6 +1355,18 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     fixtureCleanup(async () => { await Promise.all(children); expect(errors).toEqual([]); expect(live.turnSlotHeld).toBe(0) })
   }
 
+  const capacity = options.nativeContinuation ? await capacityFixture(options.nativeCapacity) : undefined
+  if (capacity) {
+    fixtureCleanup(() => capacity.close())
+    const previous = getBestModel()
+    setBestModelOverride('claude-opus-4-6')
+    fixtureCleanup(() => setBestModelOverride(previous))
+    if (options.nativeCapacity === 'helper' || options.nativeCapacity === 'settings-env') await writeFile(join(capacity.configDir, 'settings.json'),
+      JSON.stringify(options.nativeCapacity === 'helper' ? { apiKeyHelper: 'never-run' } : { env: { ANTHROPIC_API_KEY: 'fixture-only' } }))
+  }
+  const auth = capacity ? observeNativeFileAuth({ cwd: dir, argv: [], env: { CLAUDE_CONFIG_DIR: capacity.configDir, HOME: dir,
+    ...(options.nativeCapacity === 'inherited-socket' ? { ANTHROPIC_UNIX_SOCKET: '/fixture.sock' } : {}),
+    ...(options.nativeCapacity === 'key-fd' ? { CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR: '7' } : {}) } }) : undefined
   if (options.nativeContinuation === 'adopted' || options.nativeContinuation === 'adopted-unavailable') {
     const argv = ['claude', '--session-id', registeredSession.sessionId, '--tools', registeredSession.toolSurface,
       '--dangerously-load-development-channels', 'server:e2e-channel']
@@ -1368,17 +1381,12 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   } else if (options.nativeContinuation) recordNativeParentLaunchEvidence(registeredSession, {
     version: 1, sessionId: options.nativeContinuation === 'foreign-launch' ? 'another-session' : registeredSession.sessionId,
     childGeneration: registeredSession.childGeneration, projectId: 'e2e-project',
+    ...(auth ? { fileAuth: auth.evidence } : {}),
     executable: { realPath: '/opt/claude', ...CLAUDE_CONTINUATION_PROFILE },
     argv: ['/opt/claude', '--session-id', registeredSession.sessionId, '--tools', registeredSession.toolSurface], tools: registeredSession.toolSurface.split(','),
-  })
-
-  const capacity = options.nativeContinuation ? await capacityFixture(options.nativeCapacity) : undefined
-  if (capacity) {
-    fixtureCleanup(() => capacity.close())
-    const previous = getBestModel()
-    setBestModelOverride('claude-opus-4-6')
-    fixtureCleanup(() => setBestModelOverride(previous))
-  }
+  }, auth)
+  if (capacity && options.nativeCapacity === 'changed-settings') await writeFile(join(capacity.configDir, 'settings.json'), '{}')
+  if (options.nativeCapacity === 'foreign-process') Object.defineProperty(registeredSession.child, 'pid', { value: process.pid + 1 })
   const register = (registration: { key?: string; projectId?: string; instanceId?: string
     state?: 'ready' | 'pending' | 'missing' | 'empty' | 'exited' } = {}) => {
     const sessionKey = registration.key ?? key
@@ -7444,8 +7452,8 @@ test('a typed subscription quota-limited synthesis stops without quotaLimits enr
   expect(originMain.stdout).toBe(f.baseSha)
 }, 30_000)
 
-test.each(['fresh', 'queued', 'adopted'] as const)('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates: %s', async parent => {
-  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: parent === 'adopted' ? 'adopted' : 'available', nativeQueuedOrdinary: parent === 'queued' })
+test.each(['fresh', 'queued'] as const)('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates: %s', async parent => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeQueuedOrdinary: parent === 'queued' })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(1)
@@ -7458,7 +7466,7 @@ test.each(['fresh', 'queued', 'adopted'] as const)('native same-ID continuation 
   expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 30_000)
 
-for (const mode of ['unavailable', 'foreign-launch', 'lost-ack', 'adopted-unavailable'] as const) test(`native same-ID continuation refuses ${mode} without a replacement Agent or merge`, async () => {
+for (const mode of ['unavailable', 'foreign-launch', 'lost-ack', 'adopted', 'adopted-unavailable'] as const) test(`native same-ID continuation refuses ${mode} without a replacement Agent or merge`, async () => {
   const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: mode })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('blocked')
@@ -7469,7 +7477,7 @@ for (const mode of ['unavailable', 'foreign-launch', 'lost-ack', 'adopted-unavai
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 30_000)
 
-test.each(['all-full', 'unknown', 'forged', 'wrong-modelId', 'wrong-childId', 'wrong-leaseId', 'wrong-eventDigest', 'wrong-requestDigest', 'wrong-instanceId', 'wrong-bootId', 'wrong-challenge', 'stale', 'disconnect', 'competing-auth'])('native capacity refuses %s without spending continuation or child ownership', async mode => {
+test.each(['all-full', 'unknown', 'forged', 'wrong-modelId', 'wrong-childId', 'wrong-leaseId', 'wrong-eventDigest', 'wrong-requestDigest', 'wrong-instanceId', 'wrong-bootId', 'wrong-challenge', 'stale', 'disconnect', 'competing-auth', 'inherited-socket', 'key-fd', 'helper', 'settings-env', 'changed-settings', 'foreign-process'])('native capacity refuses %s without spending continuation or child ownership', async mode => {
   const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeCapacity: mode })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('blocked')
