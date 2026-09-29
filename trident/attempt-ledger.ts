@@ -1,6 +1,9 @@
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { Placement, WorkerRole } from '@neutronai/runtime/bounded-work.ts'
 import { projectAttemptUsage } from './phase-usage.ts'
+import { validNativeUsageBinding, type NativeUsageBinding } from './native-usage-binding.ts'
+import { verifyNativeDispatchChildBound } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
+import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 
 export interface AttemptKey { run_id: string; step_id: string; attempt_id: string }
 export interface AttemptIdentity extends AttemptKey {
@@ -42,6 +45,7 @@ const receiptFields = ['receipt_id', 'source', 'observed_at', 'model_reported', 
 const counterFields = ['input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_creation_tokens', 'cost_usd'] as const
 const keyValues = (key: AttemptKey) => [key.run_id, key.step_id, key.attempt_id]
 const predicate = 'run_id = ? AND step_id = ? AND attempt_id = ?'
+const nativeUsagePasses = new WeakSet<ProjectDb>()
 function finite(values: readonly (number | null)[]): void {
   if (values.some((value) => value !== null && !Number.isFinite(value))) {
     throw new TypeError('attempt measurements must be finite or null')
@@ -62,6 +66,47 @@ export class TridentAttemptLedger {
 
   receipt(key: AttemptKey): AttemptReceiptRow | null {
     return this.db.get<AttemptReceiptRow>(`SELECT * FROM code_trident_attempt_receipts WHERE ${predicate}`, keyValues(key))
+  }
+
+  nativeUsageBinding(key: AttemptKey): NativeUsageBinding | null {
+    const row = this.db.get<{ binding: string }>(`SELECT binding FROM code_trident_native_usage_bindings WHERE ${predicate}`, keyValues(key))
+    if (!row) return null
+    try { return JSON.parse(row.binding) as NativeUsageBinding } catch { return null }
+  }
+
+  /** Insert once while the original host still has its independent admission pin.
+   * A later capture cannot replace provenance, even with another valid signature. */
+  async archiveNativeUsage(key: AttemptKey, binding: NativeUsageBinding, originalRequest: BoundedWorkRequest): Promise<'recorded' | 'duplicate'> {
+    return this.db.transaction(tx => {
+      if (!validNativeUsageBinding(this.get(key), binding)
+        || !verifyNativeDispatchChildBound(binding.receipt, originalRequest, binding.lease)) throw new Error('Native usage binding is not authenticated to this attempt')
+      const previous = this.nativeUsageBinding(key)
+      if (previous) {
+        if (JSON.stringify({ ...previous, captured_at: 0 }) !== JSON.stringify({ ...binding, captured_at: 0 })) throw new Error('Native usage binding conflict')
+        return 'duplicate'
+      }
+      tx.runSync('INSERT INTO code_trident_native_usage_bindings (run_id, step_id, attempt_id, binding) VALUES (?, ?, ?, ?)',
+        [...keyValues(key), JSON.stringify(binding)])
+      return 'recorded'
+    })
+  }
+
+  /** Shared by ledger wrappers over the same canonical DB, including boot ticks. */
+  acquireNativeUsagePass(): (() => void) | undefined {
+    if (nativeUsagePasses.has(this.db)) return undefined
+    nativeUsagePasses.add(this.db)
+    return () => { nativeUsagePasses.delete(this.db) }
+  }
+
+  /** A bounded fair pass includes terminal attempts even after their run ended. */
+  nativeUsageCandidates(limit = 16): AttemptKey[] {
+    return this.db.all<AttemptKey>(`SELECT b.run_id, b.step_id, b.attempt_id FROM code_trident_native_usage_bindings b
+      JOIN code_trident_attempts a USING (run_id, step_id, attempt_id) WHERE a.ended_at IS NOT NULL
+      ORDER BY COALESCE(b.checked_at, 0), b.run_id, b.step_id, b.attempt_id LIMIT ?`, [limit])
+  }
+
+  async nativeUsageChecked(key: AttemptKey, observedAt: number): Promise<void> {
+    await this.db.run(`UPDATE code_trident_native_usage_bindings SET checked_at = ? WHERE ${predicate}`, [observedAt, ...keyValues(key)])
   }
 
   async admit(identity: AttemptIdentity): Promise<'recorded' | 'duplicate'> {

@@ -11,6 +11,7 @@ import { validateTrailer, VERDICT_SCHEMA } from './gates/result-contract.ts'
 import type { ReviewSeat, ReviewSource, SeatObservation } from './gates/review-panel.ts'
 import type { AttemptAccounting } from './attempt-accounting.ts'
 import { bindReviewRequest, claimReviewReceipt, invalidateReviewReceipt, readReviewJson, readReviewReceipt, settleReviewReceipt } from './project-review-receipt.ts'
+import { projectReviewArtifacts, projectReviewStep } from './project-review-artifacts.ts'
 
 const activeReviewAttempts = new Set<string>()
 type RepairFeedback = { reason: string; path: string; result: unknown }
@@ -121,7 +122,7 @@ function projectReviewSource(input: ProjectReviewSourceOptions, purpose: 'review
     const identity = digest(['review-receipt-v1', options.runId, options.projectSlug, options.cwd,
       keyFor(snapshot, round, operation), route, options.replProvider, environment, operation.credential?.trim() ? operation.credential : localIdentity,
       options.wallMs, reviewBrief(route, snapshot, round, panel), attempt])
-    return { identity, directory: join(options.evidenceRoot, `review-${identity}`) }
+    return { identity, directory: projectReviewArtifacts(options.evidenceRoot, identity).directory }
   }
   const threadBinding = (route: typeof synthesisRoute, operation: Operation) => {
     if (!['openai-codex', 'anthropic'].includes(route.seat.provider) || route.seat.provider === options.replProvider) return null
@@ -266,11 +267,15 @@ function projectReviewSource(input: ProjectReviewSourceOptions, purpose: 'review
     }
   }
   const makeRequest = (route: typeof synthesisRoute, snapshot: BuildSnapshot, round: number, attempt: number, directory: string, panel: SeatObservation[] | undefined,
-    thread: { id: string } | null, repair?: RepairFeedback): BoundedWorkRequest => ({ run_id: options.runId, step_id: `${directory.split('/').at(-1)}:${round}:${attempt}`,
-    role: panel === undefined ? 'review' : 'synthesis', model_id: route.seat.modelId, effort: route.effort, cwd: options.cwd, writable: false,
-    network: true, tools: 'read-only', brief: { path: join(directory, 'brief.json'), integrity: briefIntegrity(reviewBrief(route, snapshot, round, panel, repair)) },
-    result: { schema: 'verdict', path: join(directory, 'result.json') }, thread,
-    budget: { wall_ms: options.wallMs }, needs_approval_decision: false })
+    thread: { id: string } | null, repair?: RepairFeedback): BoundedWorkRequest => {
+    const identity = directory.split('/').at(-1)!.slice(7)
+    const paths = projectReviewArtifacts(options.evidenceRoot, identity)
+    return { run_id: options.runId, step_id: projectReviewStep(identity, round, attempt),
+      role: panel === undefined ? 'review' : 'synthesis', model_id: route.seat.modelId, effort: route.effort, cwd: options.cwd, writable: false,
+      network: true, tools: 'read-only', brief: { path: paths.brief, integrity: briefIntegrity(reviewBrief(route, snapshot, round, panel, repair)) },
+      result: { schema: 'verdict', path: paths.result }, thread,
+      budget: { wall_ms: options.wallMs }, needs_approval_decision: false }
+  }
   async function dispatchTurn(route: typeof synthesisRoute, snapshot: BuildSnapshot, round: number, attempt: number, directory: string, operation: Operation, panel?: SeatObservation[],
     thread: { id: string } | null = null, rememberThread?: (id: string | null) => Promise<void>): Promise<SeatObservation> {
     const { seat } = route

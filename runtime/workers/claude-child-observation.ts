@@ -38,23 +38,24 @@ async function snapshot(path: string, limit: number, signal: AbortSignal): Promi
  * Repeated content blocks for one provider message carry cumulative usage, so
  * retain maxima by message id instead of charging the same message repeatedly. */
 export async function observeClaudeChildUsage(directory: string, sessionId: string,
-  request: BoundedWorkRequest): Promise<ProviderObservation | undefined> {
+  request: BoundedWorkRequest, boundAgentId?: string): Promise<ProviderObservation | undefined> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const expired = new Promise<undefined>(resolve => {
     timer = setTimeout(() => { controller.abort(); resolve(undefined) }, CHILD_OBSERVATION_TIMEOUT_MS)
   })
-  try { return await Promise.race([collect(directory, sessionId, request, controller.signal), expired]) }
+  try { return await Promise.race([collect(directory, sessionId, request, controller.signal, boundAgentId), expired]) }
   finally { clearTimeout(timer); controller.abort() }
 }
 
 async function collect(directory: string, sessionId: string, request: BoundedWorkRequest,
-  signal: AbortSignal): Promise<ProviderObservation | undefined> {
+  signal: AbortSignal, boundAgentId?: string): Promise<ProviderObservation | undefined> {
   const started_at_ms = Date.now()
   try {
-    const matches: string[] = []
+    if (boundAgentId !== undefined && !/^[A-Za-z0-9_-]+$/.test(boundAgentId)) return undefined
+    const matches: string[] = boundAgentId === undefined ? [] : [boundAgentId]
     let entries = 0
-    for await (const entry of await opendir(directory)) {
+    if (boundAgentId === undefined) for await (const entry of await opendir(directory)) {
       signal.throwIfAborted()
       if (++entries > 4096) return undefined
       const name = entry.name

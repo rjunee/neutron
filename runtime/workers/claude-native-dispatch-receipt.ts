@@ -35,6 +35,8 @@ interface RecordBody {
 }
 export interface SignedNativeDispatchRecord { body: RecordBody; publicKey: string; signature: string }
 export interface NativeDispatchAuthority {
+  /** Independently supplied by canonical admission, never read from a receipt. */
+  readonly lease: NativeDispatchLease
   prepare(): SignedNativeDispatchRecord
   record(evidence: NativeDispatchEvidence): SignedNativeDispatchRecord
 }
@@ -65,6 +67,7 @@ export function createNativeDispatchSigner() {
           signature: sign(null, Buffer.from(JSON.stringify(snapshot)), privateKey).toString('base64') }
       }
       return {
+        get lease() { return structuredClone(body.lease) },
         prepare() {
           if (prepared) throw new Error('Native dispatch receipt already prepared')
           prepared = true
@@ -125,7 +128,7 @@ export function createClaudeNativeDispatchReceipt(directory: string, request: Bo
 }
 
 /** Worker-readable storage is NOT authority. Consumers must verify against the
- * still-stored lease's pinned public key, never a key selected by the file. */
+ * host-stored lease pin (live or archived), never a key selected by the file. */
 export function readClaudeNativeDispatchReceipt(directory: string, request: Pick<BoundedWorkRequest, 'run_id' | 'step_id'>): unknown {
   let fd: number | undefined
   try {

@@ -13,6 +13,8 @@ import { decodeProjectTrailer } from '@neutronai/runtime/workers/project-runners
 import { completeNativeChildWorkspaceRequest } from '@neutronai/runtime/workers/native-child-workspace.ts'
 import { resolveLiveProjectSessions } from '@neutronai/runtime/adapters/claude-code/persistent/live-project-sessions.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
+import { projectReviewArtifacts, projectReviewStepIdentity } from '@neutronai/trident/project-review-artifacts.ts'
+import { readReviewReceipt, readReviewJson } from '@neutronai/trident/project-review-receipt.ts'
 import { projectBuildTrailerDecoder } from './project-build.ts'
 
 export interface ClaudeNativeDispatchReconcileOptions {
@@ -70,8 +72,7 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
       // without reconstructing an actor, changing outcome, or dispatching again.
       if (!isTerminalPhase(run.phase)) continue
       const state = join(options.stateRoot, encodeURIComponent(runId))
-      if (!['plan', 'build', 'fix', 'review'].includes(request.role)
-        || request.result.path !== join(state, `${request.role}.result`)) continue
+      if (!await canonicalResultPath(state, request)) continue
       const key = createHash('sha256').update(JSON.stringify([runId, stepId])).digest('hex')
       const held = await readArmedTrailerReservation(join(state, `claude-step-${key}.json`), JSON.stringify(request))
       if (held.kind !== 'resume') continue
@@ -86,6 +87,20 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
     } catch { /* Unknown DB, request or artifact authority never releases this child. */ }
   }
   return { status: 'observed', released, kept: leases.length - released }
+}
+
+async function canonicalResultPath(state: string, request: BoundedWorkRequest): Promise<boolean> {
+  if (['plan', 'build', 'fix', 'review'].includes(request.role)
+    && request.result.path === join(state, `${request.role}.result`)) return true
+  if (!['review', 'synthesis'].includes(request.role) || request.result.schema !== 'verdict') return false
+  const identity = projectReviewStepIdentity(request.step_id)
+  if (!identity) return false
+  const paths = projectReviewArtifacts(state, identity)
+  if (request.result.path !== paths.result || request.brief.path !== paths.brief) return false
+  const receipt = await readReviewReceipt(paths.directory, identity)
+  if (!receipt || receipt.invalidated
+    || receipt.requestHash !== createHash('sha256').update(JSON.stringify(request)).digest('hex')) return false
+  return JSON.stringify(await readReviewJson(join(paths.directory, 'request.json'))) === JSON.stringify(request)
 }
 
 /** Passive recovery must not block on a FIFO or accept a changing snapshot. */

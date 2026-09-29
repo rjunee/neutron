@@ -179,7 +179,7 @@ export class AttemptAccounting {
     })
   }
 
-  private async observe(key: AttemptKey, observation: ProviderObservation): Promise<void> {
+  async observe(key: AttemptKey, observation: ProviderObservation): Promise<void> {
     await this.storeReceipt(key, {
       receipt_id: JSON.stringify([key.run_id, key.step_id, key.attempt_id]), source: observation.source,
       observed_at: observation.observed_at_ms, model_reported: observation.model_reported,

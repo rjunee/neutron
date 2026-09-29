@@ -72,6 +72,20 @@ test('foreign assistant envelopes and synthetic errors cannot inflate a bound ch
   expect((await f.observe())?.usage.input_tokens).toBe(10)
 })
 
+test('archived child selection ignores mutable metadata but retains exact request and provider envelope ownership', async () => {
+  const f = await fixture()
+  await f.save([f.initial, f.assistant])
+  await writeFile(join(f.dir, 'agent-child.meta.json'), '{}')
+  await writeFile(join(f.dir, 'agent-other.meta.json'), JSON.stringify({ description: 'build: step' }))
+  expect((await observeClaudeChildUsage(f.dir, 'session', f.request, 'child'))?.usage.input_tokens).toBe(10)
+  for (const child of ['other', '../child']) expect(await observeClaudeChildUsage(f.dir, 'session', f.request, child)).toBeUndefined()
+  expect(await observeClaudeChildUsage(f.dir, 'foreign', f.request, 'child')).toBeUndefined()
+  expect(await observeClaudeChildUsage(f.dir, 'session', { ...f.request, model_id: 'foreign' }, 'child')).toBeUndefined()
+  const traversal = 'x/../agent-child'
+  await f.save([{ ...f.initial, agentId: traversal }, { ...f.assistant, agentId: traversal }])
+  expect(await observeClaudeChildUsage(f.dir, 'session', f.request, traversal)).toBeUndefined()
+})
+
 for (const scenario of ['transcript too large', 'line too large', 'metadata too large', 'transcript symlink', 'metadata symlink'] as const) {
   test(`bounded observation refuses ${scenario} and still reads legitimate siblings`, async () => {
     const f = await fixture()
@@ -85,10 +99,15 @@ for (const scenario of ['transcript too large', 'line too large', 'metadata too 
       await fs.rename(path, path + '.target'); await symlink(path + '.target', path)
     }
     expect(await f.observe()).toBeUndefined()
+    if (scenario.startsWith('transcript') || scenario === 'line too large') {
+      expect(await observeClaudeChildUsage(f.dir, 'session', f.request, 'child')).toBeUndefined()
+      const sibling = await fixture(); await sibling.save([sibling.initial, sibling.assistant])
+      expect((await observeClaudeChildUsage(sibling.dir, 'session', sibling.request, 'child'))?.usage.input_tokens).toBe(10)
+    }
   })
 }
 
-test('stalled metadata I/O times out and late completion cannot continue parsing', async () => {
+for (const bound of [false, true]) test(`stalled I/O times out and late completion cannot continue parsing: archived=${bound}`, async () => {
   const f = await fixture()
   await f.save([f.initial, f.assistant])
   const original = fs.open
@@ -96,11 +115,11 @@ test('stalled metadata I/O times out and late completion cannot continue parsing
   const blocked = new Promise<void>(resolve => { release = resolve })
   let delayed = false
   const mock = spyOn(fs, 'open').mockImplementation(async (...args) => {
-    if (String(args[0]).endsWith('.meta.json')) { delayed = true; await blocked }
+    if (String(args[0]).endsWith(bound ? '.jsonl' : '.meta.json')) { delayed = true; await blocked }
     return original(...args)
   })
   try {
-    expect(await f.observe()).toBeUndefined()
+    expect(await observeClaudeChildUsage(f.dir, 'session', f.request, bound ? 'child' : undefined)).toBeUndefined()
     expect(delayed).toBe(true)
   } finally { release(); mock.mockRestore() }
   expect((await f.observe())?.usage.input_tokens).toBe(10)

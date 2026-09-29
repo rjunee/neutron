@@ -74,12 +74,14 @@ import { decodeLedger } from '../../tests/fixtures/trident-ledger-delta/decode.t
 // eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
 import { compareLedgerDelta } from '../../tests/fixtures/trident-ledger-delta/compare.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { reconcileClaudeNativeUsage } from '../wiring/claude-native-usage-reconcile.ts'
 import { retryModeSource, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
 import { dispatchBoardBoundBuild, type BoardBoundBuildDeps } from '@neutronai/trident/board-dispatch.ts'
 import { DispatchHoldStore } from '@neutronai/trident/dispatch-holds.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
+import { reconcileClaudeNativeDispatches } from '../wiring/claude-native-dispatch-reconcile.ts'
 import { replaceProjectGeneration, type ProjectMaintenancePorts } from '@neutronai/gateway/project-generation-replacement.ts'
 import { runProjectLivenessCensus, type ProjectLivenessProbes } from '@neutronai/gateway/project-liveness-census.ts'
 import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
@@ -3836,8 +3838,8 @@ test('workspace scratch churn permits host receipt reuse while generated content
   expect(f.world.dispatches).toHaveLength(0)
 }, 120_000)
 
-async function preparedPanelFixture() {
-  const f = await fixture()
+async function preparedPanelFixture(options: Parameters<typeof fixture>[0] = {}) {
+  const f = await fixture(options)
   f.register()
   await f.prepare()
   const worktree = f.store.get(f.row.id)!.worktree!
@@ -3855,6 +3857,54 @@ async function preparedPanelFixture() {
   }
   return { ...f, move, observe }
 }
+
+for (const role of ['review', 'synthesis'] as const) for (const kind of ['completed', 'blocked'] as const)
+test(`passive late panel ${role} ${kind} consumes original live artifacts without redispatch`, async () => {
+  const f = await preparedPanelFixture({ nativeUsage: true })
+  const session = (await pool.get(f.key))!
+  const submit = session.child.submitLine!.bind(session.child)
+  let request!: BoundedWorkRequest
+  let completed = ''
+  let turns = 0
+  session.child.submitLine = async line => {
+    turns++
+    await submit(line)
+    const spec = JSON.parse(line.slice(line.indexOf('{')))
+    const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
+    const data = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
+    const current: BoundedWorkRequest = JSON.parse(data.slice('Request (data): '.length))
+    if (current.role === role && current.result.schema === 'verdict') {
+      request = current
+      completed = await readFile(request.result.path, 'utf8')
+      // The native child has been bound, but its result is not yet readable as
+      // a validated envelope when the bounded host observation finishes.
+      await writeFile(request.result.path, '{}')
+    }
+  }
+  expect((await f.observe()).kind).not.toBe('observed')
+  expect(request.role).toBe(role)
+  expect(request.result.path).toMatch(/\/review-[a-f0-9]{64}\/result\.json$/)
+  const owned = f.admission.listLeases('liveChild')
+  expect(owned).toHaveLength(1)
+  const attempt = f.context.attempts.get({ run_id: request.run_id, step_id: request.step_id, attempt_id: 'dispatch' })
+  expect(attempt?.outcome).toBe('unknown')
+  await f.store.update(f.row.id, { phase: 'failed' })
+  const reconcile = () => reconcileClaudeNativeDispatches({ stateRoot: f.context.stateRoot, admission: f.admission,
+    runs: f.store, attempts: f.context.attempts, projectIdForRun: () => null, listProjectIds: () => [] })
+  expect(await reconcile()).toMatchObject({ released: 0, kept: 1 })
+  await rm(request.result.path)
+  expect(await reconcile()).toMatchObject({ released: 0, kept: 1 })
+  const envelope = JSON.parse(completed)
+  await writeFile(request.result.path, JSON.stringify({ ...envelope, step_id: 'foreign' }))
+  expect(await reconcile()).toMatchObject({ released: 0, kept: 1 })
+  await writeFile(request.result.path, kind === 'completed' ? completed
+    : JSON.stringify({ schema: request.result.schema, run_id: request.run_id, step_id: request.step_id, kind, on: 'Fixture child finished blocked.' }))
+  expect(await reconcile()).toMatchObject({ released: 1, kept: 0 })
+  expect(await reconcile()).toMatchObject({ released: 0, kept: 0 })
+  expect(f.store.get(f.row.id)?.phase).toBe('failed')
+  expect(f.context.attempts.get({ run_id: request.run_id, step_id: request.step_id, attempt_id: 'dispatch' })).toEqual(attempt)
+  expect(turns).toBe(role === 'review' ? 1 : 2)
+}, 30_000)
 
 for (const changed of ['none', 'head', 'round', 'task', 'model', 'effort', 'credential', 'desired-credential', 'file-credential'] as const)
 test(`prepared panel recovery purchases only the work invalidated by ${changed}`, async () => {
@@ -7346,6 +7396,52 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
   expect(f.github.prs).toHaveLength(1)
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 300_000)
+
+test('accepted native result archives authority before lease release and enriches late ACK usage after restart', async () => {
+  const f = await fixture({ nativeUsage: true })
+  expect((await drive(f)).kind).toBe('merged')
+  const attempt = f.context.attempts.list(f.row.id).find(row => row.role === 'build')!
+  const binding = f.context.attempts.nativeUsageBinding(attempt)!
+  expect(binding).not.toBeNull()
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+  expect(f.context.attempts.receipt(attempt)).toMatchObject({ input_tokens: 7, output_tokens: 3, cost_usd: null })
+  const beforeAttempts = f.context.attempts.list(f.row.id)
+  const beforeRun = f.store.get(f.row.id)
+  const { parent, nativeAgentId, request } = binding.receipt.body
+  const late = { agentId: nativeAgentId, sessionId: parent!.sessionId, isSidechain: true, type: 'assistant',
+    message: { id: 'late-ack', role: 'assistant', model: request.model_id,
+      usage: { input_tokens: 11, output_tokens: 5, cache_read_input_tokens: 13, cache_creation_input_tokens: 0 } } }
+  await appendFile(join(binding.directory, `agent-${nativeAgentId}.jsonl`), `${JSON.stringify(late)}\n${JSON.stringify(late)}\n`)
+  // Neither the unsigned observer file nor metadata can redirect the archive.
+  await writeFile(join(f.context.stateRoot, f.row.id,
+    `claude-observer-${createHash('sha256').update(attempt.step_id).digest('hex')}.json`), '{}')
+  await writeFile(join(binding.directory, `agent-${nativeAgentId}.meta.json`), '{}')
+  pool.delete(f.key); supervisedBySessionKey.delete(f.key)
+  f.world.dispatches.length = 0
+  const reopened = ProjectDb.open(join(f.dir, 'project.db')); cleanups.push(() => reopened.close())
+  const attempts = new TridentAttemptLedger(reopened), runs = new TridentRunStore(reopened)
+  const reconcile = () => reconcileClaudeNativeUsage({ attempts, runs, ownerHandle: f.admission.ownerHandle,
+    projectIdForRun: () => null, event: (id, stage, meta) => runs.recordStageEvent(id, stage, meta) })
+  expect((await reconcile()).observed).toBeGreaterThan(0)
+  expect(attempts.receipt(attempt)).toMatchObject({ input_tokens: 18, output_tokens: 8, cache_read_tokens: 15, cost_usd: null })
+  await reconcile()
+  expect(attempts.receipt(attempt)?.input_tokens).toBe(18)
+  expect(attempts.list(f.row.id)).toEqual(beforeAttempts)
+  expect(runs.get(f.row.id)).toEqual(beforeRun)
+  expect(f.world.dispatches).toEqual([])
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+}, 30_000)
+
+test('native usage archive failure cannot veto an accepted result or retain its released admission', async () => {
+  const f = await fixture({ nativeUsage: true })
+  const archive = spyOn(f.context.attempts, 'archiveNativeUsage').mockRejectedValue(new Error('unavailable telemetry store'))
+  try {
+    expect((await drive(f)).kind).toBe('merged')
+    expect(archive).toHaveBeenCalled()
+    expect(f.admission.listLeases('liveChild')).toEqual([])
+    expect(f.store.stageEvents(f.row.id).some(event => event.stage === 'attempt-usage-binding-unavailable')).toBe(true)
+  } finally { archive.mockRestore() }
+}, 30_000)
 
 test('attempt accounting reconciles pre-crash provider spend through actual pending gateway recovery without dispatch or approval', async () => {
   const f = await fixture({ blockRoles: ['review'], nativeUsage: true })
