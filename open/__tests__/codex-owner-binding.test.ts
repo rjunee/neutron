@@ -68,6 +68,59 @@ test.each(['owner', 'child-thread', 'foreign-turn', 'General', 'revoked-project'
   },
 )
 
+test('recovery authority cannot survive host close or native generation replacement during evidence reads', async () => {
+  for (const change of ['close', 'generation'] as const) {
+    const f = fixture()
+    let claims = 0
+    let inspected = false
+    f.bindings.orchestratorRecovery = {
+      projectScopeFor: id => `scope/${id}`,
+      async dispatch(input) {
+        const validate = () => validateProjectChatOrchestratorAuthority(input.orchestratorAuthority, {
+          project_scope: `scope/${input.project_id}`, project_id: input.project_id,
+          call_id: input.call_id, tool_name: input.tool_name, args: input.args,
+        })
+        expect(validate()).toMatchObject({ project_id: 'project-one' })
+        if (change === 'close') await f.bindings.close()
+        else f.replaceGeneration('project-one')
+        inspected = true
+        validate()
+        claims++
+      },
+    }
+    f.hold(true)
+    const draining = collect(f.bindings.start('project-one', spec('held owner')))
+    for (let attempt = 0; !f.calls.length && attempt < 100; attempt++) await Bun.sleep(1)
+    f.question('item/tool/call', { tool: 'neutron_owner_mcp', callId: 'recovery-call',
+      arguments: { action: 'replan_build', params: { source_run_id: 'rejected' } } })
+    for (let attempt = 0; !inspected && attempt < 100; attempt++) await Bun.sleep(1)
+    expect(inspected).toBe(true)
+    expect(claims).toBe(0)
+    f.finish(); await draining
+    await f.bindings.close()
+  }
+})
+
+test('build execution on the shared native parent cannot mint recovery authority', async () => {
+  const f = fixture()
+  let dispatches = 0
+  f.bindings.orchestratorRecovery = { projectScopeFor: id => `scope/${id}`, async dispatch() { dispatches++; return {} } }
+  const { request, worker } = await consumingBuild(f, { wall: 2000 })
+  f.hold(true)
+  const running = worker.run(request, 'in-repl', new AbortController().signal)
+  for (let attempt = 0; !f.calls.length && attempt < 100; attempt++) await Bun.sleep(1)
+  expect(f.calls).toHaveLength(1)
+  f.question('item/tool/call', { tool: 'neutron_owner_mcp', callId: 'recovery-call',
+    arguments: { action: 'replan_build', params: { source_run_id: 'rejected' } } })
+  for (let attempt = 0; !f.replies.length && attempt < 100; attempt++) await Bun.sleep(1)
+  expect(f.replies[0]?.result).toMatchObject({ success: false })
+  expect(dispatches).toBe(0)
+  writeFileSync(request.result.path, JSON.stringify({ schema: 'fixture', run_id: request.run_id,
+    step_id: request.step_id, kind: 'completed', result: { answer: 'done' } }))
+  f.finish(); await running
+  await f.bindings.close()
+})
+
 test('General owner dispatch, native controls and MCP approval scope remain distinct from project general', async () => {
   const f = fixture(false, true)
   const mcpScopes: (string | null)[] = []

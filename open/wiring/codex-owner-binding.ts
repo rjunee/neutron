@@ -189,7 +189,7 @@ export class CodexOwnerBindings {
         try {
           assertOwnerScope(project.codexHome, options.projectId)
           const now = this.readBinding(owner.binding)
-          return !released && now.bindingRevision === facts.bindingRevision
+          return !this.closed && !released && now.bindingRevision === facts.bindingRevision
             && owner.broker.state().phase !== 'closed' && !this.refused.has(options.projectId)
         } catch { return false }
       }
