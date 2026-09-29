@@ -106,8 +106,31 @@ failures (43 passing tests, 169 assertions), then passed after repair (48 tests,
 190 assertions). Removing the registry entry caused its two completeness guards
 to fail; removing 162 from the explicit lists caused both migration assertions
 to fail. Restoring both repairs passed the same three suites again. These were
-semantic assertion failures. The corrected integrated full gate is still pending;
-the focused proof does not replace it.
+semantic assertion failures. The corrected integrated full gate passed as
+recorded below; the focused proof alone did not replace it.
+
+### Corrected consolidated publication receipt
+
+On 2026-09-29, the exact frozen candidate
+`0263fc765483da84046bdbbb013f0bb03ac9c460` passed
+`bash scripts/check-shared-host.sh` with exit status zero. All 51 TypeScript
+configurations passed, including the root and Trident configurations. All
+1,755 declared, Bun-discovered, assigned and executed files matched across
+19 lanes: 1,517 general, 22 PGLite, 43 device and 173 real-HTTP files, with
+zero failed lanes. The consuming E2E suite and five new reconciler controls
+passed. Conditional skips remain skips, not claimed execution.
+
+Suite input identity remained unchanged:
+`e07929d1bfc812c1d7804e7f650179d6761950f72c240a90de5ece4dc791704a`.
+The complete gate, including TypeScript checks, took 25 minutes 11.672 seconds
+(09:25:21.683–09:50:33.355 UTC).
+
+This receipt records that exact tested candidate. The subsequent publication
+commit only updates this record; it changes no runtime, tests, configuration or
+suite input. It does not claim that the later documentation commit ran this
+gate or transfer suite authority to another checkout. Required CI must pass on
+the exact final publication head. Deployment, served controls, live acceptance
+and measured efficiency savings remain unverified; #1196 stays open.
 
 ### Deliberate boundary
 
@@ -116,5 +139,5 @@ complete. A transcript may remain partial or later disappear. Attempts without
 a successfully captured original host binding are not retroactively trusted.
 No stop notification or transcript text becomes result, cancellation, admission,
 or lease-release authority. No provider/model/configuration change, live database
-write or paid probe was performed for this slice. The integrated gate above is
-red; publication still requires the corrected candidate's full gate.
+write or paid probe was performed for this slice. The initial integrated gate
+was red; the corrected candidate's full gate passed as recorded above.
