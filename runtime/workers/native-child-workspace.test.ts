@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
-import { createClaudeActingTurn } from './claude-acting-turn.ts'
+import { createClaudeActingTurn, type ClaudeSubmissionQueueObservation } from './claude-acting-turn.ts'
 import { admitNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest,
   nativeChildCensusKnown, type NativeChildWorkspace } from './native-child-workspace.ts'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
@@ -222,4 +222,61 @@ test('acknowledged dispatch without a bound child returns unknown and leaves the
   f.complete(0)
   await Promise.resolve()
   expect(f.session.turnSlotHeld).toBe(0)
+})
+
+async function censusFixture() {
+  const f = await fixture()
+  const own = f.requests.map(request => ({ runId: request.run_id, stepId: request.step_id, generation: 0 }))
+  // A pending row with no local admission keeps the census unknown.
+  f.setPending([...own, { runId: 'restart', stepId: 'x', generation: 0 }])
+  const observed: ClaudeSubmissionQueueObservation[] = []
+  const censusStarted = barrier()
+  let writes = 0
+  f.session.child.submitLine = async () => {
+    writes++
+    await writeFile(f.requests[0]!.result.path, JSON.stringify({ run_id: f.requests[0]!.run_id, step_id: f.requests[0]!.step_id }))
+  }
+  const binding = { ...f.binding(0), onSubmissionQueue: (observation: ClaudeSubmissionQueueObservation) => {
+    observed.push(observation)
+    if (observation.kind === 'stage-started' && observation.stage === 'native-child-census-wait') censusStarted.release()
+  } }
+  const find = (kind: string, stage: string) => observed.filter(o => o.kind === kind && o.stage === stage)
+  return { f, own, observed, censusStarted, binding, find, writes: () => writes }
+}
+
+test('native-submission-queue: the sibling-census wait is recorded as its own stage after the queue interval', async () => {
+  const c = await censusFixture()
+  let tick = 0
+  const running = createClaudeActingTurn(c.binding, { now: () => ++tick, pause: async () => {} })(c.f.input(0))
+  await c.censusStarted.promise
+  const [queueStarted] = c.find('stage-started', 'native-submission-queue')
+  const [queueEnded] = c.find('stage-ended', 'native-submission-queue')
+  const [censusStarted] = c.find('stage-started', 'native-child-census-wait')
+  expect(queueStarted).toBeDefined()
+  expect(queueEnded).toMatchObject({ outcome: 'acquired', started_at: queueStarted!.started_at })
+  expect(censusStarted).toBeDefined()
+  // The census interval opens only after the queue interval closed; it is held open.
+  expect((queueEnded as { ended_at: number }).ended_at).toBeLessThanOrEqual(censusStarted!.started_at)
+  expect(c.find('stage-ended', 'native-child-census-wait')).toEqual([])
+  expect(c.writes()).toBe(0)
+  c.f.setPending(c.own)
+  expect(await running).toEqual({ kind: 'turn-ended' })
+  expect(c.find('stage-ended', 'native-child-census-wait')).toEqual([expect.objectContaining({
+    started_at: censusStarted!.started_at, outcome: 'known' })])
+  expect(c.find('stage-ended', 'native-submission-queue')).toHaveLength(1)
+  expect(c.writes()).toBe(1)
+})
+
+test('native-submission-queue: an expired census wait ends as expired and never dispatches', async () => {
+  const c = await censusFixture()
+  let now = 0
+  const running = createClaudeActingTurn(c.binding, { now: () => now, pause: async () => {} })(c.f.input(0))
+  await c.censusStarted.promise
+  now = 1_000_000
+  const outcome = await running
+  expect(outcome).toMatchObject({ kind: 'refused', detail: expect.stringContaining('Native child admission did not become available') })
+  expect(c.find('stage-ended', 'native-submission-queue')).toEqual([expect.objectContaining({ outcome: 'acquired' })])
+  expect(c.find('stage-ended', 'native-child-census-wait')).toEqual([expect.objectContaining({ outcome: 'expired', ended_at: 1_000_000 })])
+  expect(c.writes()).toBe(0)
+  c.f.setPending(c.own)
 })

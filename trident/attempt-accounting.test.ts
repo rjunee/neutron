@@ -226,6 +226,21 @@ test('unavailable event sink cannot veto successful work, invalid telemetry, tim
   expect((await dispatch(invalid, { ...request, step_id: 'build:1' })).kind).toBe('completed')
   expect(await accounting.interval('cleanup', {}, async () => 'cleaned')).toBe('cleaned')
   await expect(accounting.interval('proof', {}, async () => { throw Error('proof failed') })).rejects.toThrow('proof failed')
+  await expect(accounting.recordStageObservation(request, { stage: 'native-submission-queue', started_at: 1 })).resolves.toBeUndefined()
+  await expect(accounting.recordStageObservation(request, { stage: 'native-submission-queue', started_at: 1, ended_at: 2, outcome: 'acquired' })).resolves.toBeUndefined()
+})
+
+test('consumer stage observations carry the dispatch attempt key and never invent an ending', async () => {
+  const recorded: { stage: string; meta: unknown }[] = []
+  accounting = new AttemptAccounting(ledger, dir, async (stage, meta) => { recorded.push({ stage, meta: JSON.parse(meta) }) }, () => ++now)
+  await accounting.recordStageObservation(request, { stage: 'native-submission-queue', started_at: 50 })
+  expect(recorded).toEqual([{ stage: 'build-stage-started', meta: { ...key, stage: 'native-submission-queue', started_at: 50 } }])
+  await accounting.recordStageObservation(request, { stage: 'native-submission-queue', started_at: 50, ended_at: 50, outcome: 'acquired' })
+  expect(recorded[1]).toEqual({ stage: 'build-stage-ended',
+    meta: { ...key, stage: 'native-submission-queue', started_at: 50, ended_at: 50, outcome: 'acquired' } })
+  // Observation timing is advisory: it touches neither the attempt ledger nor the clock.
+  expect(ledger.get(key)).toBeNull()
+  expect(now).toBe(30)
 })
 
 test('observation-only startup reconciliation ingests pre-crash spend without dispatching or authorizing a pending result', async () => {
