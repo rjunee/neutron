@@ -114,7 +114,7 @@ export interface ProjectScopeLifecycle extends ConversationLifecycle {
   armIdle(scope: string | null): void
   /** Disarm the scope's idle timer (a dispatch is about to run). */
   disarmIdle(scope: string | null): void
-  /** Stop every timer (composition teardown). */
+  /** Stop timers and fence sleep retirement (composition teardown). */
   close(): void
 }
 
@@ -212,6 +212,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
   const pollMs = deps.pollMs ?? DEFAULT_HANDOFF_POLL_MS
   const defaultWaitMs = deps.waitMs ?? DEFAULT_HANDOFF_WAIT_MS
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms)))
+  let closed = false
 
   /**
    * ONE lifecycle actuation per exact scope at a time (null and the literal `general`
@@ -499,6 +500,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
   }
 
   async function sleepOnce(scope: string | null): Promise<SleepOutcome> {
+    if (closed) return { status: 'refused', reason: 'lifecycle closed' }
     const owner = await ownerFor(scope)
     if (owner.kind === 'ambiguous') return { status: 'unknown', reason: `ambiguous Chat owner: ${owner.count} live sessions` }
     // Foreign/unverified refuses BEFORE anything is killed: the manager's sample must
@@ -517,6 +519,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
         const evidence = await awake(scope)
         if (evidence.status === 'awake') return { status: 'refused', reason: `awake: ${evidence.reasons.join(', ')}` }
         if (evidence.status === 'unknown') return { status: 'unknown', reason: evidence.reason }
+        if (closed) return { status: 'refused', reason: 'lifecycle closed' }
         const cleanup = await deps.conversationTerminal.retireEmptyWorkspace(scope, before)
         if (cleanup.status === 'unknown' || cleanup.status === 'refused') return cleanup
       }
@@ -539,12 +542,16 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
     if (evidence.status === 'unknown') return { status: 'unknown', reason: evidence.reason }
     // Sleep never waits a turn out (unlike a handoff): a busy key refuses outright.
     if (await phase(owner.sessionKey) === 'busy') return { status: 'refused', reason: 'owner still in a turn' }
+    if (closed) return { status: 'refused', reason: 'lifecycle closed' }
     // The pool fences the key, then re-reads the admitted evidence with no await
     // before termination: work admitted since the read above keeps the Chat.
     let arrived: AwakeOutcome | undefined
     const retired = await retire(owner.sessionKey, {
       keepResumableRow: true,
       stillIdle: () => {
+        // The pool can yield before this final synchronous check. Shutdown is
+        // not a sleep event, even if the earlier census found the Chat idle.
+        if (closed) return false
         const now = admittedEvidence(scope)
         if (now.status === 'idle') return true
         arrived = now
@@ -552,6 +559,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
       },
     })
     if (retired === 'deferred') {
+      if (closed) return { status: 'refused', reason: 'lifecycle closed' }
       if (arrived?.status === 'awake') return { status: 'refused', reason: `awake: ${arrived.reasons.join(', ')}` }
       if (arrived?.status === 'unknown') return { status: 'unknown', reason: arrived.reason }
       return { status: 'refused', reason: 'owner still in a turn' }
@@ -559,7 +567,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
     if (retired === 'refused') return { status: 'refused', reason: 'the pool refused retirement (ownership or exit not confirmed)' }
     if (retired === 'absent') return { status: 'absent' }
     log.info('project_scope_slept', { scope, session_id: owner.sessionId, credential: owner.credentialId, outcome: retired })
-    if (inspect === undefined || before === undefined || before.status === 'none') {
+    if (closed || inspect === undefined || before === undefined || before.status === 'none') {
       return { status: 'retired', sessionId: owner.sessionId, workspace: 'left-for-reconciliation' }
     }
     const cleanup = await deps.conversationTerminal?.retireEmptyWorkspace?.(scope, before)
@@ -597,7 +605,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
     timers.delete(scope)
   }
   function armIdle(scope: string | null, delayMs = idleMs): void {
-    if (idleMs <= 0) return
+    if (closed || idleMs <= 0) return
     disarmIdle(scope)
     const timer = setTimeout(() => {
       if (timers.get(scope) !== timer) return
@@ -613,6 +621,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
     timers.set(scope, timer)
   }
   function close(): void {
+    closed = true
     for (const timer of timers.values()) clearTimeout(timer)
     timers.clear()
   }

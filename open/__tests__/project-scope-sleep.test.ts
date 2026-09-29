@@ -510,6 +510,70 @@ test('idle timer: a settled turn sleeps after idleMs; a dispatch before it fires
   expect(await r.lifecycle.isAsleep('p-one')).toBe(true)
 })
 
+test('shutdown fences a sampled sleep at the pool retirement boundary and preserves the conversation for restart', async () => {
+  let entered!: () => void
+  let release!: () => void
+  const entering = new Promise<void>(resolve => { entered = resolve })
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  let pause = true
+  const r = await rig({
+    retire: async (key, sleep) => {
+      if (pause) { entered(); await barrier }
+      return retirePersistentRepl(key, undefined, sleep)
+    },
+  })
+  expect(await turn(r, 'p-one')).toBe(true)
+  const first = r.peer.children[0]!
+  const key = keyOf(r, first.sessionId)!
+  const sleeping = r.lifecycle.sleep('p-one')
+  await entering
+  r.lifecycle.close()
+  release()
+  expect(await sleeping).toEqual({ status: 'refused', reason: 'lifecycle closed' })
+  expect(first.child.hasExited()).toBe(false)
+  expect(chatCloses(r)).toHaveLength(0)
+  expect(getRecord(r.registryPath, key)?.asleep_at).toBeUndefined()
+  expect(retiringSessionKeys.size).toBe(0)
+  // A new gateway lifetime can still use, and subsequently sleep, the exact owner.
+  pause = false
+  r.restart()
+  expect(await turn(r, 'p-one')).toBe(true)
+  expect(r.peer.children).toHaveLength(1)
+  expect((await r.lifecycle.sleep('p-one')).status).toBe('retired')
+  expect(first.child.hasExited()).toBe(true)
+})
+
+test('shutdown prevents an in-flight idle retry and a late dispatch finalizer from rearming sleep', async () => {
+  let entered!: () => void
+  let release!: () => void
+  const entering = new Promise<void>(resolve => { entered = resolve })
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  let pause = true
+  const r = await rig({ idleMs: 40, liveness: () => ({
+    census: async () => {
+      if (pause) { entered(); await barrier; return censusOf('unknown') }
+      return censusOf('idle')
+    },
+  }) })
+  expect(await turn(r, 'p-one')).toBe(true)
+  await entering
+  r.lifecycle.close()
+  pause = false
+  release()
+  await until(() => r.logged.some(row => row.event === 'project_scope_sleep'))
+  const attempts = r.logged.filter(row => row.event === 'project_scope_sleep').length
+  r.lifecycle.armIdle('p-one')
+  await Bun.sleep(200)
+  expect(r.logged.filter(row => row.event === 'project_scope_sleep')).toHaveLength(attempts)
+  expect(chatCloses(r)).toHaveLength(0)
+  expect(r.peer.children[0]!.child.hasExited()).toBe(false)
+  expect(await r.lifecycle.sleep('p-one')).toEqual({ status: 'refused', reason: 'lifecycle closed' })
+  r.restart()
+  r.lifecycle.armIdle('p-one')
+  await until(() => chatCloses(r).length === 1)
+  expect(await r.lifecycle.isAsleep('p-one')).toBe(true)
+})
+
 test('restart continuity: a FRESH lifecycle after a gateway restart wakes the slept scope from the durable row — same credential, same session, one Chat', async () => {
   const r = await rig()
   expect(await turn(r, 'p-one')).toBe(true)
