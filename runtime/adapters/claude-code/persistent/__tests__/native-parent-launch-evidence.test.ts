@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { prepareNativeParentLaunch, readNativeParentLaunchEvidence } from '../native-parent-launch-evidence.ts'
@@ -8,6 +8,7 @@ import { createPersistentReplSubstrate, poolKeyFor, shutdownAllPersistentRepls }
 import { pool } from '../pool-state.ts'
 import { lifecycleReplHost } from './lifecycle-repl-host.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
+import { classifyPaneForAdoption } from '../orphan-adoption.ts'
 
 let dir: string
 const body = '#!/bin/sh\nprintf "2.1.285 (Claude Code)\\n"\n'
@@ -23,7 +24,7 @@ const input = () => ({ sessionId: 'session', childGeneration: 'generation', proj
 test('observes actual executable bytes/version and binds only the successful host session', async () => {
   const launch = await prepareNativeParentLaunch(input())
   expect(launch).toBeDefined()
-  expect(launch!.argv[0]).toBe(join(dir, 'claude'))
+  expect(launch!.argv[0]).toBe('claude')
   const session = {}
   expect(readNativeParentLaunchEvidence(session)).toBeUndefined()
   launch!.record(session)
@@ -42,6 +43,29 @@ test('Agent-only, General, missing executable and failed version probe supply no
   expect(await prepareNativeParentLaunch({ ...input(), argv: ['absent'] })).toBeUndefined()
   writeFileSync(join(dir, 'claude'), '#!/bin/sh\nexit 1\n', { mode: 0o700 })
   expect(await prepareNativeParentLaunch(input())).toBeUndefined()
+})
+
+test('configured symlink launcher stays adoptable while resolved executable evidence stays exact', async () => {
+  renameSync(join(dir, 'claude'), join(dir, 'claude.exe'))
+  symlinkSync(join(dir, 'claude.exe'), join(dir, 'claude'))
+  const requested = input()
+  requested.argv.push('--dangerously-load-development-channels', 'server:channel')
+  const launch = (await prepareNativeParentLaunch(requested))!
+  const session = {}
+  launch.record(session)
+  const evidence = readNativeParentLaunchEvidence(session)!
+  expect(evidence.executable.realPath).toBe(join(dir, 'claude.exe'))
+  expect(launch.argv).toEqual(requested.argv)
+  expect(classifyPaneForAdoption({ kind: 'live', argv: launch.argv },
+    { sessionId: 'session', channelName: 'channel' }).kind).toBe('adopt')
+  expect(classifyPaneForAdoption({ kind: 'live', argv: [evidence.executable.realPath, ...launch.argv.slice(1)] },
+    { sessionId: 'session', channelName: 'channel' }).kind).toBe('leave-not-ours')
+  writeFileSync(join(dir, 'replacement.exe'), body, { mode: 0o700 })
+  unlinkSync(join(dir, 'claude'))
+  symlinkSync(join(dir, 'replacement.exe'), join(dir, 'claude'))
+  const replaced = {}
+  launch.record(replaced)
+  expect(readNativeParentLaunchEvidence(replaced)).toBeUndefined()
 })
 
 test('executable replacement during spawn invalidates observation; next launch remeasures', async () => {

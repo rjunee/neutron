@@ -38,8 +38,9 @@ function identity(path: string): string {
 
 /** Probe failure leaves ordinary chat usable but supplies no continuation
  * authority. Cache only the same file identity; replacements require a new hash
- * and bounded version probe. Resolving argv[0] prevents a later PATH lookup
- * selecting a different binary. This does not attest the executed process image. */
+ * and bounded version probe. Preserve configured argv: restart adoption matches
+ * that launcher basename, which can differ from its symlink target. The resolved
+ * file is measured separately; this does not attest the executed process image. */
 export async function prepareNativeParentLaunch(input: {
   sessionId: string; childGeneration: string; projectId: string
   argv: readonly string[]; tools: readonly string[]; cwd: string
@@ -62,13 +63,17 @@ export async function prepareNativeParentLaunch(input: {
       executable = Object.freeze({ realPath, sha256: hash.digest('hex'), version })
       binaries.set(before, executable)
     }
-    const argv = [realPath, ...input.argv.slice(1)]
+    const argv = [...input.argv]
     const evidence: NativeParentLaunchEvidence = Object.freeze({ version: 1,
       sessionId: input.sessionId, childGeneration: input.childGeneration, projectId: input.projectId,
       executable, argv: Object.freeze([...argv]), tools: Object.freeze([...input.tools]) })
     return { argv, record(session) {
       // A replaced executable during spawn invalidates this observation.
-      try { if (identity(realPath) === before) recordNativeParentLaunchEvidence(session, evidence) } catch { /* unknown */ }
+      try {
+        if (realpathSync(selected) === realPath && identity(realPath) === before) {
+          recordNativeParentLaunchEvidence(session, evidence)
+        }
+      } catch { /* unknown */ }
     } }
   } catch { return undefined }
 }

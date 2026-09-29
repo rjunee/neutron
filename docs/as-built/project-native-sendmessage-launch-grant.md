@@ -7,9 +7,12 @@ This supports native same-model work under SPEC.md's 2026-09-11 decision without
 changing review, admission, or merge gates.
 
 Fresh project launches measure the selected executable's real path, SHA-256 and
-CLI version, pass the resolved executable path to the terminal host, and bind
+CLI version, preserve the configured launcher argv for restart adoption, and bind
 the exact argv and tool grant to the session and child generation after spawn.
-Executable identity changes invalidate the observation. Stable file identities
+Executable identity changes or launcher symlink retargeting invalidate the
+observation. A consuming adoption test proves a `claude` launcher pointing to
+`claude.exe` remains adoptable without weakening foreign-binary refusal.
+Stable file identities
 reuse the version/hash measurement; version probes have a five-second limit.
 Missing observations do not prevent ordinary chat.
 
