@@ -92,7 +92,7 @@ import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admi
 import { buildTridentTerminalObserver } from '../wiring/trident-nexus-observer.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { fixtureDispatchAdmission } from '@neutronai/trident/__tests__/dispatch-admission-fixture.ts'
-import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
+import { buildTridentOrchestrator, sweepStrandedFailures } from '@neutronai/trident/orchestrator.ts'
 import { createProjectLauncher, projectBuildResult } from '@neutronai/trident/project-launcher.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
 import { deriveEscalationBlock } from '@neutronai/trident/escalation-block.ts'
@@ -1778,8 +1778,12 @@ test('remote movement between launch probes cannot falsify an authorized seed in
   const before = s.f.world.dispatches.length
   const host = s.f.context.runHost
   let movedAtSecondProbe = false
+  const publisherCalls: string[] = []
+  let sweepingRun = 'none'
   s.f.context.runHost = Object.assign(async (...args: Parameters<typeof host>) => {
     const argv = args[0]
+    if ((argv[0] === 'gh' && argv[1] === 'pr' && ['create', 'list'].includes(argv[2] ?? ''))
+      || (argv[0] === 'git' && argv.includes('push'))) publisherCalls.push(`${sweepingRun}:${argv[0] === 'gh' ? argv[2] : 'push'}`)
     // Recovery's PR/branch checks use --exit-code. The ordinary resume probe
     // uses --heads. Change the real bare origin in the gap between those reads.
     if (!movedAtSecondProbe && argv[0] === 'git' && argv.includes('ls-remote') && argv.includes('--heads')) {
@@ -1810,9 +1814,96 @@ test('remote movement between launch probes cannot falsify an authorized seed in
   await buildBoardReconcileObserver(s.board, { resolveRepoWebUrl: async () => null })!(s.f.store.get(admitted.run.id)!)
   expect(s.board.get(s.prior.project_slug, s.card.id)).toMatchObject({ status: 'blocked',
     linked_run_id: admitted.run.id, recovery_refusal: expect.stringContaining('published source changed') })
+  expect(publisherCalls).toEqual([])
+  // Restart reconciliation visits failed PR-mode rows, not merely the live
+  // step path. It must preserve the refusal rather than publish the retained
+  // local source commit after the remote changed.
+  await sweepStrandedFailures({ store: s.f.store, reconcile: async (row, options) => {
+    sweepingRun = row.id === s.prior.id ? 'source' : row.id === admitted.run.id ? 'recovery' : 'other'
+    return orch.reconcile_stranded(row, options)
+  } })
+  expect(publisherCalls).toEqual([])
+  expect(s.f.store.get(admitted.run.id)!.failure_reason).toContain('Orchestrator recovery refused')
+  expect(s.board.get(s.prior.project_slug, s.card.id)?.recovery_refusal).toContain('published source changed')
   expect(s.f.world.dispatches).toHaveLength(before)
   expect(s.f.github.prs[0]!.state).toBe('OPEN')
   expect(await gitOut(host, s.f.origin, ['rev-parse', 'refs/heads/main'])).toBe(s.f.baseSha)
+}, 300_000)
+
+test('a corrupt imported recovery checkpoint refuses before the outer publisher sees the retained branch', async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const admitted = await s.dispatch()
+  expect(admitted.ok, JSON.stringify(admitted)).toBe(true)
+  if (!admitted.ok) return
+  // Make a real branch available for stranded-build salvage. Without it, a
+  // generic checkpoint failure could appear safe only because salvage has
+  // nothing to inspect, not because the recovery refusal protected the branch.
+  await prepareRecoveryBranch(admitted.run, s.request.expected_head, s.f.context.runHost,
+    s.f.store.orchestratorRecovery(admitted.run.id)!)
+  await s.f.store.recordStageEvent(admitted.run.id, 'build-mode-state', '{invalid-recovery-state')
+  const before = s.f.world.dispatches.length
+  const host = s.f.context.runHost
+  const publisherCalls: string[] = []
+  const guardedHost = Object.assign(async (...args: Parameters<typeof host>) => {
+    if (args[0][0] === 'gh' && args[0][1] === 'pr' && ['create', 'list'].includes(args[0][2] ?? '')) {
+      publisherCalls.push(args[0][2]!)
+    }
+    return host(...args)
+  }, { writesDiffOutput: true as const })
+  const orch = buildTridentOrchestrator({
+    fire_workflow: async () => { throw Error('corrupt recovery state must not fire workers') },
+    db_path: s.f.input.db_path, base_branch: 'main', run_host: guardedHost,
+    read_run: id => s.f.store.get(id), list_stage_events: id => s.f.store.stageEvents(id),
+    read_orchestrator_recovery: run => {
+      readOrchestratorRecovery(s.f.store, run)
+      return s.f.store.orchestratorRecovery(run.id)
+    },
+    record_recovery_refusal: (id, reason) => s.f.store.recordOrchestratorRecoveryRefusal(id, reason),
+    sleep: async () => {},
+  })
+  const refused = await orch.step(admitted.run)
+  expect(refused.run.phase).toBe('failed')
+  expect(refused.run.failure_reason).toContain('Orchestrator recovery refused')
+  expect(await s.f.store.saveIfActive(refused.run)).toBe(true)
+  await buildBoardReconcileObserver(s.board, { resolveRepoWebUrl: async () => null })!(s.f.store.get(admitted.run.id)!)
+  expect(s.board.get(s.prior.project_slug, s.card.id)).toMatchObject({ status: 'blocked',
+    linked_run_id: admitted.run.id, recovery_refusal: refused.run.failure_reason })
+  expect(publisherCalls).toEqual([])
+  expect(s.f.world.dispatches).toHaveLength(before)
+  expect(s.f.github.prs[0]!.state).toBe('OPEN')
+  expect(await gitOut(host, s.f.origin, ['rev-parse', 'refs/heads/main'])).toBe(s.f.baseSha)
+}, 300_000)
+
+test('restart sweep still salvages an ordinary failed build with real unpushed Git work', async () => {
+  const f = await fixture({ dispatchTask: 'Record a note and preserve it after a failed publish' })
+  const host = await createProjectBuildHost(await f.prepare())
+  host.deps.publishGate = async () => ({ kind: 'blocked', on: 'fixture proof unavailable' })
+  const failedBuild = await buildRun({ mode: 'implementation', start: 'fresh', run_id: f.row.id,
+    workers: host.workers, repl_provider: 'anthropic', merge_mode: 'pr' },
+  host.deps, new AbortController().signal)
+  expect(failedBuild).toMatchObject({ kind: 'blocked', phase: 'publish' })
+  const candidate = f.store.get(f.row.id)!
+  const localHead = await gitOut(f.context.runHost, f.repo, ['rev-parse', candidate.branch!])
+  expect(localHead).not.toBe(f.baseSha)
+  await f.store.update(candidate.id, { phase: 'failed', failure_reason: 'fixture publish failed' })
+  const runHost = Object.assign(async (...args: Parameters<typeof f.context.runHost>) => {
+    const argv = args[0]
+    if (argv[0] === 'gh' && argv[1] === 'pr' && argv[2] === 'list' && argv.includes('--jq')) {
+      const pr = f.github.prs.find(row => row.headRefName === argv[argv.indexOf('--head') + 1])
+      return { ok: true, exit_code: 0, stdout: pr ? String(pr.number) : '', stderr: '' }
+    }
+    return f.context.runHost(...args)
+  }, { writesDiffOutput: true as const })
+  const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('sweep must not fire workers') },
+    db_path: f.input.db_path, base_branch: 'main', run_host: runHost, sleep: async () => {},
+    persist_refire_reset: async (id, patch) => { await f.store.update(id, patch) },
+    leak_preflight: async input => ({ status: 'clean', head: input.head,
+      findings: [], skipped_rules: [], attempts: 0, note: 'fixture scanner' }) })
+  await sweepStrandedFailures({ store: f.store, reconcile: orch.reconcile_stranded })
+  expect(f.store.get(candidate.id)!.pr).toBe(1)
+  expect(f.store.get(candidate.id)!.failure_reason).toContain('build survived the failure')
+  expect(f.github.prs).toMatchObject([{ number: 1, state: 'OPEN', headRefName: candidate.branch }])
+  expect(await gitOut(f.context.runHost, f.origin, ['rev-parse', `refs/heads/${candidate.branch}`])).toBe(localHead)
 }, 300_000)
 
 test('a crash after the authorized checkpoint import resumes the same review and task budget', async () => {
