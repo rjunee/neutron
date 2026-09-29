@@ -240,6 +240,7 @@ test('a recovery successor failing before a specific refusal is recorded is stil
     recovery_refusal: expect.stringContaining('ancestry UNKNOWN'),
     attempts: [{ run_id: successor.id, outcome: 'blocked' }] })
   const saved = board.get('board', card.id)?.recovery_refusal
+  if (typeof saved !== 'string') throw new Error('The card must retain its durable recovery refusal')
   expect(saved).toContain('ancestry UNKNOWN')
   expect(db.get<{ refusal: string }>(
     'SELECT refusal FROM code_trident_orchestrator_recoveries WHERE run_id = ?', [successor.id],

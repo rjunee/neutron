@@ -15,7 +15,13 @@
   "tables": {
     "code_trident_orchestrator_recoveries": {
       "owner": "trident/store.ts",
-      "writers": ["trident/store.ts"]
+      "writers": ["trident/store.ts", "work-board/store.ts"],
+      "notes": [
+        "trident/store.ts owns the one-use claim and explicit launch refusal writes.",
+        "work-board/store.ts records a missing terminal refusal in the same transaction",
+        "as card reconciliation, so a generic pre-fire failure remains durably blocked.",
+        "Its write is limited to the refusal column of the matching run, card and board."
+      ]
     },
     "native_host_terminations": {
       "owner": "gateway/project-admission-store.ts",

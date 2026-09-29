@@ -74,3 +74,14 @@ cover the shared durable predicate, not a claim about live provider behavior.
 After restoring those mutations, four focused Open consumer tests passed with
 65 assertions, and 49 focused recovery, board and orchestrator tests passed with
 190 assertions. Root and Trident TypeScript checks passed on this revision.
+
+Exact-head CI exposed two validation omissions: the Work Board package's stricter
+test matcher rejected a nullable expected refusal, and the ownership map omitted
+Work Board's deliberate transactional refusal write. The assertion now explicitly
+requires a string before comparing persisted values. The map lists both actual
+writers and documents the Work Board write's scope. No production behavior changed.
+Work Board, root and Trident TypeScript checks passed; ownership conformance and
+refusal tests passed 36 tests with 191 assertions. The original missing-writer
+configuration failed, adding a non-writer failed the stale-entry check, and the
+restored exact writer set passed. Full Open E2E was not repeated for these test
+typing and ownership-metadata corrections.
