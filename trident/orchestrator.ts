@@ -756,7 +756,7 @@ export interface StrandedReconcileOptions {
 }
 
 export interface StrandedFailureSweepDeps {
-  store: Pick<TridentRunStore, 'listFailedPrRuns' | 'listNonTerminal' | 'update'>
+  store: Pick<TridentRunStore, 'listFailedPrRuns' | 'listNonTerminal' | 'update' | 'hasConsumedOrchestratorRecoverySource'>
   reconcile: (
     run: TridentRun,
     options?: StrandedReconcileOptions,
@@ -789,6 +789,10 @@ export async function sweepStrandedFailures({
   }
   for (const row of rows) {
     try {
+      // The one-use recovery claim transfers ownership of the published branch
+      // from the failed source to its successor. In particular, a refused
+      // successor cannot make boot replay the source's old rejected head.
+      if (store.hasConsumedOrchestratorRecoverySource(row.id)) continue
       const salvaged = await reconcile(row, {
         inspect_worktree:
           liveWorktreeScopes !== null && !liveWorktreeScopes.has(strandedWorktreeScope(row)),
