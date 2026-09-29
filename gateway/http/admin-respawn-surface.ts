@@ -44,6 +44,23 @@ export interface AdminRespawnSurface {
   handler: (req: Request) => Promise<Response | null>
 }
 
+async function readCapAuthorization(req: Request): Promise<unknown> {
+  const reader = req.body?.getReader()
+  if (!reader) throw new Error('Missing authorization')
+  const chunks: Uint8Array[] = []
+  let length = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      length += next.value.byteLength
+      if (length > 65_536) throw new Error('Authorization too large')
+      chunks.push(next.value)
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } finally { void reader.cancel().catch(() => {}); reader.releaseLock() }
+}
+
 export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): AdminRespawnSurface {
   // Per-surface rate-limit bucket: two instance gateways mounting this route in the
   // same process must not share a window (Codex P2).
@@ -55,7 +72,7 @@ export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): Admi
         // Browser/owner credentials confer NO cap-release authority. The callback
         // must authenticate the independent operator signature before acting.
         let request: unknown
-        try { request = await req.json() } catch { return Response.json({ ok: false }, { status: 403 }) }
+        try { request = await readCapAuthorization(req) } catch { return Response.json({ ok: false }, { status: 403 }) }
         if (input.authorizeCapRearm?.(request) !== true) return Response.json({ ok: false }, { status: 403 })
         const now = (input.now ?? Date.now)()
         const limit = input.rateLimit ?? { windowMs: 60_000, maxRequests: 5 }

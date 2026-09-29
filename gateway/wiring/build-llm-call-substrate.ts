@@ -1079,7 +1079,7 @@ export function buildLlmCallSubstrate(
   const failureLane: FailureOrigin = input.credential_failure_lane ?? 'interactive'
   async function reconcileAuthorized(
     projectIds: readonly (string | null)[],
-    reconcile: (options: ClaudeCodeSubstrateOptions) => Promise<void>,
+    reconcile: (options: ClaudeCodeSubstrateOptions, currentAuthority: () => boolean) => Promise<void>,
   ): Promise<void> {
     if (input.ephemeral === true || retired) return
     for (const conversationProjectId of new Set(projectIds)) {
@@ -1101,6 +1101,18 @@ export function buildLlmCallSubstrate(
         }
         try {
           if (!hasRecoverableClaudeRepl(identity)) continue
+          const capturedCredential = { id: credential.id, kind: credential.kind, secret: credential.secret, base_url: credential.base_url }
+          const currentAuthority = (): boolean => {
+            // An asynchronous-only pool resolver cannot prove the current credential
+            // under the synchronous registry CAS. Open supplies its canonical pool.
+            if (retired || input.pool !== pool) return false
+            if (input.configuredChat?.env !== undefined && projectModelTier(input.configuredChat.env, projectId) !== undefined) return false
+            const currentSelection = input.providerResolver?.(projectId, 'conversation')
+            const currentProvider = typeof currentSelection === 'object' ? currentSelection.provider : currentSelection
+            if (normalizeProvider(currentProvider?.trim() ? currentProvider : input.provider) !== 'anthropic') return false
+            return pool.credentials.some(current => current.id === capturedCredential.id && current.kind === capturedCredential.kind
+              && current.secret === capturedCredential.secret && current.base_url === capturedCredential.base_url)
+          }
           const resolved = await resolveCredentialAuthEnv({
             ...(input.oauthRefresh === undefined ? {} : { oauthRefresh: input.oauthRefresh }),
             ...(input.owner_handle === undefined ? {} : { owner_handle: input.owner_handle }),
@@ -1108,7 +1120,7 @@ export function buildLlmCallSubstrate(
           const opts = await claudeOptionsFor(input, resolved, () => conversationProjectId ?? 'general')
           opts.conversationProjectId = conversationProjectId
           placeConversation(opts, input, conversationProjectId)
-          await reconcile(opts)
+          await reconcile(opts, currentAuthority)
         } catch (error) {
           substrateLog.warn('boot_repl_recovery_unavailable', {
             substrate_instance_id: input.substrate_instance_id, project_id: projectId,
@@ -1121,8 +1133,8 @@ export function buildLlmCallSubstrate(
   return {
     async rearmCap(request, authorized) {
       let rearmed = false
-      await reconcileAuthorized([request.projectId], async options => {
-        if (rearmExistingClaudeReplCap(options, request, authorized)) rearmed = true
+      await reconcileAuthorized([request.projectId], async (options, currentAuthority) => {
+        if (rearmExistingClaudeReplCap(options, request, () => currentAuthority() && authorized())) rearmed = true
       })
       return rearmed
     },

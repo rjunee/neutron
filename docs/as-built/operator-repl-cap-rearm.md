@@ -14,6 +14,12 @@ authorization path as startup recovery, then compare-and-sets the exact session,
 child generation and cap episode under the registry lock. Canonical scope admission
 must be open and empty, with no prepared host termination. Deleted, retired, foreign,
 busy and mismatched identities refuse without changing the row.
+The locked mutation also rechecks the current provider, configured-model override,
+credential pool membership/material and substrate retirement after asynchronous
+resolution. Deterministic races for provider change, credential replacement/removal
+and retirement fail closed, while unchanged authority accepts. Unsigned or oversized
+HTTP input cannot consume the operator rate budget; streamed input is bounded before
+JSON parsing.
 
 The operation clears only the cap. Normal periodic recovery separately owns any
 later resume and retains every ownership, transcript and admission check. Successful

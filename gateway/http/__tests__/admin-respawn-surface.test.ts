@@ -31,6 +31,7 @@ test('cap rearm uses its independent authority callback, never the browser beare
   }), {} as never)
   expect((await call(body)).status).toBe(403)
   expect((await call(body, 'operator-secret')).status).toBe(403)
+  expect((await call({ signature: 'operator-proof', padding: 'x'.repeat(65_536) })).status).toBe(403)
   expect(releases).toBe(0)
   expect((await call({ body, signature: 'operator-proof' })).status).toBe(200)
   expect(releases).toBe(1)

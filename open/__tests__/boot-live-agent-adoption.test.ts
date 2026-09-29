@@ -50,6 +50,36 @@ const SECOND_PID = 31338
 const SECOND_PROJECT = 'second-project'
 const API_KEY = 'sk-ant-synthetic-boot-adoption'
 
+test.each(['provider', 'model', 'credential', 'removed', 'retired', 'unchanged'] as const)(
+  'operator cap CAS revalidates authority after async resolution: %s', async change => {
+    const paths = deriveReplSupervisionPaths(home!)
+    mkdirSync(paths.stateDir, { recursive: true })
+    const credentials = newCredentialPool({ strategy: 'round_robin', credentials: [
+      { id: 'anthropic:ANTHROPIC_API_KEY', kind: 'api_key', secret: API_KEY },
+    ] })
+    let provider = 'anthropic'
+    const modelEnv: Record<string, string | undefined> = {}
+    const substrate = buildLlmCallSubstrate({ pool: credentials, substrate_instance_id: 'cc-agent-owner',
+      cwd: home!, user_id: 'owner', owner_handle: 'owner', providerResolver: () => provider, configuredChat: { env: modelEnv } })
+    if (!substrate) throw new Error('Synthetic credential pool must create a substrate')
+    const key = poolKeyFor({ substrate_instance_id: 'cc-agent-owner', cwd: home!, user_id: 'owner',
+      project_id: PROJECT, credential_identity: credentials.credentials[0]!.id })
+    const row = { ...registryRow(key, 'pane:gone', GENERATION, 1), conversationProjectId: PROJECT,
+      model: 'claude-test', capped_at: 100 }
+    writeFileSync(paths.replRegistryPath, JSON.stringify({ [key]: row }))
+    const pending = substrate.rearmCap({ projectId: PROJECT, sessionKey: key, sessionId: SESSION,
+      childGeneration: GENERATION, cappedAt: 100 }, () => true)
+    // The first await has resolved the old identity but has not reached the CAS.
+    if (change === 'provider') provider = 'openai-codex'
+    if (change === 'model') modelEnv['NEUTRON_PROJECT_MODELS'] = JSON.stringify({ [PROJECT]: 'configured-test-tier' })
+    if (change === 'credential') credentials.credentials[0]!.secret = 'replacement-key'
+    if (change === 'removed') credentials.credentials.splice(0)
+    if (change === 'retired') await substrate.retire()
+    expect(await pending).toBe(change === 'unchanged')
+    expect(JSON.parse(readFileSync(paths.replRegistryPath, 'utf8'))[key].capped_at)
+      .toBe(change === 'unchanged' ? undefined : 100)
+  })
+
 test('production operator cap rearm resolves canonical scope without supervision and preserves unresolved children', async () => {
   process.env['NEUTRON_DB_PATH'] = join(home!, 'operator-cap.db')
   seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
