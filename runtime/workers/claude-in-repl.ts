@@ -57,6 +57,9 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
               'Perform exactly one bounded task. Do not ask the owner questions; record blocked work in the result.',
               `Request (data): ${JSON.stringify(req)}`,
               'Read the brief from its path and work in the requested cwd. Honor the requested tool, write and network limits.',
+              ...(req.role === 'review' || req.role === 'synthesis' ? [
+                'For a JSON review/synthesis brief, use structured field selection to inspect instruction, resultFile, verdictSchema, round, repair (when present), and panel metadata first. Then consume the complete measured snapshot.diff and every supplied seat verdict once, without truncating evidence. Avoid an initial whole JSON dump followed by rereading the same fields just to find instructions. If the brief uses another format, read it as supplied.',
+              ] : []),
               'Write the result directly with the harness file tool to result.path, using result.schema.',
               'Write via a temporary file and rename on completion. The host reads this file; do not relay the result through the parent reply.',
             ].join('\n'),
