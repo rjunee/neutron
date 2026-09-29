@@ -1795,19 +1795,28 @@ async function dispatchUnderAdmission(
       claimed_paths: paths,
       resume_note,
       ...(input.bound_pr !== undefined && input.bound_pr !== null ? { bound_pr: input.bound_pr } : {}),
-      // Only publication provenance travels through the exact card link. The
-      // observational `pr` field may have been filled by discovery and cannot
-      // establish ownership of a branch's existing PR.
+      // Only publication provenance travels through the exact card link. An
+      // intermediate same-card attempt can have no receipt (for example, it
+      // stopped on provider quota before publication); the card's terminal
+      // ledger may still hold an EARLIER witnessed receipt for this repository
+      // and branch. Even the linked run's direct receipt only applies to its
+      // original repo and branch; a card can change its selected repo
+      // or generated branch between attempts. The observational `pr` field
+      // cannot establish ownership.
       //
       // NOT gated on the task text, for the reason the ladder above states: the
       // LINK decides identity and the TEXT decides only whether the COMMIT may be
-      // adopted. `prior` is past that link, so this card IS this run's card. An
-      // owner clarifying the design doc between two presses used to drop the
-      // carry, which then left the retry with no `owned_pr` and refused it against
-      // its OWN published PR at `build-run.ts` fresh admission. Like the budget,
-      // this value cannot authorise anything foreign: it is receipt-minted
-      // publication provenance belonging to this very card's prior run.
-      ...(prior !== null && prior.published_pr !== null ? { published_pr: prior.published_pr } : {}),
+      // adopted. `prior` is past that link, so this card IS this run's card. A
+      // text-only edit that preserved the branch used to drop the carry, which
+      // then left the retry with no `owned_pr` and refused it against its OWN PR
+      // at fresh admission. A changed branch is different: the old receipt may
+      // not authorize its PR merely because this card still names the old run.
+      ...(prior !== null
+        ? { published_pr: (prior.repo_path === repo_path && prior.branch === branch
+          ? prior.published_pr : null) ?? deps.store.earlierCardPublication(
+            deps.project_slug, board_item_id, prior.id, repo_path, branch,
+          ) }
+        : {}),
       // The salvage-resume seed, or nothing at all. `bound_pr` is deliberately NOT
       // seeded (it means review-only-never-publish) and no verdict is seeded — the
       // resumed run is going to review, it has not been to one. `base_sha` IS

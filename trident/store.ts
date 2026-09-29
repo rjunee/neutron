@@ -1409,6 +1409,34 @@ export class TridentRunStore {
     return row === null ? null : rowToRun(row)
   }
 
+  /** A witnessed PR from an earlier terminal attempt of this exact card and
+   * branch. The linked terminal run is the anchor: neither a matching slug nor
+   * the ledger's observational `pr` column grants publication ownership. A
+   * different repository, branch, card, or later attempt cannot supply a receipt.
+   * Live PR/head verification still happens at launch. */
+  earlierCardPublication(
+    project: string, item: string, linkedRunId: string, repoPath: string, branch: string,
+  ): number | null {
+    const row = this.db.prepare<{ published_pr: number }, [string, string, string, string, string, string]>(
+      `SELECT owner.published_pr
+         FROM work_board_terminal_attempts AS anchor
+         JOIN code_trident_runs AS linked ON linked.id = anchor.run_id
+         JOIN work_board_terminal_attempts AS attempt
+           ON attempt.project_slug = anchor.project_slug AND attempt.item_id = anchor.item_id
+         JOIN code_trident_runs AS owner ON owner.id = attempt.run_id
+        WHERE anchor.project_slug = ? AND anchor.item_id = ? AND anchor.run_id = ?
+          AND linked.project_slug = anchor.project_slug AND linked.repo_path = ?
+          AND owner.project_slug = anchor.project_slug AND owner.repo_path = ? AND owner.branch = ?
+          AND owner.merge_mode = 'pr'
+          AND owner.published_pr IS NOT NULL AND owner.phase IN ${TERMINAL_PHASE_SQL}
+          AND owner.started_at <= linked.started_at
+          AND attempt.rowid < anchor.rowid
+        ORDER BY attempt.rowid DESC LIMIT 1`,
+    ).get(project, item, linkedRunId, repoPath, repoPath, branch)
+    return row != null && Number.isSafeInteger(row.published_pr) && row.published_pr > 0
+      ? row.published_pr : null
+  }
+
   /** Resolve the user-facing run references emitted by `/code`: full id, id
    * prefix, or slug. Full ids are globally unique in this single-owner DB;
    * shorthand references resolve only when unambiguous across all projects. */
