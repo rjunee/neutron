@@ -29,10 +29,12 @@ export async function claudeChildRateLimited(path: string, agentId: string, sess
       if (typeof content !== 'string') return false
       const requests = content.split('\n').filter(line => line.startsWith('Request (data): '))
       if (requests.length !== 1 || !isDeepStrictEqual(JSON.parse(requests[0]!.slice('Request (data): '.length)), request)) return false
+      // Subscription quota errors can omit quotaLimits. Preserve the typed
+      // HTTP error identity and reject contradictory enrichment when present.
       return final.type === 'assistant' && final.message?.role === 'assistant'
         && final.message.model === '<synthetic>' && final.isApiErrorMessage === true
         && final.error === 'rate_limit' && final.apiErrorStatus === 429
-        && final.quotaLimits?.status === 'rejected'
+        && (final.quotaLimits === undefined || final.quotaLimits?.status === 'rejected')
         && typeof final.requestId === 'string' && final.requestId.length > 0
     } finally { await file.close() }
   } catch { return false }

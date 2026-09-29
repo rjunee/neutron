@@ -455,13 +455,13 @@ test('project runner preserves the correlated provider block and never replays t
       { ...identity, type: 'assistant', message: { role: 'assistant', id: 'provider-message', model: 'provider-model',
         usage: { input_tokens: 17, output_tokens: 0, cache_read_input_tokens: 9, cache_creation_input_tokens: 0 } } },
       { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>' },
-        error: 'rate_limit', isApiErrorMessage: true, apiErrorStatus: 429, quotaLimits: { status: 'rejected' }, requestId: 'request' },
+        error: 'rate_limit', isApiErrorMessage: true, apiErrorStatus: 429, requestId: 'request' },
     ].map(row => JSON.stringify(row)).join('\n') + '\n')
   }
   const build = () => createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
     actingTurn: createClaudeActingTurn(f.binding), headless: {}, trailer: { schemas: new Map(), metadata: () => undefined } })
   const first = await (await build()).inRepl!.run(f.input.request, 'in-repl', f.input.signal)
-  expect(first).toEqual({ kind: 'blocked', on: 'Claude child stopped at the provider rate limit (HTTP 429).', observation: {
+  expect(first).toEqual({ kind: 'blocked', on: 'Claude child stopped at the provider rate limit.', observation: {
     source: 'claude-repl-jsonl', model_reported: 'provider-model', thread_id: 'quota', started_at_ms: expect.any(Number),
     finished_at_ms: expect.any(Number), observed_at_ms: expect.any(Number),
     usage: { input_tokens: 17, output_tokens: 0, cache_read_input_tokens: 9, cache_creation_input_tokens: 0, cost_usd: null },
@@ -475,6 +475,81 @@ test('project runner preserves the correlated provider block and never replays t
   expect(f.commands).toHaveLength(1)
   expect(f.released()).toBe(1)
   expect(await fs.stat(f.input.request.result.path).catch(error => error.code)).toBe('ENOENT')
+})
+
+for (const result of ['before observation', 'during observation', 'malformed during observation', 'stale during observation', 'foreign during observation'] as const) {
+  test(`a quota error preserves result precedence: ${result}`, async () => {
+    const f = await fixture()
+    f.binding.projects_dir = join(f.dir, 'projects')
+    const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+    const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+    const childPath = join(directory, 'agent-quota.jsonl')
+    const identity = { agentId: 'quota', sessionId: 'session', isSidechain: true }
+    const resultBytes = JSON.stringify({ schema: 'v1', kind: 'completed', result: result.startsWith('malformed') ? 'invalid' : { answer: 42 },
+      run_id: result.startsWith('foreign') ? 'other' : 'run', step_id: result.startsWith('stale') ? 'other' : 'step' })
+    f.binding.session.child.submitLine = async text => {
+      f.commands.push(text)
+      await mkdir(directory, { recursive: true })
+      await writeFile(join(directory, 'agent-quota.meta.json'), JSON.stringify({ description: 'build: step' }))
+      await writeFile(childPath, [
+        { ...identity, type: 'user', message: { role: 'user', content: `Request (data): ${JSON.stringify(f.input.request)}` } },
+        { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', stop_reason: 'stop_sequence' },
+          isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota' },
+      ].map(row => JSON.stringify(row)).join('\n') + '\n')
+      if (result === 'before observation') await writeFile(f.input.request.result.path, resultBytes)
+    }
+    const original = fs.open
+    let injected = false
+    const mock = spyOn(fs, 'open').mockImplementation(async (...args) => {
+      if (String(args[0]) === childPath && result !== 'before observation' && !injected) {
+        injected = true
+        await writeFile(f.input.request.result.path, resultBytes)
+      }
+      return original(...args)
+    })
+    try {
+      const runners = await createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
+        actingTurn: createClaudeActingTurn(f.binding), headless: {}, trailer: {
+          schemas: new Map([['v1', (value: unknown) => value !== null && typeof value === 'object' && 'answer' in value && value.answer === 42]]),
+          metadata: () => undefined,
+        } })
+      const outcome = await runners.inRepl!.run(f.input.request, 'in-repl', f.input.signal)
+      expect(outcome).toMatchObject(result.startsWith('stale') || result.startsWith('foreign')
+        ? { kind: 'blocked', on: 'Claude child stopped at the provider rate limit.' }
+        : result.startsWith('malformed') ? { kind: 'unknown', invalid_result: { schema: 'v1', payload: 'invalid' } }
+        : { kind: 'completed', result: { answer: 42 } })
+      expect(injected).toBe(result !== 'before observation')
+      await runners.inRepl!.recover!(f.input.request, 'in-repl', f.input.signal)
+      expect(f.commands).toHaveLength(1)
+    } finally { mock.mockRestore() }
+  })
+}
+
+test('a quota-limited child does not block a successful concurrent sibling', async () => {
+  const f = await fixture()
+  f.binding.projects_dir = join(f.dir, 'projects')
+  const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+  const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+  const inputs = ['quota', 'success'].map(step => ({ ...f.input, timeout_ms: 1000,
+    request: { ...f.input.request, step_id: step, budget: { wall_ms: 1000 }, result: { ...f.input.request.result, path: join(f.dir, step) } } }))
+  f.binding.session.child.submitLine = async text => { f.commands.push(text) }
+  await mkdir(directory, { recursive: true })
+  for (const input of inputs) {
+    const agentId = input.request.step_id
+    const identity = { agentId, sessionId: 'session', isSidechain: true }
+    await writeFile(join(directory, `agent-${agentId}.meta.json`), JSON.stringify({ description: `build: ${agentId}` }))
+    await writeFile(join(directory, `agent-${agentId}.jsonl`), [
+      { ...identity, type: 'user', message: { role: 'user', content: `Request (data): ${JSON.stringify(input.request)}` } },
+      ...(agentId === 'quota' ? [{ ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>' },
+        isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota' }] : []),
+    ].map(row => JSON.stringify(row)).join('\n') + '\n')
+  }
+  await writeFile(inputs[1]!.request.result.path, JSON.stringify({ run_id: 'run', step_id: 'success' }))
+  const acting = createClaudeActingTurn(f.binding)
+  expect(await Promise.all(inputs.map(input => acting(input)))).toEqual([
+    { kind: 'blocked', on: 'Claude child stopped at the provider rate limit.' }, { kind: 'turn-ended' },
+  ])
+  expect(f.commands).toHaveLength(2)
 })
 
 test('real HerdrHost child submits text then Enter in the existing pane', async () => {

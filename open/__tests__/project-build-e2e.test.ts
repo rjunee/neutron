@@ -1239,9 +1239,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       const identity = { agentId: 'quota', sessionId: 'e2e-session', isSidechain: true }
       await writeFile(join(directory, 'agent-quota.jsonl'), [
         { ...identity, type: 'user', message: { role: 'user', content: args.prompt } },
-        { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [] },
-          isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429,
-          quotaLimits: { status: 'rejected' }, requestId: 'quota-request' },
+        { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [], stop_reason: 'stop_sequence' },
+          isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-request' },
       ].map(row => JSON.stringify(row)).join('\n') + '\n')
       world.dispatches.push({ role: request.role, step_id: request.step_id, schema: request.result.schema, wrote: [] })
     } }, acquireTurn: async () => () => {} }
@@ -6370,13 +6369,15 @@ test('an unavailable panel seat stops by configured seat and never synthesizes o
   expect(originMain.stdout).toBe(f.baseSha)
 }, 300_000)
 
-test('a provider rate-limited synthesis stops with its cause without a trailer, replay, fix or merge', async () => {
+test('a typed subscription quota-limited synthesis stops without quotaLimits enrichment, trailer, replay, fix or merge', async () => {
   const f = await fixture({ rateLimitedSynthesis: true })
   const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator',
-    on: 'infra-only: Review synthesis unavailable: Review seat synthesis: Claude child stopped at the provider rate limit (HTTP 429).' })
+    on: 'infra-only: Review synthesis unavailable: Review seat synthesis: Claude child stopped at the provider rate limit.' })
   expect(dispatchRoles(f.world)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
   expect(f.world.dispatches.find(call => call.role === 'synthesis')?.wrote).toEqual([])
+  expect(f.admission.listLeases('liveChild').map(lease => JSON.parse(lease.workRef)))
+    .toEqual([[f.row.id, f.world.dispatches.find(call => call.role === 'synthesis')!.step_id]])
   expect(f.github.prs).toHaveLength(1)
   expect(f.github.prs[0]!.state).toBe('OPEN')
   const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
