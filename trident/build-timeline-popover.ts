@@ -63,15 +63,17 @@ function showPhasePopover(trigger, pinned = false) {
   top.append(phaseNode('div', 'popover-heading', info.title));
   const close = phaseNode('button', 'popover-close', '×'); close.type = 'button'; close.setAttribute('aria-label', 'Close phase details');
   close.addEventListener('click', dismissPhasePopover); top.append(close); popover.append(top);
-  popover.append(phaseNode('p', 'popover-window', info.windowLabel || info.duration + ' of wall-clock time in this interval'));
+  const singleAction = info.actions.length === 1 && !info.unclassified && !info.windowLabel;
+  if (!singleAction) popover.append(phaseNode('p', 'popover-window', info.windowLabel || info.duration + ' of wall-clock time in this interval'));
   if (info.unclassified || !info.actions.length) popover.append(phaseNode('p', 'popover-gap', 'Unclassified time: no completed phase evidence for this interval. It is not proven idle.'));
   for (const action of info.actions) {
-    const row = phaseNode('div', 'popover-action', ''); row.append(phaseNode('strong', '', action.label));
-    row.append(phaseNode('small', 'popover-time', 'Started ' + formatTimelineClock(action.startedAt)));
-    row.append(phaseNode('small', 'popover-time', typeof action.completedAt === 'number' ? 'Completed ' + formatTimelineClock(action.completedAt) : 'Completion not recorded'));
+    const row = phaseNode('div', 'popover-action', '');
+    if (!singleAction || action.label !== info.title) row.append(phaseNode('strong', '', action.label));
     const metrics = phaseNode('div', 'popover-metrics', '');
     metrics.append(phaseNode('span', 'popover-duration', action.duration), phaseNode('span', 'popover-tokens', action.tokens)); row.append(metrics);
     row.append(phaseNode('small', 'popover-model', action.model));
+    row.append(phaseNode('small', 'popover-time', 'Started ' + formatTimelineClock(action.startedAt)));
+    row.append(phaseNode('small', 'popover-time', typeof action.completedAt === 'number' ? 'Completed ' + formatTimelineClock(action.completedAt) : 'Completion not recorded'));
     if (action.crossesWindow) row.append(phaseNode('small', 'popover-note', 'Full action duration · crosses the focus-window boundary'));
     if (action.open) row.append(phaseNode('small', 'popover-note', 'End unrecorded · elapsed time is not proof of running work'));
     popover.append(row);

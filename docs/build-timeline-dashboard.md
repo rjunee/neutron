@@ -37,6 +37,8 @@ phases partitioned on the same wall-clock axis rather than added together. Concu
 phase categories share the height of the bar. Hover reveals phase information;
 focus or tap opens a custom phase popover; the full-size duration control exposes
 all actions, including tiny spans. Clicking the PR label opens complete evidence.
+Single-phase hover shows the activity once, followed by elapsed time, tokens,
+model and local start/completion clocks. The full explorer retains range context.
 Open PRs form the first section, with merged/closed below and recent activity
 ordering within each section. Explicit PR state is separate from fresh provider
 work signals. The default shared 1h focus window clips longer bars with an explicit

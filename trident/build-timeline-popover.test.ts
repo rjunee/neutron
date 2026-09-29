@@ -125,6 +125,28 @@ test('focus and mouse hover remain immediate even at phone width', () => {
   expect(hover.popover.hidden).toBe(false)
 })
 
+test('single-phase hover presents activity once with elapsed, tokens, model and both clocks', () => {
+  const f = fixture()
+  f.dispatch('pointerover', f.trigger, { pointerType: 'mouse' })
+  const texts = (node: typeof f.popover): string[] => [node.textContent, ...node.children.flatMap(texts)]
+  expect(texts(f.popover).filter(text => text === 'Build')).toHaveLength(1)
+  expect(f.popover.querySelector('.popover-window')).toBeNull()
+  expect(f.popover.querySelector('.popover-duration')!.textContent).toBe('5m')
+  expect(f.popover.querySelector('.popover-tokens')!.textContent).toBe('100 tokens')
+  expect(f.popover.querySelector('.popover-model')!.textContent).toBe('Example model')
+  expect(texts(f.popover).some(text => text.startsWith('Started 11:59 PM'))).toBe(true)
+  expect(texts(f.popover).some(text => text.startsWith('Completed 12:01 AM'))).toBe(true)
+  expect(f.popover.querySelector('.popover-footer')!.textContent).toBe('Open full PR details')
+
+  // The explorer needs its range context even when only one action was recorded.
+  const info = JSON.parse(f.trigger.dataset.phaseInfo!)
+  info.title = 'All recorded phases'; info.windowLabel = '5m total wall-clock span'
+  f.trigger.dataset.phaseInfo = JSON.stringify(info)
+  f.click(f.trigger)
+  expect(f.popover.querySelector('.popover-window')!.textContent).toBe('5m total wall-clock span')
+  expect(texts(f.popover)).toContain('Build')
+})
+
 test('cancelled, completed without click, and superseded touch gestures never suppress later focus', () => {
   for (const end of ['cancel', 'no-click', 'keyboard', 'mouse', 'outside-focus']) {
     const f = fixture()

@@ -18,10 +18,20 @@ invent usage, or change lifecycle/liveness policy. Existing run-owned attempt
 receipts still require an explicitly configured repository source. Registering
 another repository path remains a separately reviewed deployment operation.
 
-Verification: 40 focused timeline/server/popover tests passed, including the
+The single-phase hover also removes the duplicate activity heading and redundant
+interval sentence. Duration, tokens and model appear before both local clocks;
+the full explorer retains its range explanation. Existing grouped rows, shared
+linear focus/overflow geometry and unknown-completion semantics are unchanged.
+The consuming popover test checks the actual displayed text and both clocks,
+including the explorer's positive control for retained range context.
+
+Verification: 41 focused timeline/server/popover tests passed, including the
 file-backed authenticated API/HTML positive and negative coverage controls.
 Three semantic mutants (suppress every partial warning; warn on complete coverage;
 suppress unknown coverage)
-fail the coverage contract. Root and Trident TypeScript checks passed. The initial
+fail the coverage contract. The initial
 sandboxed socket fixture could not bind; the approved loopback-capable rerun passed.
-Served deployment verification remains separate from this code change.
+Served deployment verification remains separate from this code change. A read-only
+anonymous request to the existing deployment returned 401; its pinned source still
+contains the redundant hover content. No authenticated visual review or deployment
+was performed for this change.

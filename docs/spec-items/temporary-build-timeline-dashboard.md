@@ -84,6 +84,9 @@ spans carry unknown tokens unless a provider actually attributed usage.
       pins on tap; Escape/close/outside interaction dismiss it. Tiny spans remain
       accessible via a full-size phase explorer. Popovers preserve focus and remain
       readable across data refreshes. Expanded PR evidence remains available.
+      A single-phase hover names the activity once, then shows elapsed time,
+      tokens, model and start/completion clocks without a redundant interval
+      summary. The full phase explorer retains its range context.
       Recognized explicit phase categories determine bar and detail-dot colors
       regardless of incidental action-label words; unknown and legacy categories
       retain label-based inference.
