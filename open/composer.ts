@@ -1698,8 +1698,11 @@ export function buildOpenGraphComposer(
     // `stop()`); the gateway shutdown runner awaits each before `db.close()`.
     const realmodeCleanups: Array<() => void | Promise<void>> = []
     let stopChatRecovery: (() => Promise<void>) | undefined
-    const quiesceChatRecovery = async (): Promise<void> => { await stopChatRecovery?.() }
-    // Boot invokes this at shutdown entry, BEFORE persistent REPL teardown.
+    const quiesceChatRecovery = async (): Promise<void> => {
+      projectScopeLifecycle.close()
+      await stopChatRecovery?.()
+    }
+    // Boot invokes this before its first shutdown await, including listener drain.
     // Retain idempotent disposal for callers that compose without boot().
     realmodeCleanups.push(quiesceChatRecovery)
     realmodeCleanups.push(() => codexOwnerBindings.close())

@@ -1,8 +1,8 @@
 ## 2026-09-29 — Fence project sleep during gateway shutdown
 
 Refs #1342 and #1226. The workspace target says gateway restart is not a sleep
-event (`docs/spec-items/project-herdr-workspaces.md:78`). Composition calls the
-scope lifecycle's teardown (`open/composer.ts:1718`), but clearing its existing
+event (`docs/spec-items/project-herdr-workspaces.md:78`). Composition called the
+scope lifecycle's teardown during late cleanup, but clearing its existing
 timers did not invalidate a sampled sleep or prevent a late retry/finalizer from
 arming another timer. Both consuming regressions first failed by observing a
 real Chat retire after lifecycle teardown.
@@ -34,3 +34,21 @@ or safe retirement of any live helper. No live pane was closed.
 The local whole-tree purity scan failed on the linked-worktree pointer and
 existing-tree denylist matches; it is not reported as a passed gate. Publication
 and merge still require the integrated candidate's checks.
+
+Review found that late cleanup still allowed retirement during listener or
+recovery drain. Boot now invokes the existing shutdown callback synchronously
+before its first await (`gateway/index.ts:1081`), observes its promise rejection
+immediately, and drains it before graph/pool teardown (`gateway/index.ts:1106`).
+Open closes the lifecycle before awaiting recovery (`open/composer.ts:1702`).
+Post-composition boot failure and direct-composer disposal consume the same hook.
+
+The consuming boot regression (`open/__tests__/project-scope-sleep.test.ts:548`)
+holds the first listener await past the idle deadline, inspecting the real pool
+child, pane close requests and durable asleep marker. Normal sleep succeeds
+before shutdown. Moving the callback back behind listener drain fails because
+the child exits; invoking it during boot fails because normal sleep is refused.
+The actual Open composition survivor fixture
+(`open/__tests__/boot-live-agent-adoption.test.ts:384`) also rejects removing the
+early close. All three mutations were restored. The final focused run passed
+40 tests across lifecycle, adoption and recovery shutdown; root and Trident
+TypeScript checks passed. These remain fixture results, not deployed acceptance.
