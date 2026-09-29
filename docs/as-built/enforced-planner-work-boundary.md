@@ -70,6 +70,16 @@ and a distinct step invokes the actor again. The correction passed 44 native
 runner/retry tests and four focused project-runner controls. The failed integration
 run remains red evidence, not a completed full-suite pass.
 
+CI also exposed three hung-session fixtures that replaced the functioning native
+session but omitted its registered planner profile. Their replacement now retains
+the authentic session fields and overrides only the transport seams under test
+(`open/__tests__/project-build-e2e.test.ts:7919`). The three original failures were
+reproduced before correction. Six focused consumers then passed: hung submission,
+hung acquisition, silent worker, within-wall completion, closed-capability work,
+and missing-profile refusal. Deadline, UNKNOWN/refusal, acquisition/submission
+counts and lease assertions are unchanged; no production admission or deadline
+guard was weakened. This is focused correction evidence, not a full-suite pass.
+
 The local full-tree privacy scan remained red. An independent immutable-tree
 comparison found the same 451 findings at the base and first frozen candidate;
 the linked worktree added one untracked administrative-pointer finding. The

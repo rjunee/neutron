@@ -7917,7 +7917,9 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 1_500 } }
     let acquisitions = 0, submissions = 0
     registerSession(f, {
-      sessionId: 'e2e-session', childGeneration: 'e2e-generation', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
+      // Preserve the admitted planner profile and credential identity; only the
+      // selected transport seam differs from the functioning session fixture.
+      ...f.session,
       child: { pid: process.pid, submitLine: async () => { submissions++; if (seam === 'submitLine') await neverSettles() } },
       acquireTurn: async () => { acquisitions++; if (seam === 'acquireTurn') await neverSettles(); return () => {} },
     })
