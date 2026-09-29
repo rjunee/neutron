@@ -10,6 +10,12 @@
 
 import { describe, it, expect, afterEach } from 'bun:test'
 import { readFileSync, existsSync } from 'node:fs'
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { bindPlannerWork, PLANNER_AGENT, PLANNER_ROLE, PLANNER_TOOL } from '../../../../workers/planner-work.ts'
+import { createToolCallHandler } from '../tools-bridge-handler.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { Event } from '../../../../events.ts'
@@ -162,6 +168,16 @@ function readSettings(argv: string[]): {
 }
 
 describe('P0-1 native-MCP tool bridge — spawn wiring', () => {
+  it('registers the restricted planner role and its sole host tool only with native Agent and a bridge', async () => {
+    setReplToolBridge(fakeBridge([]))
+    const { host, argvs } = makeCapturingHost()
+    const sub = createPersistentReplSubstrate(opts(host, { enableToolBridge: true, user_id: 'planner', project_id: 'planner', credential_identity: 'planner' }))
+    await drain(sub.start({ ...spec('hi'), tools: [{ name: 'Agent' }] as AgentSpec['tools'] }))
+    const argv = argvs[0]!
+    expect(JSON.parse(argv[argv.indexOf('--agents') + 1]!)).toEqual({ [PLANNER_ROLE]: PLANNER_AGENT })
+    const manifest = JSON.parse(readFileSync(readMcpConfig(argv).mcpServers['neutron']!.env['TOOLS_MANIFEST_PATH']!, 'utf8'))
+    expect(manifest.map((tool: { name: string }) => tool.name)).toEqual(['doc_search', PLANNER_TOOL])
+  })
   it('attaches a SECOND mcpServers entry + manifest + --allowedTools when enabled', async () => {
     setReplToolBridge(fakeBridge([]))
     const { host, argvs } = makeCapturingHost()
@@ -228,12 +244,13 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
   // `sink-restart-survival.test.ts`, with the rest of the #537 boundary.
   const LIVE_SESSION_ID = 'tool-bridge-live-session'
   let liveCredential = ''
-  function registerLiveSession(projectId?: string): void {
+  function registerLiveSession(projectId?: string): ReplSession {
     const session = new ReplSession('k', 'gen', LIVE_SESSION_ID, 'chan', '/tmp')
     session.toolBridgeActive = true
     if (projectId !== undefined) session.projectId = projectId
     sink.register(LIVE_SESSION_ID, session)
     liveCredential = sink.credentialFor(session)
+    return session
   }
   afterEach(() => {
     sink.unregister(LIVE_SESSION_ID)
@@ -304,6 +321,36 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
     expect(json.result.results[0].id).toBe('doc-1')
     expect(json.result.echoed).toEqual({ query: 'taxes' })
     expect(calls).toEqual([{ tool_name: 'doc_search', args: { query: 'taxes' } }])
+  })
+
+  it('planner calls consume the credential-bound host capability, not registry dispatch or body session claims', async () => {
+    const calls: Array<{ tool_name: string; args: unknown }> = []
+    setReplToolBridge(fakeBridge(calls))
+    const session = registerLiveSession()
+    session.plannerRole = PLANNER_ROLE
+    const root = await mkdtemp(join(tmpdir(), 'planner-bridge-'))
+    try {
+      const cwd = join(root, 'work'), state = join(root, 'state')
+      await mkdir(cwd); await mkdir(state)
+      const git = (...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim()
+      git('init', '-q'); await writeFile(join(cwd, 'source.ts'), 'export const x = 1')
+      git('add', '.'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture')
+      const capability = await bindPlannerWork({ session,
+        request: { run_id: 'run', step_id: 'plan', role: 'plan', model_id: 'fixture', effort: 'high', cwd, writable: true, network: false, tools: 'edit',
+          brief: { path: join(state, 'brief'), integrity: 'fixture' }, result: { path: join(state, 'result'), schema: 'fixture' }, thread: null, budget: { wall_ms: 60_000 }, needs_approval_decision: false },
+        base: git('rev-parse', 'HEAD'), pr: null, brief: 'Bound brief', context: {}, signal: new AbortController().signal,
+        deadline: Date.now() + 60_000, current: () => true, validate: () => true })
+      const { port } = await getReplSinkInfo()
+      const call = createToolCallHandler({ port, token: liveCredential, sessionId: 'forged-advisory-id' })
+      const invoke = (args: Record<string, unknown>) => call({ method: 'tools/call', params: { name: PLANNER_TOOL,
+        arguments: { run_id: 'run', step_id: 'plan', capability, operation: 'brief', ...args } } })
+      expect(await invoke({})).toMatchObject({ content: [{ text: expect.stringContaining('Bound brief') }] })
+      expect(await invoke({ capability: 'foreign' })).toMatchObject({ isError: true })
+      expect(await invoke({ operation: 'exec', command: 'bun test' })).toMatchObject({ isError: true })
+      expect(await invoke({ operation: 'write', path: 'useful.ts', content: 'export const useful = 1' })).not.toHaveProperty('isError', true)
+      expect(readFileSync(join(cwd, 'useful.ts'), 'utf8')).toContain('useful')
+      expect(calls).toEqual([])
+    } finally { await rm(root, { recursive: true, force: true }) }
   })
 
   for (const route of ['/tool-call', '/todo-sync'] as const) {

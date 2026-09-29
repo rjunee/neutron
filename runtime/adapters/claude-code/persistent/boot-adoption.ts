@@ -120,6 +120,7 @@ import {
   type ProcessListing,
 } from './orphan-adoption.ts'
 import { childByKey, pool, sink, supervisedBySessionKey } from './pool-state.ts'
+import { PLANNER_PROFILE, PLANNER_PROFILE_ID, PLANNER_ROLE } from '../../../workers/planner-work.ts'
 import { hostSupportsAdoption, type AdoptableHost, type HandleInspection, type PtyChild } from './pty-host.ts'
 import {
   disownPane,
@@ -975,7 +976,7 @@ async function reconcileRow(
           false,
         )
       case 'adopt':
-        return await adoptRow(sessionKey, record, handle, options, host, deps, signal)
+        return await adoptRow(sessionKey, record, handle, options, host, deps, signal, inspection.kind === 'live' ? inspection.argv : [])
     }
   } catch (e) {
     return {
@@ -2383,6 +2384,7 @@ async function adoptRow(
   host: AdoptableHost,
   deps: BootAdoptionDeps,
   signal: AbandonSignal,
+  argv: readonly string[],
 ): Promise<RowAdoptionOutcome> {
   const log = deps.log ?? defaultLog
   const registryPath = options.replRegistryPath
@@ -2492,6 +2494,12 @@ async function adoptRow(
   }
   session.toolSurface = reuse.tool_surface
   session.toolBridgeActive = reuse.tool_bridge
+  // A persisted label alone is not a provider capability. Corroborate the
+  // exact host profile against the argv of this independently identified child.
+  // Missing/changed profiles remain adopted for ownership, never gain a planner
+  // grant, and cannot revive any per-request operation capability after restart.
+  if (reuse.planner_profile === PLANNER_PROFILE_ID && reuse.tool_bridge && reuse.tool_surface.split(',').includes('Agent')
+    && argv.filter(value => value === '--agents').length === 1 && argv[argv.indexOf('--agents') + 1] === PLANNER_PROFILE) session.plannerRole = PLANNER_ROLE
   session.authFingerprint = typeof reuse.auth_fingerprint === 'string' ? reuse.auth_fingerprint : ''
   // #1237 — the admission generation the child was SPAWNED under, exactly as its row
   // recorded it. A row without the field is a legacy parent and stays `undefined`:

@@ -247,11 +247,22 @@ describe('conversation REPL model on phone', () => {
   });
 
   it('ignores session A switch completion after focus refreshes to session B', async () => {
+    const modelUrl = 'https://example.test/api/app/projects/willow/repl-model';
     deferPost = true;
     const screen = await mount();
     await press('repl-model-open');
     await press('repl-model-option-frontier');
-    expect(calls.at(-1)?.body).toEqual({ model: 'frontier', sessionId: 'session-one' });
+    // Another mounted chat's background read can follow the held switch POST.
+    const unrelatedUrl = 'https://harness.example.test/api/app/projects/~general/repl-model';
+    const unrelatedToken = 'Bearer unrelated-read-token';
+    await fetch(unrelatedUrl, { headers: { authorization: unrelatedToken } });
+    const switches = calls.filter(call => call.url === modelUrl && call.method === 'POST');
+    expect(switches).toEqual([
+      { url: modelUrl, method: 'POST', body: { model: 'frontier', sessionId: 'session-one' },
+        token: 'Bearer test-token' },
+    ]);
+    expect(calls.slice(calls.indexOf(switches[0]!) + 1))
+      .toContainEqual({ url: unrelatedUrl, method: 'GET', body: null, token: unrelatedToken });
     expect(completePost).not.toBeNull();
 
     // Changing the auth identity re-runs the focus effect in the device-shaped

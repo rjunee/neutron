@@ -29,6 +29,7 @@ import {
   resolveSinkPort,
 } from './sink-coordinates.ts'
 import { dirname } from 'node:path'
+import { dispatchPlannerWork, PLANNER_ROLE, PLANNER_TOOL } from '../../../workers/planner-work.ts'
 import type { PtyChild } from './pty-host.ts'
 import type { InFlightGate } from './in-flight-gate.ts'
 import type { ModelUpdateWatchdog } from './model-update-watchdog.ts'
@@ -612,6 +613,10 @@ export class ReplSink {
         // longer an unregistered-session case to degrade: the guard above refused it.
         const toolProjectId = session.projectId ?? null
         try {
+          if (toolName === PLANNER_TOOL) {
+            if (session.plannerRole !== PLANNER_ROLE) throw new Error('Planner role was not registered for this native session')
+            return Response.json({ ok: true, result: await dispatchPlannerWork(session, body['args']) })
+          }
           const result = await bridge.dispatch({
             tool_name: toolName,
             args: body['args'] ?? {},

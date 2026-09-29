@@ -24,6 +24,7 @@ import { paneClaimBlocksUs, spawnReservationBlocksUs } from './signatures.ts'
 import { applyModelFloor } from './model-floor.ts'
 import { type InFlightGate, makeInFlightGate } from './in-flight-gate.ts'
 import { childByKey, pendingSpawns, pool, replToolBridgeRef, respawnGates, sink } from './pool-state.ts'
+import { PLANNER_ROLE, PLANNER_PROFILE_ID, PLANNER_TOOL_SCHEMA } from '../../../workers/planner-work.ts'
 import { hasUnresolvedNativeChild } from './native-child-liveness.ts'
 import {
   registerLiveProcessSafe,
@@ -235,7 +236,7 @@ async function spawnSession(
   let toolBridgeActive = false
   const toolBridge = replToolBridgeRef.current
   if (options.enableToolBridge === true && toolBridge !== undefined) {
-    const schemas = toolBridge.listToolSchemas()
+    const schemas = [...toolBridge.listToolSchemas(), ...(spec.tools.some(tool => tool.name === 'Agent') ? [PLANNER_TOOL_SCHEMA] : [])]
     if (schemas.length > 0) {
       writeFileSync(toolsManifestPath, JSON.stringify(schemas, null, 2))
       mcpServers[TOOLS_BRIDGE_SERVER_NAME] = {
@@ -360,6 +361,7 @@ async function spawnSession(
     // this list is the agent's entire readable filesystem.
     addDirs: [cwd, ...(options.extra_dirs ?? [])],
     tools: toolSurface,
+    plannerRole: toolBridgeActive && toolSurface.includes('Agent'),
     // Token budget upstream; omit it for older CLIs that reject the option.
     ...(supportsAutocompact(claudeBin) ? { autocompactTokens: 300000 } : {}),
     // P0-1 — when the tool bridge is attached, permit its MCP namespace so the
@@ -396,6 +398,7 @@ async function spawnSession(
   // P0-1 — stamp the bridge attachment so the reuse guard can refuse a
   // bridge-mismatched turn (matches the `requestedToolBridge` computation).
   session.toolBridgeActive = toolBridgeActive
+  session.plannerRole = toolBridgeActive && toolSurface.includes('Agent') ? PLANNER_ROLE : undefined
   // Stamp the installed-MCP-server surface this child was SPAWNED with. `mcpServers`
   // is read once by `claude` at startup, so a warm child physically cannot learn
   // about a server installed afterwards — the reuse guard below evicts + respawns
@@ -885,6 +888,7 @@ async function spawnSession(
         tool_surface: session.toolSurface,
         tool_bridge: session.toolBridgeActive,
         auth_fingerprint: session.authFingerprint,
+        ...(session.plannerRole === PLANNER_ROLE ? { planner_profile: PLANNER_PROFILE_ID } : {}),
       }
       // #1237 — omitted, never written as null, when the reader answered nothing: the
       // row must then read as legacy-unknown, exactly like a row from before the field.
@@ -1696,6 +1700,7 @@ export async function getOrSpawnSession(
       const freshSurface = session.toolSurface === requestedToolSurface
       // P0-1 defense-in-depth: never serve a bridge-mismatched warm child.
       const freshBridge = session.toolBridgeActive === requestedToolBridge
+      const freshPlanner = session.plannerRole === (requestedToolBridge && requestedToolSurface.split(',').includes('Agent') ? PLANNER_ROLE : undefined)
       const freshCredential = session.authFingerprint === authFingerprintFor(options.env, options.sinkTokenPath)
       // INSTALLED-MCP-SERVER guard: `mcpServers` is read once by `claude` at
       // startup, so a warm child cannot learn about a server the owner installed
@@ -1729,7 +1734,7 @@ export async function getOrSpawnSession(
       // never delivers (the cascade). Evict + respawn a clean REPL instead, exactly
       // like the freshness guards below. NOT silent — log so the eviction is
       // observable in prod.
-      if (freshSurface && freshBridge && freshCredential && freshMcpServers && !session.poisoned) {
+      if (freshSurface && freshBridge && freshPlanner && freshCredential && freshMcpServers && !session.poisoned) {
         return session
       }
       // Adoption cannot reconstruct native-child leases. A quiet parent or a zero

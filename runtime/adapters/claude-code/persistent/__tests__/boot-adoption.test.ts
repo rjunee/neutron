@@ -36,6 +36,7 @@ import { replSessionConfigPaths } from '../session-config-paths.ts'
 import { readMcpServiceProof, recordMcpServiceOwner } from '../mcp-service-identity.ts'
 import { deriveChildSinkToken } from '../sink-coordinates.ts'
 import { ReplSession } from '../repl-session.ts'
+import { PLANNER_PROFILE, PLANNER_PROFILE_ID, PLANNER_ROLE } from '../../../../workers/planner-work.ts'
 import type { ReplRegistry, ReplRegistryRecord } from '../repl-registry.ts'
 import { withRegistry } from '../repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
@@ -193,6 +194,16 @@ afterEach(() => {
 })
 
 describe('the adopt direction', () => {
+  for (const profile of ['exact', 'missing-record', 'changed-record', 'missing-argv', 'changed-argv'] as const) {
+    it(`restores only the corroborated native planner profile: ${profile}`, async () => {
+      const argv = [...oursArgv(), ...(profile === 'missing-argv' ? [] : ['--agents', profile === 'changed-argv' ? '{}' : PLANNER_PROFILE])]
+      const f = fixture({ argv, record: { reuse: { tool_surface: 'Agent,Read', tool_bridge: true, auth_fingerprint: 'fp-abc',
+        ...(profile === 'missing-record' ? {} : { planner_profile: profile === 'changed-record' ? 'changed' : PLANNER_PROFILE_ID }) } } })
+      expect((await run(f)).kind).toBe('adopted')
+      expect((await pool.get(KEY))!.plannerRole).toBe(profile === 'exact' ? PLANNER_ROLE : undefined)
+      expect(f.host.closed).toEqual([])
+    })
+  }
   for (const bridge of [false, true]) {
     it(`an adopted MCP receipt survives busy refusal and is removed on idle retirement (bridge=${bridge})`, async () => {
       const channelName = `neutron-${randomBytes(16).toString('hex')}`

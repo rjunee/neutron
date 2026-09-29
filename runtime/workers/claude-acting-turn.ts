@@ -1,6 +1,7 @@
 import { open, readdir, readFile, stat } from 'node:fs/promises'
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
 import { claudeComposerEmpty } from './claude-composer.ts'
+import { PLANNER_ROLE, requiresPlannerWork } from './planner-work.ts'
 import { join, relative, resolve, sep } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
 import { isDeepStrictEqual } from 'node:util'
@@ -21,7 +22,8 @@ export type ClaudeNativeDispatchEvidence = { kind: 'submission-started' | 'not-s
 export interface ClaudeActingSession {
   project_id: string
   topic_id: string
-  session: Pick<ReplSession, 'sessionId' | 'cwd' | 'child' | 'acquireTurn' | 'toolSurface'>
+  session: Pick<ReplSession, 'sessionId' | 'cwd' | 'child' | 'acquireTurn' | 'toolSurface'> & { plannerRole?: string | undefined }
+  plannerCapability?: string
   projects_dir?: string
   grants: { tools: ToolGrant; writable: boolean; network: boolean; roots: readonly string[] }
   /** Host-only admission after durable child lease and assigned worktree checks. */
@@ -200,6 +202,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
     let submitted = false
     try {
     const refuse = (detail: string) => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const, detail })
+    if (requiresPlannerWork(request) && (session.plannerRole !== PLANNER_ROLE || !binding.plannerCapability)) return refuse('Native session lacks the registered closed planner role.')
     if (conversation.provider !== 'anthropic') return refuse(`Claude acting turn refuses provider ${conversation.provider}.`)
     if (conversation.project_id !== project_id || conversation.topic_id !== topic_id) return refuse('Project conversation does not match the bound Claude session.')
     if (request.thread !== null && request.thread.id !== session.sessionId) return refuse('Requested thread does not match the project Claude session.')
@@ -274,7 +277,16 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         // already distinguishable downstream: the outer catch reports "Dispatch
         // or observation interrupted", not "did not accept the dispatch". Do not
         // swallow it here to add a detail that already exists.
-        const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...spec, effort: request.effort })
+        let dispatchSpec = spec
+        if (requiresPlannerWork(request)) {
+          const separator = spec.prompt.indexOf('\n')
+          const args = JSON.parse(spec.prompt.slice(separator + 1))
+          if (args.subagent_type !== PLANNER_ROLE || typeof args.prompt !== 'string'
+            || !args.prompt.split('\n').includes(`Request (data): ${JSON.stringify(request)}`)) return refuse('Planner dispatch is not the admitted native role.')
+          args.prompt += `\nPlanner capability (secret; pass only to planner_work): ${binding.plannerCapability}`
+          dispatchSpec = { ...spec, prompt: spec.prompt.slice(0, separator + 1) + JSON.stringify(args) }
+        }
+        const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...dispatchSpec, effort: request.effort })
         const boundary = await transcriptBoundary(transcript)
         if (expired()) return beforeDispatchExpired()
         const markSubmitted = () => {

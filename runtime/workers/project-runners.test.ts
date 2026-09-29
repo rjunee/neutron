@@ -39,6 +39,21 @@ async function fixture(provider: Provider = 'openai-codex') {
   return { request, envelope, metadata, calls, options, decode, dir }
 }
 
+test('closed planning refuses unsupported native capabilities but retains configured read-only Claude headless planning', async () => {
+  for (const provider of ['openai-codex', 'pi'] as const) {
+    const f = await fixture(provider)
+    let paid = 0
+    f.options.headless.anthropic = { provider: 'anthropic', supports: () => ({ ok: true }), run: async () => { paid++; return { kind: 'blocked', on: 'unexpected' } }, liveness: async () => 'unknown' }
+    const runners = await createProjectRunners(f.options)
+    const request = { ...f.request, role: 'plan' as const, tools: 'edit' as const }
+    expect(await runners.inRepl!.run(request, 'in-repl', signal())).toEqual({ kind: 'refused', reason: 'capability-unsupported' })
+    expect(await runners.headless.anthropic!.run(request, 'headless', signal())).toEqual({ kind: 'blocked', on: 'unexpected' })
+    expect(f.calls).toEqual([]); expect(paid).toBe(1)
+    // Historical edit-and-run requests retain their serialized native contract.
+    expect((await runners.inRepl!.run(f.request, 'in-repl', signal())).kind).toBe('completed')
+  }
+})
+
 for (const provider of ['anthropic', 'openai-codex', 'pi'] as const) {
   test(`${provider} recovery requires exact armed evidence and cannot compose or reserve`, async () => {
     const f = await fixture(provider)

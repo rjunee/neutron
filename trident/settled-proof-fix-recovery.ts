@@ -107,7 +107,9 @@ export function settledProofFixRecovery(store: TridentRunStore, run: TridentRun,
     const bindings: ProofFixBindings = { workers: fix.inputs.workers, briefs: {} }
     const worker = (role: 'plan' | 'build' | 'review' | 'fix', recovery: Recovery) => {
       const request = recovery.request
-      const version = role === 'plan' ? 'v4' : 'v3'
+      const closedPlanner = role === 'plan' && request.tools === 'edit'
+      const version = role === 'plan' ? closedPlanner ? 'v5' : 'v4' : 'v3'
+      if (closedPlanner && (request.network !== false || fix.inputs.workers[role]?.provider !== 'anthropic')) return null
       const row = attempt(request, recovery.snapshot.head)
       const prefix = new Map([['anthropic', 'claude'], ['openai-codex', 'codex'], ['pi', 'pi']]).get(row?.provider ?? '')
       if (!row || !prefix || row.review_seat !== null || row.placement !== 'in-repl'
@@ -117,7 +119,7 @@ export function settledProofFixRecovery(store: TridentRunStore, run: TridentRun,
         || request.result.schema !== (role === 'plan' ? 'project-plan-v2' : role === 'review' ? 'project-review' : 'project-build')
         || request.brief.path !== join(root, `${role}.strategy-${version}.brief.${role}.host`)
         || request.run_id !== run.id || request.role !== role || request.needs_approval_decision !== false
-        || request.writable !== (role !== 'review') || request.tools !== (role === 'review' ? 'read-only' : 'edit-and-run')
+        || request.writable !== (role !== 'review') || request.tools !== (role === 'review' ? 'read-only' : closedPlanner ? 'edit' : 'edit-and-run')
         || !equal(request, { ...fix.inputs.workers[role]?.request, run_id: run.id,
           step_id: request.step_id, role, needs_approval_decision: false })
         || evidence.read(join(root, `${prefix}-step-${digest([run.id, request.step_id])}.json`))

@@ -9,12 +9,16 @@ import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
+import { bindPlannerWork, releasePlannerWork, PLANNER_ROLE, requiresPlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
+import { readArmedTrailerReservation } from '@neutronai/runtime/workers/trailer-slot.ts'
+import { workContextPath } from '@neutronai/trident/production-host-effects.ts'
+import { isDeepStrictEqual } from 'node:util'
 import { createClaudeNativeDispatchReceipt, readClaudeNativeDispatchReceipt, verifyNativeDispatchChildBound, type NativeDispatchAuthority, type SignedNativeDispatchRecord, type NativeDispatchEvidence } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
-import { admitNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest, type NativeChildWorkspace } from '@neutronai/runtime/workers/native-child-workspace.ts'
+import { admitNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest, ownsNativeChildWorkspace, nativeChildCensusKnown, type NativeChildWorkspace } from '@neutronai/runtime/workers/native-child-workspace.ts'
 import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
-import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
+import { createCodexHeadlessRunner, codexHeadlessReservation } from '@neutronai/runtime/workers/codex-headless.ts'
 import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
 import { createWorkerPlacement, type WorkerPlacementHost, type WorkerPlacementScope } from '@neutronai/runtime/workers/worker-placement.ts'
 import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/trailer-slot.ts'
@@ -540,8 +544,20 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       } catch { return { kind: 'refused', reason: 'capability-unsupported', detail: 'Native writer has no checked independent worktree admission.' } }
     }
     if (expired()) return expiredBeforeDispatch()
+    let plannerCapability: string | undefined
+    if (requiresPlannerWork(turn.request)) {
+      if (session.plannerRole !== PLANNER_ROLE || !workspace) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Native planner role and closed host operations are unavailable.' }
+      const admitted = workspace
+      const hostContext = JSON.parse(await readFile(workContextPath(turn.request.brief.path), 'utf8'))
+      if (!isDeepStrictEqual(hostContext.request, turn.request)) throw Error('Planner host context does not match the signed dispatch')
+      const brief = await readFile(turn.request.brief.path, 'utf8')
+      if (briefIntegrity(brief) !== turn.request.brief.integrity) throw Error('Planner brief integrity changed')
+      plannerCapability = await bindPlannerWork({ session, request: turn.request, deadline, signal, base: run.base_sha!, pr: hostContext.snapshot.pr, brief, context: hostContext,
+        current: () => !session.hasChildExited() && ownsNativeChildWorkspace(admitted, session, turn.request) && nativeChildCensusKnown(admitted),
+        validate: envelope => ['completed', 'blocked'].includes(decodeProjectTrailer(JSON.stringify(envelope), turn.request, trailer).kind) })
+    }
     enterActor()
-    return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}), onDispatchSubmitted, onNativeDispatchEvidence: evidence,
+    return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}), ...(plannerCapability ? { plannerCapability } : {}), onDispatchSubmitted, onNativeDispatchEvidence: evidence,
       grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })({ ...turn,
         deadline_ms: deadline, timeout_ms: Math.max(1, deadline - Date.now()) })
   }
@@ -675,7 +691,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
             const pending = pool.get(key)
             if (pending && Bun.peek.status(pending) === 'fulfilled') {
               const session = await pending
-              if (session) completeNativeChildWorkspaceRequest(session, request)
+              if (session) { completeNativeChildWorkspaceRequest(session, request); releasePlannerWork(session, request) }
             }
           }
         }
@@ -708,6 +724,39 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       credentialIdentity: () => workerCredentialIdentity(provider, env) })
   }
   const workers = {} as ProjectBuildHostOptions['workers']
+  const retainedSource = readBuildRetrySource(context.store, context.store.get(run.id)!)
+  const proofRetry = retainedSource?.proofFix ?? retainedSource?.mergeRefresh
+  // Only an original host checkpoint AND its exact armed transport reservation
+  // preserve legacy planner authority. A prepared brief alone authorizes nothing.
+  let pendingPlanner: ProjectBuildHostOptions['workers']['plan'] | undefined
+  const latestMode = context.store.stageEvents(run.id).filter(event => event.stage === 'build-mode-state').at(-1)
+  if (latestMode) {
+    try {
+      const recovery = parseBuildModeState(latestMode.meta ?? null, run, true).checkpoint.pending?.recovery
+      if (recovery) {
+        const request = recovery.request
+        const provider = recovery.inputs.workers[request.role]?.provider
+        const prefix = provider === 'anthropic' ? 'claude' : provider === 'openai-codex' ? 'codex' : provider === 'pi' ? 'pi' : null
+        if (prefix && request.run_id === run.id && Reflect.get(recovery.inputs, 'repl_provider') === context.provider) {
+          const hash = createHash('sha256').update(JSON.stringify([run.id, request.step_id])).digest('hex')
+          const reservation = provider === 'openai-codex' && context.provider !== provider
+            ? codexHeadlessReservation(request, codexEnv)
+            : { path: join(state, `${prefix}-step-${hash}.json`), identity: JSON.stringify(request) }
+          const held = await readArmedTrailerReservation(reservation.path, reservation.identity, { signal })
+          if (held.kind === 'resume') pendingPlanner = recovery.inputs.workers.plan
+        }
+      }
+    } catch { /* Unauthenticated legacy inputs cannot authorize a new planner. */ }
+  }
+  const legacyPlanner = pendingPlanner?.request.tools === 'edit-and-run' ? pendingPlanner : proofRetry?.workers.plan?.request.tools === 'edit-and-run' ? proofRetry.workers.plan : undefined
+  // The pre-strategy schema migration has its own exact validator in the build
+  // host. Only an authenticated pending reservation may select that binding.
+  const legacyRun = context.store.get(run.id)!
+  const unversionedPlanner = pendingPlanner?.request.tools === 'edit-and-run'
+    && legacyRun.strategy_source === 'legacy' && legacyRun.execution_strategy !== null
+    && pendingPlanner.request.brief.path === join(state, 'plan.brief.plan.host')
+  const legacyPlanVersion = legacyPlanner?.request.brief.path.match(/\.strategy-v([234])\.brief\.plan\.host$/)?.[1]
+    ?? (unversionedPlanner ? '3' : undefined)
   const requestedModels = {} as ProjectBuildHostOptions['requestedModels']
   const invalidated: { role: string; cause: 'task' | 'reflection' }[] = []
   // Whether THIS run's latest persisted reservation was admitted with a v2 brief.
@@ -764,7 +813,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       ...(isBuilder && commitWrapper ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), run.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n') + reflectionSuffix
-    let brief = renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true, planWorkBoundary: true })
+    let brief = renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true, planWorkBoundary: !unversionedPlanner })
     // A LEGACY V2 BRIEF IS EVIDENCE, NOT AUTHORITY (#1296). A pending reservation
     // is identified by `{ brief.path, brief.integrity }` alone (`build-run.ts`
     // resume validation), and neither the task text nor the owner reflection is
@@ -786,10 +835,10 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     // Missing or unrecognized evidence stays explicit, bounded uncertainty: the
     // current brief identity is presented, it cannot match the v2 reservation, and
     // build-run answers its typed `unknown` with the reservation intact.
-    let path = join(state, `${role}.strategy-v${role === 'plan' ? 4 : 3}.brief`)
+    let path = join(state, `${role}.strategy-v${role === 'plan' ? legacyPlanVersion ?? 5 : 3}.brief`)
     const legacyPath = join(state, `${role}.strategy-v2.brief`)
     let stored: string | null = null
-    try { stored = await readFile(legacyPath, 'utf8') }
+    try { if (role !== 'plan' || legacyPlanVersion === '2') stored = await readFile(legacyPath, 'utf8') }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     const legacy = [renderBrief({ testExecution: TEST_EXECUTION_LEGACY_V2, commitWrapper: true }),
       renderBrief({ testExecution: TEST_EXECUTION_LEGACY_V2, commitWrapper: false })]
@@ -814,9 +863,19 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       path = legacyPath
     } else {
       if (role === 'plan') {
+        // Existing run inputs retain the exact signed request/grants. New runs
+        // receive v5 and the enforced edit-only planning capability.
+        const previousPath = join(state, 'plan.strategy-v4.brief')
+        let previous: string | null = null
+        try { if (legacyPlanVersion === '4') previous = await readFile(previousPath, 'utf8') }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+        if (previous !== null) {
+          if (previous !== brief) throw Error('Stored v4 planner inputs changed')
+          path = previousPath
+        }
         const priorPath = join(state, 'plan.strategy-v3.brief')
         let prior: string | null = null
-        try { prior = await readFile(priorPath, 'utf8') }
+        try { if (legacyPlanVersion === '3') prior = await readFile(priorPath, 'utf8') }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
         if (prior !== null) {
           // Preserve admitted inputs, not arbitrary old text. Changed task bytes
@@ -835,8 +894,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     }
     workers[role] = { provider, request: {
       model_id: descriptor.model_id, effort: selected?.effort ?? phase.default.effort,
-      cwd: run.worktree, writable: role !== 'review', network: role !== 'review',
-      tools: role === 'review' ? 'read-only' : 'edit-and-run',
+      cwd: run.worktree, writable: role !== 'review', network: role !== 'review' && !path.endsWith('plan.strategy-v5.brief'),
+      tools: role === 'review' ? 'read-only' : path.endsWith('plan.strategy-v5.brief') ? 'edit' : 'edit-and-run',
       brief: { path, integrity: briefIntegrity(brief) },
       result: { schema: role === 'plan' ? 'project-plan-v2' : role === 'review' ? 'project-review' : 'project-build', path: join(state, `${role}.result`) },
       thread: null, budget: { wall_ms: PROJECT_BUILD_WALL_MS[role] },
@@ -847,14 +906,12 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     throw new Error(`Legacy v2 ${role} brief was rendered from different ${cause === 'task' ? 'task text' : 'reflection guidance'}; its reserved result is invalidated and the step must be re-executed`)
   }
   const bodyFile = join(state, 'publication.md')
-  const retainedSource = readBuildRetrySource(context.store, context.store.get(run.id)!)
-  const proofRetry = retainedSource?.proofFix ?? retainedSource?.mergeRefresh
   if (proofRetry) {
     // This exception retains implementation only under its original model and
     // instructions. Proof uses this run's current environment and new receipts.
     for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       if (!proofFixWorkerMatches(proofRetry, role, workers[role]!,
-        await readFile(join(state, `${role}.strategy-${role === 'plan' ? 'v4' : 'v3'}.brief`), 'utf8'))) {
+        await readFile(workers[role]!.request.brief.path, 'utf8'))) {
         throw new Error(`Settled proof fix retry ${role} model, authority or brief changed; the retained candidate cannot be reused`)
       }
     }
