@@ -5618,18 +5618,33 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   const ledger = `.trident/ledgers/${f.store.get(f.row.id)!.branch}.md`
   const committed = await spawnCapture(['git', '-C', f.repo, 'show', `${lastCheckpoint(f).head}:${ledger}`], f.repo)
   expect(committed.stdout.trim()).toBe('- [x] T1 record the note\n- [ ] T2 record another note')
-  // The recovered branch-owned ledger bytes (spawnCapture already trims) must be
-  // exactly the accepted plan with task one, and only task one, completed.
-  const recoveredLedger = decodeLedger(committed.stdout)
+  // Decode the recovered branch-owned ledger from the RAW committed blob bytes:
+  // spawnCapture trims both ends, which would hide a leading blank line, a second
+  // trailing LF or a trailing CR/space from the strict decoder. The only
+  // normalization is the decoder's own single optional trailing LF.
+  const rawProc = Bun.spawn(['git', '-C', f.repo, 'show', `${lastCheckpoint(f).head}:${ledger}`],
+    { cwd: f.repo, stdout: 'pipe', stderr: 'pipe' })
+  const [rawLedger, rawStderr] = await Promise.all([new Response(rawProc.stdout).text(), new Response(rawProc.stderr).text()])
+  expect({ exit: await rawProc.exited, stderr: rawStderr }).toEqual({ exit: 0, stderr: '' })
+  const recoveredLedger = decodeLedger(rawLedger)
   if (!recoveredLedger.ok) throw new Error(recoveredLedger.reason)
+  // Exactly the accepted plan with task one, and only task one, completed.
   const delta = compareLedgerDelta(acceptedLedger.ledger, recoveredLedger.ledger)
   expect(delta).toEqual({ ok: true, completedLabel: 'T1 record the note',
     after: { completed: 1, remaining: 1, firstUnchecked: '- [ ] T2 record another note' } })
   if (!delta.ok) throw new Error(delta.reason)
-  const wrongOrder = decodeLedger('- [ ] T1 record the note\n- [x] T2 record another note')
-  if (!wrongOrder.ok) throw new Error(wrongOrder.reason)
-  expect(compareLedgerDelta(acceptedLedger.ledger, wrongOrder.ledger))
-    .toEqual({ ok: false, reason: 'task 0: first unchecked task not completed' })
+  // Derivative wrong-order completion: the captured accepted plan with the task
+  // AFTER its first unchecked one completed instead. Same labels, same totals as
+  // the recovered ledger, so only the skipped-task rule can reject it.
+  const firstOpen = acceptedLedger.ledger.tasks.findIndex(task => !task.completed)
+  const skippedTo = acceptedLedger.ledger.tasks.findIndex((task, index) => index > firstOpen && !task.completed)
+  expect([firstOpen, skippedTo]).toEqual([0, 1])
+  const wrongOrder = { tasks: acceptedLedger.ledger.tasks.map((task, index) =>
+    index === skippedTo ? { ...task, completed: true } : task) }
+  expect(wrongOrder.tasks.map(task => task.label)).toEqual(recoveredLedger.ledger.tasks.map(task => task.label))
+  expect(wrongOrder.tasks.filter(task => task.completed)).toHaveLength(delta.after.completed)
+  expect(compareLedgerDelta(acceptedLedger.ledger, wrongOrder))
+    .toEqual({ ok: false, reason: `task ${firstOpen}: first unchecked task not completed` })
   const main = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'main:NOTES.md'], f.repo)
   expect(main.stdout.trim()).toBe('seed')
 

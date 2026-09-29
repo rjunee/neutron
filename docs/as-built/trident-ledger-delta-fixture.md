@@ -65,18 +65,26 @@ In the crash test (`open/__tests__/project-build-e2e.test.ts:5536`, 10 cases:
    recovery because the resumed host re-selects the strategy and may replace the
    row. This runs in all ten cases.
 2. In the eight non-zero-conflict cases, right after the existing
-   `git show <head>:.trident/ledgers/<branch>.md` assertion, the recovered bytes are
-   decoded as-is (`:5623`). `spawnCapture` already returns trimmed stdout
-   (`trident/git-mode.ts:1164`), so the committed ledger arrives without its
-   trailing LF, which the grammar allows; no further normalization is applied. The
-   comparator must accept the captured plan against those committed bytes with
-   `completedLabel: 'T1 record the note'` and
+   `git show <head>:.trident/ledgers/<branch>.md` assertion (kept unchanged on its
+   trimmed `spawnCapture` output), the same blob is read a second time with a
+   direct `Bun.spawn` of the same `git show` argv, its exit code (0) and stderr
+   (empty) asserted, and its RAW stdout decoded unchanged (`:5625-5630`).
+   `spawnCapture` trims both ends (`trident/git-mode.ts:1164`), which would hide a
+   leading blank line, a second trailing LF or a trailing CR/space from the strict
+   decoder; the only normalization left is the decoder's own single optional
+   trailing LF. The comparator must accept the captured plan against those raw
+   committed bytes with `completedLabel: 'T1 record the note'` and
    `after: { completed: 1, remaining: 1, firstUnchecked: '- [ ] T2 record another note' }`
-   (`:5625-5628`). A derivative wrong-order ledger (task two checked, task one not)
-   must be rejected with `task 0: first unchecked task not completed` (`:5629-5632`).
-   No terminal fully-completed ledger is invented.
+   (`:5632-5634`).
+   A derivative wrong-order completion is then built from the captured accepted
+   plan itself, not from a literal: its first unchecked task (index 0) is left
+   open and the next unchecked task (index 1) is completed instead (`:5639-5643`).
+   It is asserted to keep the recovered ledger's exact labels and the same
+   completed total, so neither the label rule nor the totals can reject it; the
+   comparator must reject it with `task ${firstOpen}: first unchecked task not
+   completed` (`:5646-5647`). No terminal fully-completed ledger is invented.
 3. After the terminal merged run, `delta.after.firstUnchecked` must equal the
-   host-selected task-two identity `f.world.selectedTasks[1]` (`:5642`).
+   host-selected task-two identity `f.world.selectedTasks[1]` (`:5657`).
 
 The two `zero-conflict` cases keep their independent `Task ledger intent is invalid`
 refusal and early return (`:5604`); they act as the negative control.
@@ -126,6 +134,25 @@ full TypeScript matrix was run once by the T3 worker, below. It is not a host re
     findings. Positive control: with one new suppression line removed, 1 finding.
     `console-ban-check`, `void-promise-check`, `type-query-check`: 0 found each.
     `git diff --check`: clean.
+- T3 fix round 1 (host-suite scope, worker stage 1). Addresses the review findings
+  "never silently normalize Git output beyond the decoder's stated optional
+  trailing LF" (raw blob decode, above) and "add a derivative wrong-order
+  completion" (derived from the accepted plan, above). Only the crash test body
+  and this shard changed.
+  - `bun test open/__tests__/project-build-e2e.test.ts -t 'same-run task-sequence crash'`:
+    10 pass, 426 filtered out, 0 fail, 268 `expect()` calls (subset evidence only).
+  - Consumer positive control: the same `compare.ts` M1 mutant made that command
+    8 fail (every non-zero-conflict case, on the derivative wrong-order `toEqual`)
+    and 2 pass (zero-conflict); `compare.test.ts` 6 fail / 29 pass;
+    `decode.test.ts` 64/64 (control). Restored byte-identical (sha256 prefix
+    `b43811851f91`).
+  - Fixture files (`decode`, `compare`, `cli` tests): 119 pass, 0 fail.
+  - `bunx tsc -p tsconfig.json --noEmit`, `bunx tsc -p trident/tsconfig.json --noEmit`,
+    `bunx tsc -p open/tsconfig.json --noEmit`: clean. `bunx eslint` on the E2E file:
+    0 messages. `git diff --check`: clean.
+  - The C1-range control-character nit (`decode.ts` rejects U+0000-U+001F and
+    U+007F only, as its docblock states) was left as documented; it has no E2E
+    impact.
   - Not run by the worker: `bash scripts/run-tests.sh` (host stage 2 owns it) and
     `scripts/check-shared-host.sh` (shared-host admission, not a build gate). CI's
     typecheck-all, lint, leak-gate, as-built-write-guard and run-tests jobs run on
