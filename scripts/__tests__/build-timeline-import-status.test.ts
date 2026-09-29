@@ -36,17 +36,36 @@ test('malformed coverage and non-current success metadata remain unverified with
   for (const status of [null, [], 'invalid']) expect(importStatusWarnings(status, now).join(' ')).toContain('status unavailable')
 })
 
+test('legacy and incomplete success records do not establish complete coverage', () => {
+  for (const status of [
+    { lastSuccessAt: now, error: null },
+    { ...fresh, coverage: {} },
+    { ...fresh, partial: undefined },
+    { ...fresh, coverage: { unbound: 0, incomplete: 0 } },
+  ]) {
+    const warning = importStatusWarnings(status, now).join(' ')
+    expect(warning).toContain('coverage is unverified')
+    expect(warning).toContain('unknown')
+    expect(warning).not.toContain('stale or failed')
+  }
+  expect(importStatusWarnings(fresh, now)).toEqual([])
+})
+
 test('both-direction semantic mutants cannot satisfy the coverage contract', () => {
   const source = readFileSync(new URL('../build-timeline-import-status.ts', import.meta.url), 'utf8')
   const marker = "if (status.partial === true || (unbound !== null && unbound > 0) ||\n      (incomplete !== null && incomplete > 0) || coverage.scanPartial === true)"
   expect(source).toContain(marker)
   const satisfies = (read: typeof importStatusWarnings) => {
     const visible = read({ ...fresh, partial: true, coverage: { ...fresh.coverage, unbound: 7 } }, now).join(' ')
-    return visible.includes('7 observations have no verified PR/phase binding') && read(fresh, now).length === 0
+    const unknown = read({ lastSuccessAt: now, error: null }, now).join(' ')
+    return visible.includes('7 observations have no verified PR/phase binding') &&
+      unknown.includes('coverage is unverified') && unknown.includes('count unknown') && read(fresh, now).length === 0
   }
   expect(satisfies(importStatusWarnings)).toBe(true)
-  for (const replacement of ['if (false)', 'if (true)']) {
-    const changed = source.replace(marker, replacement).replace('export function', 'function')
+  const unknownMarker = "if (typeof status.partial !== 'boolean' || unbound === null || incomplete === null ||\n      typeof coverage.scanPartial !== 'boolean')"
+  expect(source).toContain(unknownMarker)
+  for (const mutated of [source.replace(marker, 'if (false)'), source.replace(marker, 'if (true)'), source.replace(unknownMarker, 'if (false)')]) {
+    const changed = mutated.replace('export function', 'function')
     const js = new Bun.Transpiler({ loader: 'ts' }).transformSync(changed)
     const mutant = new Function(js + '\nreturn importStatusWarnings')() as typeof importStatusWarnings
     expect(satisfies(mutant)).toBe(false)

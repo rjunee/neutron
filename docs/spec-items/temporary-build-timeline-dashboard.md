@@ -164,6 +164,7 @@ spans carry unknown tokens unless a provider actually attributed usage.
       source and failed-refresh notices. Fresh importer partial coverage and
       unbound/incomplete counts remain visible in the authenticated API and expanded
       source notices; a successful refresh alone never implies complete attribution.
+      Missing completeness fields remain unverified even after a fresh success.
       Explicit zero and unknown counts remain distinct, and raw metadata, logs and
       source paths are not served. Fresh complete registered-source coverage does
       not produce a partial-coverage warning or claim coverage of unregistered history.

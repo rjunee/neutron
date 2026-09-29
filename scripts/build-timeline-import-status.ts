@@ -14,6 +14,17 @@ export function importStatusWarnings(value: unknown, now: number): string[] {
   const count = (key: string): number | null => typeof coverage[key] === 'number' &&
     Number.isSafeInteger(coverage[key]) && coverage[key] >= 0 ? coverage[key] : null
   const unbound = count('unbound'), incomplete = count('incomplete')
+  if (typeof status.partial !== 'boolean' || unbound === null || incomplete === null ||
+      typeof coverage.scanPartial !== 'boolean') {
+    warnings.push([
+      'Direct command importer coverage is unverified.',
+      ...(typeof status.partial !== 'boolean' ? ['Partial coverage status unknown.'] : []),
+      ...(unbound === null ? ['Unbound observation count unknown.'] : []),
+      ...(incomplete === null ? ['Incomplete source count unknown.'] : []),
+      ...(typeof coverage.scanPartial !== 'boolean' ? ['Source discovery completeness unknown.'] : []),
+      'A successful refresh does not establish complete phase attribution.',
+    ].join(' '))
+  }
   if ((status.partial !== undefined && typeof status.partial !== 'boolean') ||
       (status.coverage !== undefined && (status.coverage === null || typeof status.coverage !== 'object' || Array.isArray(status.coverage))) ||
       ['unbound', 'incomplete'].some(key => coverage[key] !== undefined && count(key) === null) ||

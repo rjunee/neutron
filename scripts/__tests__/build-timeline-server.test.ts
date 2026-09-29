@@ -198,5 +198,17 @@ test('fresh partial importer coverage reaches API and expanded HTML without inve
       expect(JSON.stringify(data) + html).not.toContain('/private/never-served')
       expect(JSON.stringify(data) + html).not.toContain('private transcript content')
     }
+    for (const status of [{ lastSuccessAt: now, error: null }, { lastSuccessAt: now, error: null, partial: false, coverage: {} }]) {
+      await writeFile(importStatus, JSON.stringify(status))
+      const data = await (await handler(new Request('http://localhost/api/timeline', { headers: { authorization: auth } }))).json() as TimelineSnapshot
+      const html = await (await handler(new Request('http://localhost/timeline', { headers: { authorization: auth } }))).text()
+      expect(data.warnings.join(' ')).toContain('coverage is unverified')
+      expect(data.warnings.join(' ')).toContain('count unknown')
+      expect(data.warnings.join(' ')).not.toContain('stale or failed')
+      expect(data.cards[0]!.segments).toHaveLength(0)
+      expect(html).toContain('<details class="source-note" open>')
+      expect(html).toContain('coverage is unverified')
+      expect(html).toContain('count unknown')
+    }
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
