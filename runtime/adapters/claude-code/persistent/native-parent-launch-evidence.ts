@@ -36,6 +36,33 @@ function identity(path: string): string {
   return [path, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')
 }
 
+/** Measure the named file; retain the check across the caller's observation. */
+export async function observeNativeExecutable(selected: string, cwd: string,
+  env: Record<string, string | undefined>): Promise<{
+    executable: NativeParentLaunchEvidence['executable']; isCurrent(): boolean
+  } | undefined> {
+  try {
+    const realPath = realpathSync(selected)
+    if (realPath.endsWith(' (deleted)')) return undefined
+    const before = identity(selected)
+    const isCurrent = () => {
+      try { return realpathSync(selected) === realPath && identity(selected) === before } catch { return false }
+    }
+    let executable = binaries.get(before)
+    if (!executable) {
+      const hash = createHash('sha256')
+      for await (const chunk of createReadStream(selected)) hash.update(chunk)
+      const result = spawnSync(selected, ['--version'], { cwd, env,
+        encoding: 'utf8', timeout: 5000, maxBuffer: 4096 })
+      const version = result.stdout?.trim().match(/^(\d+\.\d+\.\d+)(?:\s+\(Claude Code\))?$/)?.[1]
+      if (result.status !== 0 || !version || !isCurrent()) return undefined
+      executable = Object.freeze({ realPath, sha256: hash.digest('hex'), version })
+      binaries.set(before, executable)
+    }
+    return { executable, isCurrent }
+  } catch { return undefined }
+}
+
 /** Probe failure leaves ordinary chat usable but supplies no continuation
  * authority. Cache only the same file identity; replacements require a new hash
  * and bounded version probe. Preserve configured argv: restart adoption matches
@@ -50,27 +77,16 @@ export async function prepareNativeParentLaunch(input: {
   try {
     const selected = Bun.which(input.argv[0]!, { cwd: input.cwd, PATH: input.env['PATH'] ?? process.env['PATH'] ?? '' })
     if (!selected) return undefined
-    const realPath = realpathSync(selected)
-    const before = identity(realPath)
-    let executable = binaries.get(before)
-    if (!executable) {
-      const hash = createHash('sha256')
-      for await (const chunk of createReadStream(realPath)) hash.update(chunk)
-      const result = spawnSync(realPath, ['--version'], { cwd: input.cwd, env: input.env,
-        encoding: 'utf8', timeout: 5000, maxBuffer: 4096 })
-      const version = result.stdout?.trim().match(/^(\d+\.\d+\.\d+)(?:\s+\(Claude Code\))?$/)?.[1]
-      if (result.status !== 0 || !version || before !== identity(realPath)) return undefined
-      executable = Object.freeze({ realPath, sha256: hash.digest('hex'), version })
-      binaries.set(before, executable)
-    }
+    const observation = await observeNativeExecutable(selected, input.cwd, input.env)
+    if (!observation) return undefined
     const argv = [...input.argv]
     const evidence: NativeParentLaunchEvidence = Object.freeze({ version: 1,
       sessionId: input.sessionId, childGeneration: input.childGeneration, projectId: input.projectId,
-      executable, argv: Object.freeze([...argv]), tools: Object.freeze([...input.tools]) })
+      executable: observation.executable, argv: Object.freeze([...argv]), tools: Object.freeze([...input.tools]) })
     return { argv, record(session) {
       // A replaced executable during spawn invalidates this observation.
       try {
-        if (realpathSync(selected) === realPath && identity(realPath) === before) {
+        if (observation.isCurrent()) {
           recordNativeParentLaunchEvidence(session, evidence)
         }
       } catch { /* unknown */ }

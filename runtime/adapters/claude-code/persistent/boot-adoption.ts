@@ -138,6 +138,7 @@ import {
   type ReplRegistryRecord,
 } from './repl-registry.ts'
 import { ReplSession, httpHealth, terminatePidGracefully } from './repl-session.ts'
+import { prepareAdoptedNativeParentLaunch, type AdoptedNativeLaunchDeps } from './adopted-native-parent-launch.ts'
 import { replSessionConfigPaths } from './session-config-paths.ts'
 import {
   ADOPTION_CLAIM_TAKEOVER_MS,
@@ -210,6 +211,8 @@ export type RowAdoptionOutcome =
 
 /** Optional proactive-adoption constraint and injectable probe seams. */
 export interface BootAdoptionDeps {
+  /** Host-only process observation seams for survivor launch remeasurement. */
+  nativeLaunch?: AdoptedNativeLaunchDeps
   /** Proactive boot must not authorize a child carrying a replaced credential.
    *  Empty string is meaningful (ambient auth); absent leaves turn-time reuse
    *  checks in charge. Compared against the actual row and again under its claim. */
@@ -2860,6 +2863,14 @@ async function adoptRow(
 
   }
 
+  const nativeLaunch = typeof options.conversationProjectId === 'string'
+    && options.conversationProjectId === options.project_id
+    ? await prepareAdoptedNativeParentLaunch({ pid: child.pid, sessionId: session.sessionId,
+      childGeneration: generation, projectId: options.conversationProjectId, channelName: session.channelName,
+      cwd: session.cwd, claudeBasename: claudeBasenameFor(options), argv,
+      inspect: () => host.inspectHandle(handle) }, deps.nativeLaunch)
+    : undefined
+
   // CLAIM THE ROW, THEN PUBLISH — one act, and the only place this function can answer
   // `adopted` from. If the row was replaced while this pass was inspecting, probing and
   // attaching, the child we hold is a SECOND owner of that transcript: the durable row
@@ -2946,6 +2957,7 @@ async function adoptRow(
       // spawn gate serialises a key's pass against its spawns); if one is ever found, the fix
       // is to fence the displaced SESSION without marking the key.
       const published = Promise.resolve(session)
+      nativeLaunch?.record(session)
       session.pooledAs = published
       pool.set(sessionKey, published)
       return { kind: 'adopted', sessionKey, paneHandle: handle, childGeneration: generation }
