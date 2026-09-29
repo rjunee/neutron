@@ -1017,6 +1017,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
   nativeContinuation?: 'available' | 'unavailable' | 'foreign-catalog' | 'lost-ack'
+  nativeQueuedOrdinary?: boolean
   verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
   reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
@@ -1236,6 +1237,10 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   const worker = literalWorker(world)
   const projectsDir = join(dir, 'claude-projects')
   const nativeInputs: string[] = []
+  let ordinaryAcquired = false
+  let ordinaryTurn: Promise<void> | undefined
+  let emitQuota: (() => Promise<void>) | undefined
+  let quotaEmission: Promise<void> | undefined
   let quotaDispatch = ''
   const session = { sessionId: 'e2e-session', childGeneration: 'e2e-generation', plannerRole: PLANNER_ROLE, authFingerprint: 'fixture-spawned-credential', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
     probeNativeToolCatalog: options.nativeContinuation ? async () => ({ status: 'observed' as const, source: 'native-provider-catalog' as const,
@@ -1244,6 +1249,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     child: { pid: process.pid, submitLine: async (line: string) => {
       nativeInputs.push(line)
       if (line.startsWith('Invoke SendMessage exactly once')) {
+        if (options.nativeQueuedOrdinary) expect(ordinaryAcquired).toBe(false)
         const args = JSON.parse(line.slice(line.indexOf('{')))
         expect(args.to).toBe('quota')
         const transcript = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session.jsonl')
@@ -1279,17 +1285,36 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await mkdir(directory, { recursive: true })
       await writeFile(join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session.jsonl'), '')
       quotaDispatch = line
+      // Queue ordinary chat while initial synthesis still owns parent input.
+      // It must not prevent the eventual same-child continuation from running.
+      if (options.nativeQueuedOrdinary) ordinaryTurn = registeredSession.acquireTurn().then(release => { ordinaryAcquired = true; release() })
       await writeFile(join(directory, 'agent-quota.meta.json'), JSON.stringify({ description: args.description, toolUseId: 'tool-quota' }))
       const identity = { agentId: 'quota', sessionId: 'e2e-session', isSidechain: true }
-      await writeFile(join(directory, 'agent-quota.jsonl'), [
-        { ...identity, type: 'user', message: { role: 'user', content: args.prompt } },
-        { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [], stop_reason: 'stop_sequence' },
-          isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-request' },
-      ].map(row => JSON.stringify(row)).join('\n') + '\n')
+      const childTranscript = join(directory, 'agent-quota.jsonl')
+      await writeFile(childTranscript, JSON.stringify({ ...identity, type: 'user', message: { role: 'user', content: args.prompt } }) + '\n')
+      const rejectQuota = () => appendFile(childTranscript, JSON.stringify({ ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [], stop_reason: 'stop_sequence' },
+        isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-request' }) + '\n')
+      if (options.nativeQueuedOrdinary) emitQuota = rejectQuota
+      else await rejectQuota()
       world.dispatches.push({ role: request.role, step_id: request.step_id, schema: request.result.schema, wrote: [] })
     } }, acquireTurn: async () => () => {}, acquireContinuationTurn: async () => () => {} }
 
   let registeredSession: typeof session | ReplSession = session
+  if (options.nativeQueuedOrdinary) {
+    const live = new ReplSession(key, 'e2e-generation', 'e2e-session', 'e2e-channel', dir)
+    live.authFingerprint = session.authFingerprint
+    live.toolSurface = session.toolSurface
+    live.plannerRole = PLANNER_ROLE
+    live.probeNativeToolCatalog = session.probeNativeToolCatalog
+    const acquire = live.acquireTurn.bind(live)
+    live.acquireTurn = (background, workspace) => acquire(background ? yieldSlot => background(() => {
+      yieldSlot()
+      if (emitQuota) { quotaEmission = emitQuota(); emitQuota = undefined }
+    }) : undefined, workspace)
+    live.attachChild({ ...session.child, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}) })
+    registeredSession = live
+    fixtureCleanup(async () => { await quotaEmission; await ordinaryTurn; expect(ordinaryAcquired).toBe(true); expect(live.turnSlotHeld).toBe(0) })
+  }
   if (options.reviewChild || options.nativeChild) {
     const live = new ReplSession(key, 'e2e-generation', 'e2e-session', 'e2e-channel', dir)
     live.authFingerprint = session.authFingerprint
@@ -7341,8 +7366,8 @@ test('a typed subscription quota-limited synthesis stops without quotaLimits enr
   expect(originMain.stdout).toBe(f.baseSha)
 }, 30_000)
 
-test('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates', async () => {
-  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available' })
+test.each([false, true])('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates (queued ordinary: %s)', async nativeQueuedOrdinary => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeQueuedOrdinary })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(1)

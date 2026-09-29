@@ -7,7 +7,7 @@ import type { BoundedWorkRequest } from '../bounded-work.ts'
 import { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
 import { createNativeDispatchSigner, type NativeDispatchLease } from './claude-native-dispatch-receipt.ts'
-import { admitNativeChildWorkspace, completeNativeChildWorkspace } from './native-child-workspace.ts'
+import { admitNativeChildWorkspace, bindNativeChildWorkspace, completeNativeChildWorkspace } from './native-child-workspace.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
 import { continueClaudeNativeChild, type ClaudeContinuationOptions } from './claude-native-continuation.ts'
 import { decodeProjectTrailer } from './project-runners.ts'
@@ -31,9 +31,10 @@ async function fixture() {
   session.attachChild({ pid: 123, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
     submitLine: async line => { inputs.push(line) } })
   session.probeNativeToolCatalog = async () => ({ status: 'observed', source: 'native-provider-catalog', sessionId: 'parent', childGeneration: 'generation', names: ['Agent', 'SendMessage'] })
-  const workspace = await admitNativeChildWorkspace({ session, request, runId: 'run', worktree: cwd, branch: 'work', generation: 0,
+  const admit = (session: ReplSession) => admitNativeChildWorkspace({ session, request, runId: 'run', worktree: cwd, branch: 'work', generation: 0,
     pending: () => [{ runId: 'run', stepId: 'build:0', generation: 0 }],
     git: async args => args[0] === 'symbolic-ref' ? 'refs/heads/work' : args.includes('--show-toplevel') ? cwd : args.includes('--absolute-git-dir') ? gitDir : common })
+  const workspace = await admit(session)
   cleanup.push(async () => completeNativeChildWorkspace(workspace))
   const signer = createNativeDispatchSigner()
   const lease: NativeDispatchLease = { scope: { ownerHandle: 'owner', projectId: 'project' }, generation: 0, token: 'lease',
@@ -65,7 +66,16 @@ async function fixture() {
     await appendFile(transcript, JSON.stringify({ sessionId: 'parent', type: 'assistant', message: { role: 'assistant',
       content: [{ type: 'tool_use', name: 'SendMessage', id: 'exact-tool', input: { ...prepared.args, to } }] } }) + '\n')
   }
-  return { options, session, request, inputs, invoke, childPath, transcript, recordInvocation, saved: () => saved }
+  const restore = async () => {
+    const restored = new ReplSession('key', 'restored-generation', 'parent', 'channel', cwd)
+    restored.attachChild(session.child)
+    restored.toolSurface = session.toolSurface
+    restored.probeNativeToolCatalog = async () => ({ status: 'observed', source: 'native-provider-catalog', sessionId: 'parent', childGeneration: restored.childGeneration, names: ['Agent', 'SendMessage'] })
+    const workspace = await admit(restored)
+    cleanup.push(async () => completeNativeChildWorkspace(workspace))
+    return { ...options, session: restored, workspace }
+  }
+  return { options, session, request, inputs, invoke, restore, childPath, transcript, recordInvocation, saved: () => saved }
 }
 
 test('one same-ID continuation persists original receipt, quota and lease before send; a fresh observer never resends', async () => {
@@ -78,14 +88,95 @@ test('one same-ID continuation persists original receipt, quota and lease before
   await f.recordInvocation('other')
   expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
   await f.recordInvocation()
-  expect(await f.invoke()).toEqual({ kind: 'submitted', evidence: 'exact-tool-invocation' })
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
   expect(f.inputs).toHaveLength(1)
   expect(f.inputs[0]).toContain('"to":"child"')
+})
+
+test('a unique exact native invocation reconciles the original spent opportunity', async () => {
+  const f = await fixture()
+  await writeFile(f.transcript, JSON.stringify({ type: 'system', message: 'original prefix' }) + '\n')
+  expect(await f.invoke()).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
+  await f.recordInvocation()
+  expect(await f.invoke()).toEqual({ kind: 'submitted', evidence: 'exact-tool-invocation' })
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('authorized same-session restoration requires the current generation catalog before input', async () => {
+  const f = await fixture()
+  const restored = await f.restore()
+  restored.session.probeNativeToolCatalog = f.session.probeNativeToolCatalog
+  expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'catalog-unknown' })
+  expect(f.inputs).toHaveLength(0)
+  const current = await f.restore()
+  expect(await f.invoke(current)).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
+  expect(JSON.parse(f.saved()!).childGeneration).toBe('restored-generation')
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('restoration observes an already spent attempt from its original transcript boundary without new input', async () => {
+  const f = await fixture()
+  expect(await f.invoke()).toMatchObject({ kind: 'submitted' })
+  const restored = await f.restore()
+  restored.session.probeNativeToolCatalog = undefined
+  expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
+  await f.recordInvocation()
+  expect(await f.invoke(restored)).toEqual({ kind: 'submitted', evidence: 'exact-tool-invocation' })
+  expect(JSON.parse(f.saved()!).childGeneration).toBe('generation')
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('a reconstructed workspace continues the same yielded native child in its live session', async () => {
+  const f = await fixture()
+  let yieldOriginal!: () => void
+  const releaseOriginal = await f.session.acquireTurn(yieldSlot => { yieldOriginal = yieldSlot }, f.options.workspace)
+  bindNativeChildWorkspace(f.options.workspace)
+  yieldOriginal(); releaseOriginal()
+  const prior = f.options.workspace
+  const cwd = f.request.cwd, common = join(cwd, '..', 'git'), gitDir = join(common, 'work')
+  const reconstructed = await admitNativeChildWorkspace({ session: f.session, request: f.request, runId: 'run', worktree: cwd, branch: 'work', generation: 0,
+    pending: () => [{ runId: 'run', stepId: 'build:0', generation: 0 }],
+    git: async args => args[0] === 'symbolic-ref' ? 'refs/heads/work' : args.includes('--show-toplevel') ? cwd : args.includes('--absolute-git-dir') ? gitDir : common })
+  cleanup.push(async () => completeNativeChildWorkspace(reconstructed))
+  expect(reconstructed).not.toBe(prior)
+  expect(await f.invoke({ ...f.options, workspace: reconstructed, deadline: Date.now() + 100 })).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
+  expect(f.inputs).toHaveLength(1)
+  expect(f.session.turnSlotHeld).toBe(1)
 })
 
 test('concurrent continuation callers spend one opportunity', async () => {
   const f = await fixture()
   await Promise.all([f.invoke(), f.invoke()])
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('continuation overtakes ordinary input queued before the original child yielded, without overlapping parent input', async () => {
+  const f = await fixture()
+  let yieldOriginal!: () => void, ordinaryAcquired = false
+  const releaseOriginal = await f.session.acquireTurn(yieldSlot => { yieldOriginal = yieldSlot }, f.options.workspace)
+  const ordinary = f.session.acquireTurn().then(release => { ordinaryAcquired = true; return release })
+  const continuing = f.invoke({ ...f.options, deadline: Date.now() + 500 })
+  await Bun.sleep(20)
+  expect(f.inputs).toHaveLength(0)
+  bindNativeChildWorkspace(f.options.workspace)
+  yieldOriginal(); releaseOriginal()
+  expect(await continuing).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
+  expect(ordinaryAcquired).toBe(false)
+  expect(f.session.turnSlotHeld).toBe(2)
+  completeNativeChildWorkspace(f.options.workspace)
+  const releaseOrdinary = await ordinary
+  expect(ordinaryAcquired).toBe(true)
+  releaseOrdinary()
+  expect(f.session.turnSlotHeld).toBe(0)
+})
+
+test('same-inode transcript truncation and regrowth cannot reconcile a spent continuation', async () => {
+  const f = await fixture()
+  await writeFile(f.transcript, JSON.stringify({ type: 'system', message: 'original prefix' }) + '\n')
+  expect(await f.invoke()).toMatchObject({ kind: 'submitted' })
+  await writeFile(f.transcript, JSON.stringify({ type: 'system', message: 'replaced prefix' }) + '\n')
+  await f.recordInvocation()
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
   expect(f.inputs).toHaveLength(1)
 })
 

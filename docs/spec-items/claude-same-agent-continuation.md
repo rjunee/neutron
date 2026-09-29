@@ -30,10 +30,16 @@ retain ownership and expose the unresolved capability; they never fall back to
 a replacement child or silently claim continuity.
 
 A lost acknowledgement or restart makes the saved attempt observation-only.
+Authorized startup restoration may change the parent process generation while
+preserving its recorded native session and scope. The original signed parent
+identity remains provenance; a new submission requires a catalog for the current
+generation. A spent claim remains observation-only across that restoration.
 Reconciliation can identify the exact `SendMessage` tool invocation by parent
-session, post-claim transcript boundary, native recipient and nonce-bound input.
-Parent text, another recipient, replaced/truncated transcripts and conflicting
-invocations preserve UNKNOWN. A terminal acknowledgement establishes only parent
+session, post-claim transcript boundary including the original prefix digest,
+native recipient and nonce-bound input. Parent text, another recipient, replaced
+transcripts, shortened or changed prefixes and same-nonce conflicting invocations
+preserve UNKNOWN. Prefixes larger than 64 MiB or observation tails larger than
+4 MiB refuse reconciliation. A terminal acknowledgement establishes only parent
 input; an exact tool invocation establishes only invocation. The original result
 validator still decides completion, and completed work always takes precedence.
 
@@ -50,6 +56,11 @@ validator still decides completion, and completed work always takes precedence.
       cannot spend another continuation. Exact invocation reconciliation is paired
       with wrong-recipient and unobserved-input controls.
       Verify: `runtime/workers/claude-native-continuation.test.ts` and admission tests.
+- [ ] Reconstructed workspace proofs for the same admitted child do not self-wait.
+      Its continuation can pass ordinary input queued before that child yielded,
+      but never overlap active parent input or bypass a different bound child.
+      Normal input keeps FIFO ordering and original busy ownership is retained.
+      Verify: continuation and native-child-workspace runtime tests.
 - [ ] Semantic allow-all and deny-all catalog mutations fail the consuming refusal
       and success tests respectively. Both root and Trident typechecks pass.
 - [ ] Served acceptance records the actual parent catalog and successful same-ID

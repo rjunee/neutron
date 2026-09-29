@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
 import { createClaudeActingTurn } from './claude-acting-turn.ts'
-import { admitNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest,
+import { admitNativeChildWorkspace, bindNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest,
   nativeChildCensusKnown, type NativeChildWorkspace } from './native-child-workspace.ts'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import type { ProjectActingTurn } from './project-runners.ts'
@@ -162,6 +162,21 @@ test('foreign, duplicate, missing and unreadable durable leases cannot authorize
   expect(nativeChildCensusKnown(f.workspaces[0]!)).toBe(true)
   f.setUnreadable()
   expect(nativeChildCensusKnown(f.workspaces[0]!)).toBe(false)
+})
+
+test('a continuation cannot bypass a different bound background child', async () => {
+  const f = await fixture()
+  let yieldOriginal!: () => void, acquired = false
+  const releaseOriginal = await f.session.acquireTurn(yieldSlot => { yieldOriginal = yieldSlot }, f.workspaces[0])
+  bindNativeChildWorkspace(f.workspaces[0]!)
+  yieldOriginal(); releaseOriginal()
+  const waiting = f.session.acquireContinuationTurn(f.workspaces[1]!).then(release => { acquired = true; return release })
+  await Bun.sleep(20)
+  expect(acquired).toBe(false)
+  f.complete(0)
+  const release = await waiting
+  expect(acquired).toBe(true)
+  release()
 })
 
 test('forged workspace authority and changed request cannot authorize a writer', async () => {

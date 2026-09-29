@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
-import { open } from 'node:fs/promises'
+import { open, type FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
@@ -14,7 +14,7 @@ import { readArmedTrailerReservation } from './trailer-slot.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
 import { nativeChildContinuationCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
 
-type Boundary = { offset: number; dev: number; ino: number }
+type Boundary = { offset: number; dev: number; ino: number; prefixDigest: string }
 interface Preparation {
   version: 1
   request: BoundedWorkRequest
@@ -159,8 +159,27 @@ async function readBoundary(path: string): Promise<Boundary | undefined> {
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW)
   try {
     const info = await file.stat()
-    return info.isFile() ? { offset: info.size, dev: info.dev, ino: info.ino } : undefined
+    if (!info.isFile()) return undefined
+    const prefixDigest = await digestPrefix(file, info.size)
+    const after = await file.stat()
+    return prefixDigest && info.size === after.size && info.mtimeMs === after.mtimeMs && info.ctimeMs === after.ctimeMs
+      ? { offset: info.size, dev: info.dev, ino: info.ino, prefixDigest } : undefined
   } finally { await file.close() }
+}
+
+/** Bounded snapshot hashing: refuse oversized histories rather than use a weak
+ * inode/offset boundary that accepts same-inode truncation followed by regrowth. */
+async function digestPrefix(file: FileHandle, size: number): Promise<string | undefined> {
+  if (!Number.isSafeInteger(size) || size < 0 || size > 64 * 1024 * 1024) return undefined
+  const digest = createHash('sha256'), bytes = Buffer.alloc(64 * 1024)
+  for (let offset = 0; offset < size;) {
+    const length = Math.min(bytes.length, size - offset)
+    const { bytesRead } = await file.read(bytes, 0, length, offset)
+    if (bytesRead !== length) return undefined
+    digest.update(bytes.subarray(0, length))
+    offset += length
+  }
+  return digest.digest('hex')
 }
 
 /** Parent text, tool-name mentions and another recipient are not consumption. */
@@ -171,10 +190,11 @@ async function exactInvocation(path: string, saved: Preparation): Promise<boolea
     const boundary = saved.boundary
     if (!info.isFile() || !Number.isSafeInteger(boundary.offset) || boundary.offset < 0
       || info.dev !== boundary.dev || info.ino !== boundary.ino || info.size < boundary.offset || info.size - boundary.offset > 4 * 1024 * 1024) return false
+    if (typeof boundary.prefixDigest !== 'string' || await digestPrefix(file, boundary.offset) !== boundary.prefixDigest) return false
     const bytes = Buffer.alloc(info.size - boundary.offset)
     const { bytesRead } = await file.read(bytes, 0, bytes.length, boundary.offset)
     const after = await file.stat()
-    if (bytesRead !== bytes.length || info.size !== after.size || info.mtimeMs !== after.mtimeMs) return false
+    if (bytesRead !== bytes.length || info.size !== after.size || info.mtimeMs !== after.mtimeMs || info.ctimeMs !== after.ctimeMs) return false
     const text = bytes.toString('utf8')
     const matches: string[] = []
     for (const line of text.slice(0, text.lastIndexOf('\n') + 1).split('\n')) {
@@ -182,6 +202,10 @@ async function exactInvocation(path: string, saved: Preparation): Promise<boolea
       const row = JSON.parse(line)
       if (row.sessionId !== saved.sessionId || row.type !== 'assistant' || row.message?.role !== 'assistant' || !Array.isArray(row.message.content)) continue
       for (const block of row.message.content) {
+        // A copied continuation nonce sent to another native recipient is a
+        // conflicting actuation, not unrelated conversation to skip past.
+        if (block.type === 'tool_use' && block.name === SUBAGENT_CONTINUATION_TOOL_NAME
+          && block.input?.message === saved.args.message && !isDeepStrictEqual(block.input, saved.args)) return false
         if (block.type === 'tool_use' && block.name === SUBAGENT_CONTINUATION_TOOL_NAME
           && typeof block.id === 'string' && isDeepStrictEqual(block.input, saved.args)) matches.push(block.id)
       }

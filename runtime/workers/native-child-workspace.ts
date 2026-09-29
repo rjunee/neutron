@@ -75,6 +75,17 @@ export function ownsNativeChildWorkspace(admission: NativeChildWorkspace, sessio
   return !!record && !record.completed && record.session === session && isDeepStrictEqual(record.request, request)
 }
 
+/** Recovery can reconstruct a host proof for the same live child. Equality is
+ * its measured authority, never the allocation identity of the proof object. */
+export function sameNativeChildWorkspace(left: NativeChildWorkspace | undefined, right: NativeChildWorkspace | undefined): boolean {
+  if (!left || !right) return false
+  const a = records.get(left), b = records.get(right)
+  return !!a && !!b && !a.completed && !b.completed && a.session === b.session
+    && isDeepStrictEqual(a.identity, b.identity) && isDeepStrictEqual(a.request, b.request)
+    && a.directory === b.directory && a.inode === b.inode && a.branch === b.branch && a.common === b.common
+    && isDeepStrictEqual(a.paths, b.paths)
+}
+
 /** Restart/foreign leases have no local proof. A duplicate identity is ambiguous.
  * Such work must be reconciled through its original reservation before dispatch. */
 export function nativeChildCensusKnown(admission: NativeChildWorkspace): boolean {

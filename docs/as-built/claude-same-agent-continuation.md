@@ -43,3 +43,15 @@ controls remain unperformed. A file swap, 401 recovery, selector receipt or
 synthetic provider response is not proof of 429 account consumption.
 
 This candidate stacks on the handler-drain change that adds migration 0165.
+
+Independent review found two queue deadlocks and a reconciliation gap. Recovery
+now compares measured workspace authority rather than proof-object allocation.
+The parent queue retains normal FIFO but lets an eligible continuation pass a
+head waiting for background completion, without overlapping active parent input.
+The consuming fixture exercises ordinary input queued before the quota child
+binds and yields. Same-attempt conflicting recipient input refuses reconciliation;
+a SHA-256 prefix boundary detects changed same-inode transcript history.
+Runtime positive/negative controls cover restored parent generations, reconstructed
+proofs, unrelated child waits, exact-only invocation and truncate/regrow history.
+Allow/deny queue and invocation mutants, plus the prefix-check bypass mutant, fail
+their respective behavioral assertions; all mutations were restored.
