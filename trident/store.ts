@@ -30,6 +30,9 @@ import { parseBuildModeState, readBuildRetrySource, retrySourceIdentity } from '
 import { seedableCheckpoint } from './run-disposition.ts'
 import { carryableTaskIteration, DEFAULT_MAX_TASK_ITERATIONS, isTaskCap } from './task-budget.ts'
 import type { ExecutionStrategy } from './execution-strategy.ts'
+import type { OrchestratorRecoveryDecision } from './orchestrator-recovery-contract.ts'
+import { ORCHESTRATOR_RECOVERY_STAGE } from './orchestrator-recovery-contract.ts'
+import { rejectedRecoverySource, type RecoveryCard } from './orchestrator-recovery.ts'
 
 const crashLog = createLogger('trident-launcher-crash')
 
@@ -1100,6 +1103,7 @@ export class TridentRunStore {
   async createIfClaimsAvailable(
     input: CreateTridentRunInput,
     retrySource?: { priorRunId: string; eventId: number; head: string },
+    recovery?: { decision: OrchestratorRecoveryDecision; assertAuthority(): void; bind(tx: ProjectDb, run: TridentRun): boolean },
   ): Promise<
     | { ok: true; run: TridentRun }
     | { ok: false; conflict: 'path'; holding_run: TridentRun; path: string }
@@ -1119,7 +1123,38 @@ export class TridentRunStore {
       if (branchHolder !== null) {
         return { ok: false as const, conflict: 'branch' as const, holding_run: branchHolder }
       }
+      if (recovery) {
+        recovery.assertAuthority()
+        if (retrySource) throw new Error('Recovery cannot also import an ordinary retry source')
+        const d = recovery.decision
+        const source = rejectedRecoverySource(this, input.project_slug, d.request)
+        if (source.meta !== d.source_meta || source.card.linked_run_id !== d.current_run_id
+          || source.card.updated_at !== d.card_updated_at || source.card.status !== d.card_status
+          || input.task !== source.prior.task || input.branch !== source.prior.branch
+          || input.repo_path !== source.prior.repo_path || input.base_sha !== source.prior.base_sha
+          || input.execution_strategy !== source.prior.execution_strategy
+          || input.task_iteration !== d.task_iteration || input.max_task_iterations !== d.max_task_iterations
+          || input.max_rounds !== d.max_rounds || input.published_pr !== d.request.published_pr
+          || d.task_iteration < Math.max(source.card.task_iteration, source.prior.task_iteration)
+          || d.max_task_iterations > Math.min(source.card.max_task_iterations ?? source.prior.max_task_iterations, source.prior.max_task_iterations)
+          || d.max_rounds > source.prior.max_rounds || d.max_rounds <= source.state.checkpoint.round
+          || d.task_iteration >= d.max_task_iterations) throw new Error('Recovery decision no longer matches its source and budgets')
+      }
       const run = await this.create(input)
+      if (recovery) {
+        recovery.assertAuthority()
+        const decision = recovery.decision
+        const meta = JSON.stringify(decision)
+        await this.db.run(
+          `INSERT INTO code_trident_orchestrator_recoveries
+           (source_run_id, source_event_id, run_id, project_slug, item_id, call_id, decision, consumed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [decision.request.source_run_id, decision.request.source_event_id, run.id, run.project_slug,
+            decision.request.board_item_id, decision.authority.call_id, meta, this.now()],
+        )
+        await this.recordStageEvent(run.id, ORCHESTRATOR_RECOVERY_STAGE, meta)
+        if (!recovery.bind(this.db, run)) throw new Error('Recovery card binding changed before source consumption')
+      }
       if (retrySource) {
         // The row and its resume source must survive a crash together. Validate
         // the relationship inside this transaction so a future caller cannot
@@ -1129,6 +1164,32 @@ export class TridentRunStore {
       }
       return { ok: true as const, run }
     })
+  }
+
+  recoveryCard(project: string, item: string): RecoveryCard | null {
+    return this.db.prepare<RecoveryCard, [string, string]>(
+      `SELECT id, project_slug, linked_run_id, status, updated_at, inline_active,
+        task_iteration, max_task_iterations, execution_strategy FROM work_board_items
+        WHERE project_slug = ? AND id = ?`,
+    ).get(project, item) ?? null
+  }
+
+  recoveryHistory(project: string, item: string): string[] {
+    return this.db.prepare<{ run_id: string }, [string, string]>(
+      'SELECT run_id FROM work_board_terminal_attempts WHERE project_slug = ? AND item_id = ?',
+    ).all(project, item).map(row => row.run_id)
+  }
+
+  orchestratorRecovery(runId: string): OrchestratorRecoveryDecision | null {
+    const record = this.db.prepare<{ decision: string }, [string]>(
+      'SELECT decision FROM code_trident_orchestrator_recoveries WHERE run_id = ?',
+    ).get(runId)
+    return record ? JSON.parse(record.decision) : null
+  }
+
+  async recordOrchestratorRecoveryRefusal(runId: string, reason: string): Promise<void> {
+    await this.db.run('UPDATE code_trident_orchestrator_recoveries SET refusal = ? WHERE run_id = ?',
+      [reason.trim().slice(0, 2048), runId])
   }
 
   /**

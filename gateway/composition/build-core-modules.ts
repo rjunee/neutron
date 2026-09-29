@@ -65,6 +65,7 @@ import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { ReminderTickLoop } from '@neutronai/reminders/tick.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { readOrchestratorRecovery } from '@neutronai/trident/orchestrator-recovery.ts'
 import {
   TridentTickLoop,
   type TridentDeadLauncherLatch,
@@ -650,6 +651,11 @@ export function buildCoreModules(
           // workflow's own `plan-start` stamp is what proves the fire happened
           // without waiting on the turn. Read only for runs in that state.
           list_stage_events: (run_id) => store.stageEvents(run_id),
+          read_orchestrator_recovery: (run) => {
+            readOrchestratorRecovery(store, run)
+            return store.orchestratorRecovery(run.id)
+          },
+          record_recovery_refusal: (run_id, reason) => store.recordOrchestratorRecoveryRefusal(run_id, reason),
           // THE THREE RUN-SCOPED PROBES the watchdog must consult before it may
           // declare a hang: a live process for the run, fresh mtime on the run's
           // own artifacts, recent movement on its branch ref.

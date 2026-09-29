@@ -646,6 +646,20 @@ CREATE TABLE code_trident_native_usage_bindings (
       REFERENCES code_trident_attempts(run_id, step_id, attempt_id) ON DELETE CASCADE
 ) STRICT
 
+[table] code_trident_orchestrator_recoveries (tbl=code_trident_orchestrator_recoveries)
+CREATE TABLE code_trident_orchestrator_recoveries (
+    source_run_id TEXT PRIMARY KEY NOT NULL REFERENCES code_trident_runs(id),
+    source_event_id INTEGER NOT NULL REFERENCES code_trident_stage_events(id),
+    run_id TEXT UNIQUE NOT NULL REFERENCES code_trident_runs(id),
+    project_slug TEXT NOT NULL,
+    item_id TEXT NOT NULL REFERENCES work_board_items(id),
+    call_id TEXT NOT NULL,
+    decision TEXT NOT NULL,
+    refusal TEXT,
+    consumed_at TEXT NOT NULL,
+    UNIQUE (project_slug, call_id)
+) STRICT
+
 [table] code_trident_phase_usage (tbl=code_trident_phase_usage)
 CREATE TABLE code_trident_phase_usage (
     run_id TEXT NOT NULL REFERENCES code_trident_runs(id) ON DELETE CASCADE,
@@ -1767,7 +1781,7 @@ CREATE TABLE "work_board_items" (
     max_task_iterations   INTEGER
                            CHECK (max_task_iterations IS NULL OR max_task_iterations >= 0)
 , repo_name TEXT, task_total INTEGER
-    CHECK (task_total IS NULL OR (typeof(task_total) = 'integer' AND task_total > 0 AND task_total <= 9007199254740991)), execution_strategy TEXT CHECK (execution_strategy IN ('single', 'task_sequence')), strategy_rationale TEXT, strategy_plan TEXT, strategy_source TEXT CHECK (strategy_source IN ('planner', 'legacy'))) STRICT
+    CHECK (task_total IS NULL OR (typeof(task_total) = 'integer' AND task_total > 0 AND task_total <= 9007199254740991)), execution_strategy TEXT CHECK (execution_strategy IN ('single', 'task_sequence')), strategy_rationale TEXT, strategy_plan TEXT, strategy_source TEXT CHECK (strategy_source IN ('planner', 'legacy')), recovery_refusal TEXT) STRICT
 
 [table] work_board_terminal_attempts (tbl=work_board_terminal_attempts)
 CREATE TABLE work_board_terminal_attempts (

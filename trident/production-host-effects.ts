@@ -19,6 +19,7 @@ import { BUILDER_COMMIT_RECOVERY, recoverBuilderCommit } from './recover-builder
 import { readBuildModeState, readBuildRetrySource, type BuildModeState } from './build-mode-state.ts'
 import { isPlainBranchName } from './mutation-prover.ts'
 import { readPublicationResponse, recordPublicationResponse } from './project-publication-receipt.ts'
+import { readOrchestratorRecovery } from './orchestrator-recovery.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 /**
@@ -315,8 +316,11 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     },
     async loadResume() {
       modeState = readModeState()
+      const orchestrated = readOrchestratorRecovery(store, row())
+      if (modeState?.checkpoint.orchestratorReplan && !orchestrated)
+        throw new Error('Orchestrator replan checkpoint has no consumed authorization')
       if (!modeState) {
-        const source = readBuildRetrySource(store, row())
+        const source = orchestrated ? { state: orchestrated } : readBuildRetrySource(store, row())
         if (source) {
           // Mint this run's own state through the normal compare-and-append.
           // Only completed checkpoint data crosses runs; no worker reservation,

@@ -203,6 +203,9 @@ export interface BuildTridentOrchestratorOptions {
    *  Omitted → only the late settle can confirm an unconfirmed fire, and an
    *  abandoned project-driver reservation cannot establish continuation. */
   list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string; meta?: string | null }>
+  /** Host-owned one-use table reader; a stage event alone never authorizes recovery. */
+  read_orchestrator_recovery?: (run: TridentRun) => import('./orchestrator-recovery-contract.ts').OrchestratorRecoveryDecision | null
+  record_recovery_refusal?: (run_id: string, reason: string) => Promise<void>
   /** Review-only executor seam. Production uses `executeBoundReview`; tests may
    *  inject a recording executor without running a live review panel. */
   execute_bound_review?: typeof executeBoundReview

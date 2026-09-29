@@ -183,6 +183,7 @@ export const SCOPE_SWEEP_COLUMNS: readonly ScopedColumn[] = [
   { table: 'watchdog_alerts', column: 'project_slug' },
   { table: 'work_board_items', column: 'project_slug' },
   { table: 'work_board_terminal_attempts', column: 'project_slug' },
+  { table: 'code_trident_orchestrator_recoveries', column: 'project_slug' },
   { table: 'wow_events', column: 'project_slug' },
 ]
 

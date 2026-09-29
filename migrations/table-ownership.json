@@ -13,6 +13,10 @@
     "current writer set \u2014 the test picks it up automatically."
   ],
   "tables": {
+    "code_trident_orchestrator_recoveries": {
+      "owner": "trident/store.ts",
+      "writers": ["trident/store.ts"]
+    },
     "native_host_terminations": {
       "owner": "gateway/project-admission-store.ts",
       "writers": ["gateway/project-admission-store.ts"]

@@ -1,3 +1,5 @@
+import type { ProjectChatOrchestratorAuthority, ProjectChatOrchestratorAuditFacts } from '@neutronai/tools/orchestrator-authority.ts'
+
 /** An explicit project-chat decision; ordinary retry never accepts these fields. */
 export interface OrchestratorRecoveryRequest {
   board_item_id: string
@@ -10,22 +12,23 @@ export interface OrchestratorRecoveryRequest {
 }
 
 /** Supplied by the authenticated tool transport, never decoded from tool arguments. */
-export interface OrchestratorRecoveryAuthority {
-  project_scope: string
+export interface OrchestratorRecoveryInvocation {
+  authority: ProjectChatOrchestratorAuthority
   project_id: string
   call_id: string
-  chat_id: string
 }
 
 /** Durable authorization, atomically consumed when its sole successor is admitted. */
 export interface OrchestratorRecoveryDecision {
   request: OrchestratorRecoveryRequest
-  authority: OrchestratorRecoveryAuthority
+  authority: Readonly<ProjectChatOrchestratorAuditFacts>
   current_run_id: string | null
   card_status: string
   card_updated_at: string
   source_meta: string
   repo_path: string
+  repository: string
+  base_branch: string
   branch: string
   task: string
   max_rounds: number

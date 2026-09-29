@@ -6,6 +6,8 @@ import { gitRangeArgv } from './git-range.ts'
 import { redactPushError } from './publish-failure.ts'
 import { readBuildModeState } from './build-mode-state.ts'
 import type { HostCommandResult } from './git-mode.ts'
+import { ORCHESTRATOR_RECOVERY_STAGE } from './orchestrator-recovery-contract.ts'
+import { prepareRecoveryBranch, verifyRecoveryRemote } from './orchestrator-recovery.ts'
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -32,7 +34,7 @@ export interface LaunchPreparationDeps {
 
 export async function prepareLaunch(
   run: TridentRun,
-  opts: Pick<BuildTridentOrchestratorOptions, 'run_host' | 'sleep' | 'list_stage_events'>,
+  opts: Pick<BuildTridentOrchestratorOptions, 'run_host' | 'sleep' | 'list_stage_events' | 'read_orchestrator_recovery' | 'record_recovery_refusal'>,
   deps: LaunchPreparationDeps,
 ): Promise<AdvanceOutcome | PreparedLaunch> {
   const {
@@ -54,6 +56,21 @@ export async function prepareLaunch(
     }
   }
   const base = await resolveBase(run)
+  const recoveryEvent = opts.list_stage_events?.(run.id).find(e => e.stage === ORCHESTRATOR_RECOVERY_STAGE)
+  if (recoveryEvent || modeState?.checkpoint.orchestratorReplan) {
+    try {
+      const decision = opts.read_orchestrator_recovery?.(run)
+      if (!decision || !opts.record_recovery_refusal) throw new Error('Recovery launch lacks durable authorization storage')
+      if (modeState === null) await prepareRecoveryBranch(run, decision.request.expected_head, opts.run_host, decision)
+      else if (modeState.checkpoint.orchestratorReplan)
+        await verifyRecoveryRemote(run, decision.request.expected_head, opts.run_host, decision)
+    } catch {
+      const reason = 'Orchestrator recovery refused: published source changed or is unreadable; no fresh build was started'
+      await opts.record_recovery_refusal?.(run.id, reason)
+      return { run: failedRun(run, reason, true),
+        changed: true, waiting: false, note: `${run.phase} → failed (recovery source refused)` }
+    }
+  }
   let resume_checkpoint = modeState?.checkpoint.stage ?? run.inner_checkpoint
   // MID-LOOP RESUME — the checkpoint travels WITH the commit it was recorded
   // against (and, for a REQUEST_CHANGES checkpoint, the findings recorded with
