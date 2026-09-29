@@ -128,6 +128,35 @@ async function prepareNativeWorktree(f: Awaited<ReturnType<typeof fixture>>, opt
     : host(argv, cwd, env, timeoutMs)
 }
 
+test.each(['missing-declaration', 'missing-workflow', 'malformed-workflow', 'different-repo'] as const)(
+  'PR preparation refuses %s before worktree and worker preparation, and accepts an explicit binding', async fault => {
+    const f = await fixture()
+    f.input.run.merge_mode = 'pr'
+    if (fault !== 'missing-declaration') await writeFile(join(f.dir, 'project-repos.json'), JSON.stringify({
+      repos: [{ name: 'project', path: fault === 'different-repo' ? 'repos/project' : 'code', remote: null,
+        ...(fault === 'missing-workflow' ? {} : { ciWorkflow: fault === 'malformed-workflow' ? 42 : 'ci.yml' }) }], default: 'project',
+    }))
+    await expect(f.prepare()).rejects.toThrow(fault === 'malformed-workflow' ? 'Invalid CI workflow'
+      : fault === 'different-repo' ? 'not declared in project-repos.json'
+      : 'requires ciWorkflow for selected repo "project" in project-repos.json')
+    expect(f.commands).toEqual([])
+    expect(f.captured()).toBeUndefined()
+    expect(f.context.store.get(f.input.run.id)!.worktree).toBeNull()
+    await writeFile(join(f.dir, 'project-repos.json'), JSON.stringify({
+      repos: [{ name: 'project', path: 'code', remote: null, ciWorkflow: 'project-checks.yml' }], default: 'project',
+    }))
+    expect((await f.prepare()).production.ciWorkflow).toBe('project-checks.yml')
+    expect(f.commands.some(args => args.includes('worktree'))).toBe(true)
+    expect(f.captured()).toBeDefined()
+  })
+
+test('local preparation does not require a remote CI declaration', async () => {
+  const f = await fixture()
+  expect(f.input.run.merge_mode).toBe('local')
+  expect((await f.prepare()).production.ciWorkflow).toBeUndefined()
+  expect(f.captured()).toBeDefined()
+})
+
 test('option sources preserve pin, selected provider, workflow and unavailable suite evidence', async () => {
   const f = await fixture()
   f.input.test_strategy = 'TEST EXECUTION\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n\nSTAGE 2 — the full suite, REQUIRED.'

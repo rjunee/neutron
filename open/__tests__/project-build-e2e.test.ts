@@ -1511,6 +1511,50 @@ async function drive(f: Awaited<ReturnType<typeof fixture>>): Promise<ProjectBui
   return host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
 }
 
+test('missing project CI setup refuses before spending work, then an explicit binding completes the same run', async () => {
+  const f = await fixture()
+  const declaration = join(f.dir, 'project-repos.json')
+  await rm(declaration)
+  await expect(drive(f)).rejects.toThrow('requires ciWorkflow for selected repo "project" in project-repos.json')
+  expect(f.commands).toEqual([])
+  expect(f.world.dispatches).toEqual([])
+  expect(f.context.attempts.list(f.row.id)).toEqual([])
+  expect(f.store.get(f.row.id)!.worktree).toBeNull()
+  await writeFile(declaration, JSON.stringify({
+    repos: [{ name: 'project', path: 'code', remote: null, ciWorkflow: 'ci.yml' }], default: 'project',
+  }))
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+  expect(dispatchRoles(f.world)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
+}, 60_000)
+
+test.each(['red', 'moved-head', 'malformed-configuration'] as const)(
+  'explicit project CI binding preserves readiness refusal: %s', async fault => {
+    const f = await fixture()
+    const runHost = f.context.runHost
+    f.context.runHost = async (...args) => {
+      const [argv] = args
+      const observed = await runHost(...args)
+      if (fault === 'moved-head' && argv[0] === 'gh' && argv.at(-1) === 'headRefOid,mergeable') {
+        return { ...observed, stdout: JSON.stringify({ headRefOid: 'f'.repeat(40), mergeable: 'MERGEABLE' }) }
+      }
+      if (fault === 'malformed-configuration' && argv[0] === 'gh' && argv[2]?.includes('/protection/required_status_checks')) {
+        return { ...observed, stdout: '{}' }
+      }
+      return observed
+    }
+    if (fault === 'red') f.github.checkRuns.check_runs[0]!.conclusion = 'FAILURE'
+    const outcome = await drive(f)
+    expect(outcome.kind, why(f, outcome)).toBe(fault === 'red' ? 'blocked' : 'unknown')
+    expect(f.github.prs[0]!.state).toBe('OPEN')
+    expect(f.commands.some(argv => argv[0] === 'gh' && argv[2] === 'merge')).toBe(false)
+    if (fault === 'red') {
+      // Settled red enters the existing review/fix path with its CI veto intact.
+      expect(dispatchRoles(f.world)).toContain('review')
+    } else expect(dispatchRoles(f.world)).toEqual(['plan', 'build'])
+  }, 60_000)
+
 test.each(['draft', 'suggestion', 'busy', 'unreadable', 'empty'] as const)('adopted project composer %s preserves input or completes the build through Herdr', async state => {
   const { HerdrHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts')
   const { FakeHerdrServer } = await import('@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-fake-server.ts')
@@ -7207,6 +7251,7 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
   // run, so G055 answered `unknown` — fail-closed — for every local build. That is
   // the fix this case guards; see `build-host.ts`'s `reviewCi`.
   const f = await fixture({ mergeMode: 'local' })
+  await rm(join(f.dir, 'project-repos.json'))
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(dispatchRoles(f.world))
