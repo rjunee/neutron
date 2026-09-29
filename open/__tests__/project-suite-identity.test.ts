@@ -318,13 +318,50 @@ test('nested package measurement refuses ancestor shell execution before launchi
   expect((await measureSuiteIdentity(nested, undefined, command))?.portableIdentity).toBe(before!.portableIdentity)
 })
 
+type PackageFixtureEnvironmentKey = 'ENV' | 'BASHOPTS' | 'SHELLOPTS' | 'BUN_OPTIONS' | 'npm_config_script_shell' | 'PATH'
+function preservePackageFixtureEnvironment(name: PackageFixtureEnvironmentKey | undefined) {
+  const previous = name === undefined ? undefined : process.env[name]
+  return () => {
+    if (name === undefined) return
+    if (previous === undefined) delete process.env[name]
+    else process.env[name] = previous
+  }
+}
+
+test('package fixture cleanup restores present and absent keys without restoring unrelated input', () => {
+  const restoreOuter = preservePackageFixtureEnvironment('ENV')
+  const unrelated = process.env.LAUNCHER_FIXTURE_INPUT
+  try {
+    for (const original of ['original fixture input', undefined]) {
+      if (original === undefined) delete process.env.ENV
+      else process.env.ENV = original
+      process.env.LAUNCHER_FIXTURE_INPUT = 'before cleanup'
+      const restore = preservePackageFixtureEnvironment('ENV')
+      process.env.ENV = 'changed fixture input'
+      process.env.LAUNCHER_FIXTURE_INPUT = 'during fixture'
+      restore()
+      expect(process.env.ENV).toBe(original)
+      expect(Object.hasOwn(process.env, 'ENV')).toBe(original !== undefined)
+      expect(process.env.LAUNCHER_FIXTURE_INPUT).toBe('during fixture')
+    }
+  } finally {
+    restoreOuter()
+    if (unrelated === undefined) delete process.env.LAUNCHER_FIXTURE_INPUT
+    else process.env.LAUNCHER_FIXTURE_INPUT = unrelated
+  }
+})
+
 for (const changed of ['pretest', 'posttest', 'config', 'dotenv', 'ENV', 'BASHOPTS', 'SHELLOPTS',
   'BUN_OPTIONS', 'npm_config_script_shell', 'bash-shadow', 'sh-shadow', 'zsh-shadow', 'node-absent', 'root-tool-shadow'] as const)
 test(`portable package launcher refuses ${changed} and accepts its unchanged sibling`, async () => {
   const { root, git, command } = await packageLauncherFixture()
   const before = await measureSuiteIdentity(root, undefined, command)
   expect(before?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
-  const environment = { ...process.env }
+  const environmentKey: PackageFixtureEnvironmentKey | undefined =
+    changed === 'ENV' || changed === 'BASHOPTS' || changed === 'SHELLOPTS' || changed === 'BUN_OPTIONS' || changed === 'npm_config_script_shell'
+      ? changed : changed === 'node-absent' || (changed.endsWith('-shadow') && changed !== 'root-tool-shadow') ? 'PATH' : undefined
+  const originalPath = process.env.PATH
+  const restoreEnvironment = preservePackageFixtureEnvironment(environmentKey)
   try {
     if (changed === 'pretest' || changed === 'posttest') {
       const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
@@ -349,15 +386,14 @@ test(`portable package launcher refuses ${changed} and accepts its unchanged sib
       } else {
         const name = changed === 'root-tool-shadow' ? 'awk' : changed.split('-')[0]!
         await writeFile(join(directory, name), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
-        if (changed !== 'root-tool-shadow') process.env.PATH = `${directory}:${environment.PATH}`
+        if (changed !== 'root-tool-shadow') process.env.PATH = `${directory}:${originalPath}`
       }
     } else process.env[changed] = 'uncharacterized-fixture-input'
     const refused = await measureSuiteIdentity(root, undefined, command)
     expect(refused?.identity).toMatch(/^[a-f0-9]{64}$/)
     expect(refused?.portableIdentity).toBeUndefined()
   } finally {
-    for (const name of Object.keys(process.env)) if (!(name in environment)) delete process.env[name]
-    Object.assign(process.env, environment)
+    restoreEnvironment()
   }
 })
 

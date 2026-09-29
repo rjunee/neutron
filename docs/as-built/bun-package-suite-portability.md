@@ -97,3 +97,28 @@ Two further valid-program mutants exercise the ordering guard in both
 directions: disabling preflight fails the consuming marker-absence assertion;
 inverting admission loses legitimate original portable proof. Both were killed
 by behavioral assertions, and the restored consuming controls passed.
+
+The integrated live-proof registry guard subsequently rejected the package
+identity fixture's blanket environment restoration. The fixture now preserves
+only the one finite environment key its scenario changes: `ENV`, `BASHOPTS`,
+`SHELLOPTS`, `BUN_OPTIONS`, `npm_config_script_shell`, or `PATH`; scenarios that
+change files preserve no environment key
+(`open/__tests__/project-suite-identity.test.ts:321`, `:360`, `:395`). The explicit
+cleanup control checks both an originally present value and an originally absent
+key, and proves an unrelated environment change survives cleanup (`:331`).
+This is a test-fixture repair; the live-proof switch guard remains unchanged.
+
+Focused repair evidence on the integrated candidate based on
+`f0ecf64bb572e33e02ab1c2331f807983dfc98c4`:
+
+- `bun test tests/integration/pty-e2e-registered.test.ts -t 'no suite writes a live-proof switch DIRECTLY or by bulk copy'`:
+  the original fixture failed with the bulk-assignment offender; the repaired
+  fixture passed one test with zero failures.
+- `bun test open/__tests__/project-suite-identity.test.ts`: 46 passed, zero
+  failures, including all existing identity scenarios and the new cleanup control.
+- `bun build open/__tests__/project-suite-identity.test.ts --target=bun --packages=external --outfile=<temporary-output>`:
+  compiled the test and its local identity dependency successfully. This is
+  compilation evidence, not a replacement for the publication TypeScript matrix.
+
+The publication owner consolidates the required final checks; this focused
+repair does not claim a new full-suite, consuming E2E or TypeScript matrix result.
