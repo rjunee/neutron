@@ -388,7 +388,7 @@ export const LIVE_AGENT_TOOL_NAMES = [
  * (`spawn.ts:1550`) respawned the child on the mismatch. A test that
  * string-matches both call sites can only notice drift after it happens; one
  * shared value makes the drift unrepresentable. */
-export const PROJECT_REPL_TOOL_DEFS: ToolDef[] = builtinToolDefs(LIVE_AGENT_TOOL_NAMES)
+export const PROJECT_REPL_TOOL_DEFS: ToolDef[] = builtinToolDefs([...LIVE_AGENT_TOOL_NAMES, 'SendMessage'])
 
 /**
  * EXPORTED (ISSUES #504) because the warm REPL's `--tools` surface is a
@@ -1823,7 +1823,9 @@ export function buildLiveAgentTurn(
     const buildSpec = (): AgentSpec => {
       const s: AgentSpec = {
         prompt,
-        tools,
+        // Project prewarm and chat must request the same native continuation
+        // grant. Explicit caller surfaces remain authoritative, including [].
+        tools: input.tool_names === undefined && turn.project_id != null ? PROJECT_REPL_TOOL_DEFS : tools,
         model_preference: [configuredTier ?? model],
         // Keep the legacy metering id, plus exact conversation scope for
         // session/provider resolution: General (null) must remain distinct

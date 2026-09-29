@@ -15,6 +15,7 @@ import type { AgentSpec } from '../../../substrate.ts'
 import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-turn-watcher.ts'
 import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
 import { supportsAutocompact } from './autocompact-support.ts'
+import { prepareNativeParentLaunch } from './native-parent-launch-evidence.ts'
 import { buildSettings } from './build-settings.ts'
 import { configuredPtyHost } from './configured-pty-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
@@ -572,7 +573,11 @@ async function spawnSession(
     let startupResumeRejected = false
     let child: Awaited<ReturnType<typeof ptyHost.spawn>>
     try {
-      child = await ptyHost.spawn(argv, {
+      const launch = options.project_id !== undefined && options.conversationProjectId !== null
+        ? await prepareNativeParentLaunch({ sessionId, childGeneration, projectId: options.project_id,
+          argv, tools: toolSurface, cwd, env: childEnv })
+        : undefined
+      child = await ptyHost.spawn(launch?.argv ?? argv, {
       cwd,
       env: childEnv,
       ...(options.repl_pane_label !== undefined ? { label: options.repl_pane_label } : {}),
@@ -615,6 +620,7 @@ async function spawnSession(
     })
     scanChild = child
     session.attachChild(child)
+    launch?.record(session)
     recordMcpServiceOwner({ sessionKey, childGeneration, channelName, pid: child.pid }, serviceMarkers)
     // Synchronous handle mirror so a respawn can detect alive-but-wedged without
     // awaiting the pool promise (Argus r3 BLOCKER 1). Newest spawn wins the key.
