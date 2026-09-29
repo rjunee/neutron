@@ -374,7 +374,6 @@ export const LIVE_AGENT_TOOL_NAMES = [
   // while the dispatch asked for 'Agent' (renamed in 2.1.273), so every trident
   // dispatch was refused for a night. One definition, one place (#1109).
   SUBAGENT_TOOL_NAME,
-  SUBAGENT_CONTINUATION_TOOL_NAME,
   'Workflow',
   'WebSearch',
   'WebFetch',
@@ -388,7 +387,7 @@ export const LIVE_AGENT_TOOL_NAMES = [
  * (`spawn.ts:1550`) respawned the child on the mismatch. A test that
  * string-matches both call sites can only notice drift after it happens; one
  * shared value makes the drift unrepresentable. */
-export const PROJECT_REPL_TOOL_DEFS: ToolDef[] = builtinToolDefs([...LIVE_AGENT_TOOL_NAMES, 'SendMessage'])
+export const PROJECT_REPL_TOOL_DEFS: ToolDef[] = builtinToolDefs([...LIVE_AGENT_TOOL_NAMES, SUBAGENT_CONTINUATION_TOOL_NAME])
 
 /**
  * EXPORTED (ISSUES #504) because the warm REPL's `--tools` surface is a

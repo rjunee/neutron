@@ -182,9 +182,6 @@ export class ReplSession {
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
    *  `tools:[]`) can never reuse a more-privileged warm REPL (Codex-r1-P1). */
   toolSurface = ''
-  /** Optional read-only native-provider catalog probe. Existing/adopted sessions
-   * have no such observation; callers must report UNKNOWN, never infer argv. */
-  probeNativeToolCatalog?: (() => Promise<import('../../../workers/claude-tool-contract.ts').ClaudeNativeToolCatalog>) | undefined
   /** Exact host-owned custom agent definition registered at process launch. */
   plannerRole: string | undefined
   /** P0-1 — whether this REPL was SPAWNED with the native-MCP tool bridge

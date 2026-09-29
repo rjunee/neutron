@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import type { ProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
+import type { NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
 
 export interface NativeDispatchLease {
   scope: { ownerHandle: string; projectId: string | null }
@@ -18,6 +19,8 @@ export interface NativeDispatchParent {
   childGeneration: string
   pid: number
   processIdentity: ProcessIdentity | null
+  /** Original host-observed launch inputs, signed before child dispatch. */
+  launch?: NativeParentLaunchEvidence
 }
 export type NativeDispatchEvidence =
   | { kind: 'parent-bound'; parent: NativeDispatchParent }

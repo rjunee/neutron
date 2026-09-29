@@ -6,16 +6,18 @@ import { createHash } from 'node:crypto'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
+import { recordNativeParentLaunchEvidence, type NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
+import { readProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
 import { createNativeDispatchSigner, type NativeDispatchLease } from './claude-native-dispatch-receipt.ts'
 import { admitNativeChildWorkspace, bindNativeChildWorkspace, completeNativeChildWorkspace } from './native-child-workspace.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
-import { continueClaudeNativeChild, type ClaudeContinuationOptions } from './claude-native-continuation.ts'
+import { CLAUDE_CONTINUATION_PROFILE, continueClaudeNativeChild, type ClaudeContinuationOptions } from './claude-native-continuation.ts'
 import { decodeProjectTrailer } from './project-runners.ts'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 
-async function fixture() {
+async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' | 'wrong-digest' | 'wrong-version' = 'valid') {
   const dir = await mkdtemp(join(tmpdir(), 'native-continuation-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const cwd = join(dir, 'work'), stateDir = join(dir, 'state'), common = join(dir, 'git'), gitDir = join(common, 'work')
@@ -28,9 +30,14 @@ async function fixture() {
   const session = new ReplSession('key', 'generation', 'parent', 'channel', cwd)
   session.toolSurface = 'Agent,SendMessage'
   const inputs: string[] = []
-  session.attachChild({ pid: 123, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
+  session.attachChild({ pid: process.pid, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
     submitLine: async line => { inputs.push(line) } })
-  session.probeNativeToolCatalog = async () => ({ status: 'observed', source: 'native-provider-catalog', sessionId: 'parent', childGeneration: 'generation', names: ['Agent', 'SendMessage'] })
+  if (profile === 'unavailable') session.toolSurface = 'Agent'
+  const launch: NativeParentLaunchEvidence = { version: 1, sessionId: profile === 'foreign' ? 'another' : 'parent', childGeneration: 'generation', projectId: 'project',
+    executable: { realPath: '/opt/claude', ...CLAUDE_CONTINUATION_PROFILE,
+      ...(profile === 'wrong-digest' ? { sha256: '0'.repeat(64) } : {}), ...(profile === 'wrong-version' ? { version: '0.0.0' } : {}) },
+    argv: ['/opt/claude', '--session-id', 'parent', '--tools', session.toolSurface], tools: session.toolSurface.split(',') }
+  if (profile !== 'missing') recordNativeParentLaunchEvidence(session, launch)
   const admit = (session: ReplSession) => admitNativeChildWorkspace({ session, request, runId: 'run', worktree: cwd, branch: 'work', generation: 0,
     pending: () => [{ runId: 'run', stepId: 'build:0', generation: 0 }],
     git: async args => args[0] === 'symbolic-ref' ? 'refs/heads/work' : args.includes('--show-toplevel') ? cwd : args.includes('--absolute-git-dir') ? gitDir : common })
@@ -41,7 +48,8 @@ async function fixture() {
     reason: 'liveChild', producer: `native-child:boot:${signer.keyDigest}`, workRef: JSON.stringify(['run', 'build:0']) }
   const authority = signer.begin(lease, request)
   authority.prepare()
-  authority.record({ kind: 'parent-bound', parent: { sessionId: 'parent', childGeneration: 'generation', pid: 123, processIdentity: null } })
+  authority.record({ kind: 'parent-bound', parent: { sessionId: 'parent', childGeneration: 'generation', pid: process.pid,
+    processIdentity: readProcessIdentity(process.pid) ?? null, ...(profile === 'missing' ? {} : { launch }) } })
   authority.record({ kind: 'submission-started' })
   const receipt = authority.record({ kind: 'child-bound', nativeAgentId: 'child' })
   const projectsDir = join(dir, 'projects'), transcript = sessionJsonlPath('parent', cwd, projectsDir)
@@ -66,11 +74,11 @@ async function fixture() {
     await appendFile(transcript, JSON.stringify({ sessionId: 'parent', type: 'assistant', message: { role: 'assistant',
       content: [{ type: 'tool_use', name: 'SendMessage', id: 'exact-tool', input: { ...prepared.args, to } }] } }) + '\n')
   }
-  const restore = async () => {
+  const restore = async (observe = true, generation = 'restored-generation') => {
     const restored = new ReplSession('key', 'restored-generation', 'parent', 'channel', cwd)
     restored.attachChild(session.child)
     restored.toolSurface = session.toolSurface
-    restored.probeNativeToolCatalog = async () => ({ status: 'observed', source: 'native-provider-catalog', sessionId: 'parent', childGeneration: restored.childGeneration, names: ['Agent', 'SendMessage'] })
+    if (observe) recordNativeParentLaunchEvidence(restored, { ...launch, childGeneration: generation })
     const workspace = await admit(restored)
     cleanup.push(async () => completeNativeChildWorkspace(workspace))
     return { ...options, session: restored, workspace }
@@ -102,11 +110,10 @@ test('a unique exact native invocation reconciles the original spent opportunity
   expect(f.inputs).toHaveLength(1)
 })
 
-test('authorized same-session restoration requires the current generation catalog before input', async () => {
+test('authorized same-session restoration requires the current generation launch before input', async () => {
   const f = await fixture()
-  const restored = await f.restore()
-  restored.session.probeNativeToolCatalog = f.session.probeNativeToolCatalog
-  expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'catalog-unknown' })
+  const restored = await f.restore(true, 'stale-generation')
+  expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'launch-unknown' })
   expect(f.inputs).toHaveLength(0)
   const current = await f.restore()
   expect(await f.invoke(current)).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
@@ -117,12 +124,22 @@ test('authorized same-session restoration requires the current generation catalo
 test('restoration observes an already spent attempt from its original transcript boundary without new input', async () => {
   const f = await fixture()
   expect(await f.invoke()).toMatchObject({ kind: 'submitted' })
-  const restored = await f.restore()
-  restored.session.probeNativeToolCatalog = undefined
+  const restored = await f.restore(false)
   expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
   await f.recordInvocation()
   expect(await f.invoke(restored)).toEqual({ kind: 'submitted', evidence: 'exact-tool-invocation' })
   expect(JSON.parse(f.saved()!).childGeneration).toBe('generation')
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('adoption without fresh launch memory requires the exact signed original process identity', async () => {
+  const f = await fixture()
+  const adopted = await f.restore(false)
+  adopted.session.attachChild({ ...f.session.child, pid: process.pid + 1 })
+  expect(await f.invoke(adopted)).toEqual({ kind: 'unknown', reason: 'launch-unknown' })
+  expect(f.inputs).toHaveLength(0)
+  adopted.session.attachChild(f.session.child)
+  expect(await f.invoke(adopted)).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
   expect(f.inputs).toHaveLength(1)
 })
 
@@ -190,12 +207,9 @@ test('continuation crosses its own unresolved session slot without releasing nat
   expect(f.inputs).toHaveLength(1)
 })
 
-test.each(['missing', 'unavailable', 'foreign'] as const)('native catalog %s cannot submit; argv is no evidence', async mode => {
-  const f = await fixture()
-  f.session.toolSurface = 'Agent,SendMessage'
-  f.session.probeNativeToolCatalog = mode === 'missing' ? undefined : async () => ({ status: 'observed', source: 'native-provider-catalog',
-    sessionId: mode === 'foreign' ? 'another' : 'parent', childGeneration: 'generation', names: mode === 'unavailable' ? ['Agent'] : ['SendMessage'] })
-  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: mode === 'unavailable' ? 'tool-unavailable' : 'catalog-unknown' })
+test.each(['missing', 'unavailable', 'foreign', 'wrong-digest', 'wrong-version'] as const)('native launch %s cannot submit; an argv assertion alone is insufficient', async mode => {
+  const f = await fixture(mode)
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: mode === 'unavailable' ? 'tool-unavailable' : 'launch-unknown' })
   expect(f.inputs).toHaveLength(0)
   expect(f.saved()).toBeUndefined()
 })
@@ -209,7 +223,7 @@ test('completed and invalid results both precede quota continuation', async () =
   expect(f.inputs).toHaveLength(0)
 })
 
-test('a current catalog cannot override an original launch that did not grant SendMessage', async () => {
+test('a signed launch cannot override a current parent that did not grant SendMessage', async () => {
   const f = await fixture()
   f.session.toolSurface = 'Agent'
   expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'tool-unavailable' })
@@ -226,15 +240,9 @@ test('ordinary errors and a foreign signed request cannot authorize continuation
   expect(f.inputs).toHaveLength(0)
 })
 
-test('a catalog probe that outlives the original budget cannot actuate later', async () => {
+test('an expired original budget cannot actuate', async () => {
   const f = await fixture()
-  let finish!: () => void
-  const wait = new Promise<void>(resolve => { finish = resolve })
-  const probe = f.session.probeNativeToolCatalog!
-  f.session.probeNativeToolCatalog = async () => { await wait; return probe() }
-  expect(await f.invoke({ ...f.options, deadline: Date.now() + 20 })).toEqual({ kind: 'unknown', reason: 'budget-expired' })
-  finish()
-  await Bun.sleep(10)
+  expect(await f.invoke({ ...f.options, deadline: Date.now() - 1 })).toMatchObject({ kind: 'unknown' })
   expect(f.inputs).toHaveLength(0)
   expect(f.saved()).toBeUndefined()
 })

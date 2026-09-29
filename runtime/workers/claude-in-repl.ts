@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
@@ -8,6 +7,7 @@ import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bo
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
 import { PLANNER_ROLE, PLANNER_NATIVE_TOOL, requiresPlannerWork } from './planner-work.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
+import { readClaudeContinuationResult } from './claude-native-continuation.ts'
 
 
 export interface ClaudeInReplOptions {
@@ -89,8 +89,9 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
         }
         while (!signal.aborted && Date.now() < deadline) {
           try {
-            const outcome = options.decodeTrailer(await readFile(req.result.path, 'utf8'), req)
-            if (outcome.kind !== 'not-current-step') return outcome
+            const observed = await readClaudeContinuationResult({ request: req, decodeTrailer: options.decodeTrailer })
+            if (observed?.kind === 'result') return observed.outcome
+            if (observed) return unseen('Trailer could not be read or validated.')
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
               return unseen('Trailer could not be read or validated.')

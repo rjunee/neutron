@@ -49,7 +49,11 @@
  *
  * Everything this does NOT cover is enumerated at the bottom of this file.
  */
-import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { recordNativeParentLaunchEvidence } from '@neutronai/runtime/adapters/claude-code/persistent/native-parent-launch-evidence.ts'
+import { CLAUDE_CONTINUATION_PROFILE } from '@neutronai/runtime/workers/claude-native-continuation.ts'
+import { reserveTrailerSlot } from '@neutronai/runtime/workers/trailer-slot.ts'
+import { createClaudeNativeDispatchReceipt } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { PLANNER_ROLE, dispatchPlannerWork, requiresPlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
 import { routeCodegenCancel } from '@neutronai/gateway/codegen-cancel-router.ts'
 import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/codegen-core'
@@ -1016,7 +1020,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
-  nativeContinuation?: 'available' | 'unavailable' | 'foreign-catalog' | 'lost-ack'
+  nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack'
   nativeQueuedOrdinary?: boolean
   verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
@@ -1242,10 +1246,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   let emitQuota: (() => Promise<void>) | undefined
   let quotaEmission: Promise<void> | undefined
   let quotaDispatch = ''
-  const session = { sessionId: 'e2e-session', childGeneration: 'e2e-generation', plannerRole: PLANNER_ROLE, authFingerprint: 'fixture-spawned-credential', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
-    probeNativeToolCatalog: options.nativeContinuation ? async () => ({ status: 'observed' as const, source: 'native-provider-catalog' as const,
-      sessionId: options.nativeContinuation === 'foreign-catalog' ? 'other-session' : 'e2e-session', childGeneration: 'e2e-generation',
-      names: options.nativeContinuation === 'unavailable' ? ['Agent'] : ['Agent', 'SendMessage'] }) : undefined,
+  const session = { sessionId: 'e2e-session', childGeneration: 'e2e-generation', plannerRole: PLANNER_ROLE, authFingerprint: 'fixture-spawned-credential',
+    toolSurface: PROJECT_REPL_TOOL_DEFS.map(tool => tool.name).filter(name => options.nativeContinuation !== 'unavailable' || name !== 'SendMessage').join(','), cwd: dir, hasChildExited: () => false,
     child: { pid: process.pid, submitLine: async (line: string) => {
       nativeInputs.push(line)
       if (line.startsWith('Invoke SendMessage exactly once')) {
@@ -1305,7 +1307,6 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     live.authFingerprint = session.authFingerprint
     live.toolSurface = session.toolSurface
     live.plannerRole = PLANNER_ROLE
-    live.probeNativeToolCatalog = session.probeNativeToolCatalog
     const acquire = live.acquireTurn.bind(live)
     live.acquireTurn = (background, workspace) => acquire(background ? yieldSlot => background(() => {
       yieldSlot()
@@ -1348,6 +1349,13 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     fixtureCleanup(async () => { await Promise.all(children); expect(errors).toEqual([]); expect(live.turnSlotHeld).toBe(0) })
   }
 
+  if (options.nativeContinuation) recordNativeParentLaunchEvidence(registeredSession, {
+    version: 1, sessionId: options.nativeContinuation === 'foreign-launch' ? 'another-session' : registeredSession.sessionId,
+    childGeneration: registeredSession.childGeneration, projectId: 'e2e-project',
+    executable: { realPath: '/opt/claude', ...CLAUDE_CONTINUATION_PROFILE },
+    argv: ['/opt/claude', '--session-id', registeredSession.sessionId, '--tools', registeredSession.toolSurface], tools: registeredSession.toolSurface.split(','),
+  })
+
   const register = (registration: { key?: string; projectId?: string; instanceId?: string
     state?: 'ready' | 'pending' | 'missing' | 'empty' | 'exited' } = {}) => {
     const sessionKey = registration.key ?? key
@@ -1366,6 +1374,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   }
 
   const admission = new ProjectAdmission({ db, ownerHandle: 'e2e-owner', bootId: 'e2e-fixture' })
+  if (options.nativeContinuation) await db.run("INSERT INTO projects (id, name, created_at, updated_at) VALUES ('e2e-project', 'Continuation fixture', 'now', 'now')", [])
   const context: ProjectBuildContext = {
     store, attempts: new TridentAttemptLedger(db), runHost,
     runSuite: Object.assign((...args: Parameters<typeof runHost>) => commandScope.run('suite_install', () => runHost(...args)), { writesDiffOutput: true as const }),
@@ -1380,7 +1389,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await Promise.resolve()
     },
     // #1237 — the REAL native-child admission over the fixture's own database.
-    nativeChildAdmission: admission.forNativeChild(null),
+    nativeChildAdmission: admission.forNativeChild(options.nativeContinuation ? 'e2e-project' : null),
   }
 
   const input: InnerLoopInput = {
@@ -1601,6 +1610,50 @@ test('native writer lost acknowledgement retains its lease and recovers the orig
   expect(session.turnSlotHeld).toBe(0)
   expect(f.admission.listLeases('liveChild')).toEqual([])
 }, 30_000)
+
+test.each(['late-original', 'symlink', 'fifo', 'invalid'] as const)('native continuation preconditions preserve safe original recovery: %s', async shape => {
+  const f = await fixture()
+  const prepared = await f.prepare()
+  const request: BoundedWorkRequest = { ...prepared.workers.build.request, run_id: f.row.id,
+    step_id: `${f.row.id}:original-recovery`, role: 'build', needs_approval_decision: false, budget: { wall_ms: 1000 } }
+  const state = join(f.context.stateRoot, f.row.id)
+  const key = createHash('sha256').update(JSON.stringify([request.run_id, request.step_id])).digest('hex')
+  await reserveTrailerSlot(join(state, `claude-step-${key}.json`), JSON.stringify(request), request.result.path)
+  const admitted = await f.context.nativeChildAdmission.admit(request.run_id, request.step_id)
+  expect(admitted.status).toBe('admitted')
+  if (admitted.status !== 'admitted') throw new Error('Fixture native child was not admitted')
+  const authority = f.context.nativeChildAdmission.dispatchAuthority!(admitted.lease, request)
+  const receipt = createClaudeNativeDispatchReceipt(state, request, authority)
+  receipt.record({ kind: 'parent-bound', parent: { sessionId: 'e2e-session', childGeneration: 'original-generation', pid: 123, processIdentity: null } })
+  receipt.record({ kind: 'submission-started' })
+  receipt.record({ kind: 'child-bound', nativeAgentId: 'original-child' })
+  f.context.nativeChildAdmission.finishPreparing?.(admitted.lease)
+  // Exact original signed/armed child, but no live parent and no quota event.
+  f.register({ state: 'missing' })
+  const result = JSON.stringify({ schema: request.result.schema, run_id: request.run_id, step_id: request.step_id,
+    kind: 'blocked', on: 'Original child finished after recovery began.' })
+  let published: Promise<void> | undefined
+  if (shape === 'late-original') {
+    const registration = supervisedBySessionKey.get(f.key)!
+    // This host lookup occurs only AFTER the continuation's first result read.
+    Object.defineProperty(registration, 'project_id', { get() {
+      published ??= writeFile(request.result.path, result)
+      return f.context.projectId
+    } })
+  } else if (shape === 'symlink') {
+    const target = join(state, 'linked-result')
+    await writeFile(target, result)
+    await symlink(target, request.result.path)
+  } else if (shape === 'fifo') {
+    expect((await spawnCapture(['mkfifo', request.result.path], f.dir)).ok).toBe(true)
+  } else await writeFile(request.result.path, '{}')
+  const recovered = await prepared.substrate.inRepl!.recover!(request, 'in-repl', new AbortController().signal)
+  await published
+  expect(recovered.kind).toBe(shape === 'late-original' ? 'blocked' : 'unknown')
+  expect(f.admission.listLeases('liveChild')).toHaveLength(shape === 'late-original' ? 0 : 1)
+  expect(f.nativeInputs).toHaveLength(0)
+  expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(0)
+}, 10_000)
 
 test.each(['run', 'recover'] as const)('native child %s refuses changed request and path before releasing original ownership', async method => {
   const f = await fixture({ malformedNativeTrailer: true })
@@ -7355,7 +7408,7 @@ test('a typed subscription quota-limited synthesis stops without quotaLimits enr
   const f = await fixture({ rateLimitedSynthesis: true })
   const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator',
-    on: expect.stringContaining('catalog-unknown') })
+    on: expect.stringContaining('launch-unknown') })
   expect(dispatchRoles(f.world)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
   expect(f.world.dispatches.find(call => call.role === 'synthesis')?.wrote).toEqual([])
   expect(f.admission.listLeases('liveChild').map(lease => JSON.parse(lease.workRef)))
@@ -7377,7 +7430,7 @@ test.each([false, true])('native same-ID continuation consumes the retained synt
   expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 30_000)
 
-for (const mode of ['unavailable', 'foreign-catalog', 'lost-ack'] as const) test(`native same-ID continuation refuses ${mode} without a replacement Agent or merge`, async () => {
+for (const mode of ['unavailable', 'foreign-launch', 'lost-ack'] as const) test(`native same-ID continuation refuses ${mode} without a replacement Agent or merge`, async () => {
   const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: mode })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('blocked')

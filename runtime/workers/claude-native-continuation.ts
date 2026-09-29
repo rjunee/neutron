@@ -6,6 +6,8 @@ import { isDeepStrictEqual } from 'node:util'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
+import { readNativeParentLaunchEvidence, type NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
+import { isProcessIdentity, readProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
 import { claudeComposerEmpty } from './claude-composer.ts'
 import { claudeChildQuotaEvent } from './claude-child-rate-limit.ts'
 import { SUBAGENT_CONTINUATION_TOOL_NAME } from './claude-tool-contract.ts'
@@ -31,14 +33,14 @@ interface Preparation {
 export type ClaudeContinuationOutcome = { kind: 'result'; outcome: BoundedWorkOutcome }
   | { kind: 'not-eligible' }
   | { kind: 'submitted'; evidence: 'terminal-acknowledgement' | 'exact-tool-invocation' }
-  | { kind: 'unknown'; reason: 'tool-unavailable' | 'catalog-unknown' | 'identity-unknown' | 'submission-unknown' | 'budget-expired' }
+  | { kind: 'unknown'; reason: 'tool-unavailable' | 'launch-unknown' | 'identity-unknown' | 'submission-unknown' | 'budget-expired' }
 
 export interface ClaudeContinuationOptions {
   request: BoundedWorkRequest
   receipt: unknown
   authority: { lease: NativeDispatchLease; read(): string | undefined; claim(preparation: string): Promise<boolean> }
   stateDir: string
-  session: Pick<ReplSession, 'sessionId' | 'childGeneration' | 'cwd' | 'child' | 'toolSurface' | 'acquireContinuationTurn' | 'probeNativeToolCatalog' | 'hasChildExited'>
+  session: Pick<ReplSession, 'sessionId' | 'childGeneration' | 'cwd' | 'child' | 'toolSurface' | 'acquireContinuationTurn' | 'hasChildExited'>
   workspace: NativeChildWorkspace
   projectsDir?: string
   deadline: number
@@ -47,6 +49,22 @@ export interface ClaudeContinuationOptions {
 }
 
 const message = (nonce: string) => `Continue the original bounded task with its original request, brief, worktree and result contract. Preserve completed work and write the original result. Continuation receipt: ${nonce}`
+
+/** Launch-input compatibility pin, NOT a served catalog or account witness.
+ * Upgrading this profile requires the same native continuation controls. */
+export const CLAUDE_CONTINUATION_PROFILE = Object.freeze({ version: '2.1.285',
+  sha256: '33dad1ec615a2e08cc78b494f05c110e49916de2c79d78ec8799ebf46b233d29' })
+
+function knownLaunch(launch: NativeParentLaunchEvidence | undefined, sessionId: string, generation: string, projectId: string | null): boolean {
+  if (!launch || launch.version !== 1 || launch.sessionId !== sessionId || launch.childGeneration !== generation
+    || !projectId || launch.projectId !== projectId || launch.executable?.version !== CLAUDE_CONTINUATION_PROFILE.version
+    || launch.executable.sha256 !== CLAUDE_CONTINUATION_PROFILE.sha256 || !launch.executable.realPath
+    || !Array.isArray(launch.argv) || typeof launch.argv[0] !== 'string' || !launch.argv[0] || !Array.isArray(launch.tools)) return false
+  const grants = launch.argv.flatMap((arg, index) => arg === '--tools' ? [launch.argv[index + 1]] : [])
+  const sessions = launch.argv.flatMap((arg, index) => arg === '--session-id' || arg === '--resume' ? [launch.argv[index + 1]] : [])
+  return grants.length === 1 && typeof grants[0] === 'string' && isDeepStrictEqual(grants[0].split(','), launch.tools)
+    && sessions.length === 1 && sessions[0] === sessionId && launch.tools.includes('Agent') && launch.tools.includes(SUBAGENT_CONTINUATION_TOOL_NAME)
+}
 
 /** Results can be worker-written: a FIFO, link or changing snapshot is unknown. */
 export async function readClaudeContinuationResult(options: Pick<ClaudeContinuationOptions, 'request' | 'decodeTrailer'>): Promise<ClaudeContinuationOutcome | undefined> {
@@ -114,13 +132,19 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
     }
     const quota = await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request)
     if (!quota) return { kind: 'not-eligible' }
-    const catalog = await session.probeNativeToolCatalog?.()
     const arrived = await result()
     if (arrived) return arrived
-    if (!catalog || catalog.status !== 'observed' || catalog.source !== 'native-provider-catalog'
-      || catalog.sessionId !== session.sessionId || catalog.childGeneration !== session.childGeneration) return unknown('catalog-unknown')
-    if (!catalog.names.includes(SUBAGENT_CONTINUATION_TOOL_NAME)
-      || !session.toolSurface.split(',').includes(SUBAGENT_CONTINUATION_TOOL_NAME)) return unknown('tool-unavailable')
+    if (!session.toolSurface.split(',').includes(SUBAGENT_CONTINUATION_TOOL_NAME)) return unknown('tool-unavailable')
+    const parent = receipt.body.parent!
+    if (!knownLaunch(parent.launch, parent.sessionId, parent.childGeneration, authority.lease.scope.projectId)) return unknown('launch-unknown')
+    const currentParentKnown = () => {
+      const currentLaunch = readNativeParentLaunchEvidence(session)
+      return session.toolSurface.split(',').includes(SUBAGENT_CONTINUATION_TOOL_NAME) && (currentLaunch
+        ? knownLaunch(currentLaunch, session.sessionId, session.childGeneration, authority.lease.scope.projectId)
+        : parent.pid === session.child.pid && isProcessIdentity(parent.processIdentity)
+          && isDeepStrictEqual(readProcessIdentity(session.child.pid), parent.processIdentity))
+    }
+    if (!currentParentKnown()) return unknown('launch-unknown')
     if (!session.child.submitLine || expired()) return unknown('budget-expired')
     // Native workspace authorization passes only this admitted child through the
     // session's serialization. Recheck after queue acquisition and before input.
@@ -131,6 +155,7 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
       if (completed) return completed
       if (!ownsNativeChildWorkspace(options.workspace, session, request) || !nativeChildContinuationCensusKnown(options.workspace)
         || !isDeepStrictEqual(await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request), quota)) return unknown('identity-unknown')
+      if (!currentParentKnown()) return unknown('launch-unknown')
       const boundary = await readBoundary(transcript)
       if (!boundary) return unknown('submission-unknown')
       const nonce = randomUUID()
@@ -139,7 +164,7 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
         sessionId: session.sessionId, childGeneration: session.childGeneration, agentId, quota, nonce, args, boundary }
       const line = `Invoke ${SUBAGENT_CONTINUATION_TOOL_NAME} exactly once with these JSON arguments, then end this parent turn: ${JSON.stringify(args)}`
       const before = async () => {
-        if (expired()) throw new Error('Continuation budget expired')
+        if (expired() || !currentParentKnown()) throw new Error('Continuation budget or parent identity unavailable')
         if (session.child.paneHandle !== undefined && (!session.child.readScreen || !claudeComposerEmpty(await session.child.readScreen()))) throw new Error('Composer unavailable')
         // Commit before Enter. Failure, timeout or restart never refunds this claim.
         if (expired() || !await authority.claim(JSON.stringify(preparation)) || expired()) throw new Error('Continuation already claimed, fenced or expired')

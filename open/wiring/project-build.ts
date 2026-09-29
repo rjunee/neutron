@@ -16,6 +16,7 @@ import { workContextPath } from '@neutronai/trident/production-host-effects.ts'
 import { isDeepStrictEqual } from 'node:util'
 import { createClaudeNativeDispatchReceipt, readClaudeNativeDispatchReceipt, verifyNativeDispatchChildBound, type NativeDispatchAuthority, type SignedNativeDispatchRecord, type NativeDispatchEvidence } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
+import { readNativeParentLaunchEvidence } from '@neutronai/runtime/adapters/claude-code/persistent/native-parent-launch-evidence.ts'
 import { admitNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest, ownsNativeChildWorkspace, nativeChildCensusKnown, type NativeChildWorkspace } from '@neutronai/runtime/workers/native-child-workspace.ts'
 import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
@@ -513,8 +514,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     if (!session || session.hasChildExited()) return { kind: 'unknown', detail: 'Project conversation child is unavailable' }
     // Restricted launches do not attest the edit/run grants required by this bridge.
     if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
+    const launch = readNativeParentLaunchEvidence(session)
     evidence({ kind: 'parent-bound', parent: { sessionId: session.sessionId, childGeneration: session.childGeneration,
-      pid: session.child.pid, processIdentity: readProcessIdentity(session.child.pid) ?? null } })
+      pid: session.child.pid, processIdentity: readProcessIdentity(session.child.pid) ?? null, ...(launch ? { launch } : {}) } })
     const transcript = sessionJsonlPath(session.sessionId, session.cwd, resolveTranscriptProjectsDir(options))
     const observer = JSON.stringify({ request: turn.request, session: session.sessionId,
       directory: join(transcript.slice(0, -'.jsonl'.length), 'subagents') })
@@ -760,7 +762,11 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       const deadline = Date.now() + args[0].budget.wall_ms
       const stopped = AbortSignal.any([args[2], AbortSignal.timeout(Math.max(1, args[0].budget.wall_ms))])
       const continued = await continuation(args[0], stopped, deadline)
-      const outcome = continued && continued !== 'submitted' ? continued : await runner.recover!(args[0], args[1], stopped)
+      // Continuation uncertainty forbids another input, not passive observation.
+      // Missing parents, preconditions and even a spent lost-ack claim must not
+      // suppress the original runner's result polling during this recovery.
+      const outcome = continued && continued !== 'submitted' && continued.kind !== 'unknown'
+        ? continued : await runner.recover!(args[0], args[1], stopped)
       if (outcome.kind === 'completed' || outcome.kind === 'blocked') await releaseValidatedChild(args[0])
       return outcome
     } } : {}) }

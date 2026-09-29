@@ -14,12 +14,3 @@
  * Gateway depends on runtime and never the reverse, which is why this lives here. */
 export const SUBAGENT_TOOL_NAME = 'Agent'
 export const SUBAGENT_CONTINUATION_TOOL_NAME = 'SendMessage'
-
-/** A host probe of the provider's actual catalog, never argv or model prose. */
-export type ClaudeNativeToolCatalog = { status: 'unknown'; reason: string } | {
-  status: 'observed'
-  source: 'native-provider-catalog'
-  sessionId: string
-  childGeneration: string
-  names: readonly string[]
-}
