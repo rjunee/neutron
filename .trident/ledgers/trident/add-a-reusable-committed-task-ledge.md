@@ -1,0 +1,3 @@
+- [x] T1: strict ledger decoder + summary — tests/fixtures/trident-ledger-delta/decode.ts, decode.test.ts (typed decodeLedger/summarizeLedger, every rejection, immutability)
+- [ ] T2: exact single-completion comparator — compare.ts, compare.test.ts consuming T1 types (only the first unchecked task flips; skip/no-op/reversal/relabel/insert/remove/reorder rejected; mutants killed)
+- [ ] T3: Bun CLI + real E2E consumer — cli.ts, cli.test.ts (spawned), decode captured strategy_plan and the recovered Git ledger in the same-run task-sequence crash test, as-built shard docs/as-built/trident-ledger-delta-fixture.md
