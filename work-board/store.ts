@@ -66,6 +66,8 @@ export type WorkBoardTaskType = 'build' | 'research'
 
 /** Public, fully-typed board item. */
 export interface WorkBoardItem {
+  /** Durable recovery admission refusal, independent of any replacement run. */
+  recovery_refusal?: string | null
   /** Terminal observations survive replacement of the current run binding. */
   attempts?: WorkBoardTerminalAttempt[]
   execution_strategy?: 'single' | 'task_sequence' | null
@@ -160,6 +162,13 @@ export interface WorkBoardTerminalAttempt {
   pr: number | null
   pr_url: string | null
   recorded_at: string
+}
+
+/** Identity observed before checking recovery evidence. Never a replacement source. */
+export interface WorkBoardRecoveryRefusalTarget {
+  linked_run_id: string | null
+  status: 'failed' | 'blocked' | 'upcoming'
+  updated_at: string
 }
 
 /**
@@ -306,7 +315,7 @@ const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
   'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
   'blocked_by, declared_surfaces, ' +
-  'pr, pr_url, task_iteration, max_task_iterations, repo_name, task_total, execution_strategy, strategy_rationale, strategy_plan, strategy_source'
+  'pr, pr_url, task_iteration, max_task_iterations, repo_name, task_total, execution_strategy, strategy_rationale, strategy_plan, strategy_source, recovery_refusal'
 
 /** One `?` per column in {@link COLS}, DERIVED — a hand-counted placeholder list is how
  *  the rebase produced `SQLite query expected 14 values, received 16`. */
@@ -315,6 +324,7 @@ const COL_PLACEHOLDERS = COLS.split(',')
   .join(', ')
 
 interface WorkBoardItemDbRow {
+  recovery_refusal: string | null
   execution_strategy: 'single' | 'task_sequence' | null
   strategy_rationale: string | null
   strategy_plan: string | null
@@ -563,6 +573,7 @@ function defaultUlid(): string {
 
 function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
   return {
+    recovery_refusal: row.recovery_refusal,
     repo_name: row.repo_name,
     id: row.id,
     project_slug: row.project_slug,
@@ -764,6 +775,7 @@ export class WorkBoardStore {
     const declared_surfaces = validateDeclaredSurfaces(input.declared_surfaces ?? [])
 
     const item: WorkBoardItem = {
+      recovery_refusal: null,
       repo_name: input.repo_name ?? null,
       id,
       project_slug,
@@ -833,6 +845,7 @@ export class WorkBoardStore {
           item.strategy_rationale ?? null,
           item.strategy_plan ?? null,
           item.strategy_source ?? null,
+          item.recovery_refusal ?? null,
         ],
       )
     })
@@ -1293,6 +1306,37 @@ export class WorkBoardStore {
     this.emitChange(project_slug)
   }
 
+  /** Record a recovery refusal only against the card identity that was checked.
+   * A refused admission creates no run, so its reason belongs to the card. The
+   * current binding (possibly newer than a historical recovery source) stays
+   * intact. Ordinary create/patch input cannot write this protected field. */
+  async recordRecoveryRefusal(
+    project_slug: string,
+    id: string,
+    expected: WorkBoardRecoveryRefusalTarget,
+    reason: string,
+  ): Promise<boolean> {
+    const text = reason.replace(/\s+/g, ' ').trim().slice(0, 2048)
+    if (!text) throw new WorkBoardValidationError('invalid_recovery_refusal', 'Recovery refusal must have a reason')
+    const recorded = await this.db.transaction(async (tx): Promise<boolean> => {
+      const current = this.get(project_slug, id)
+      if (current === null || !['failed', 'blocked', 'upcoming'].includes(expected.status) ||
+          current.status !== expected.status || current.linked_run_id !== expected.linked_run_id ||
+          current.updated_at !== expected.updated_at || current.inline_active ||
+          (current.linked_run_id !== null && this.isRunLive?.(current.linked_run_id))) return false
+      const result = tx.runSync(
+        `UPDATE work_board_items SET status = 'blocked', inline_active = 0,
+           recovery_refusal = ?, updated_at = ?
+           WHERE project_slug = ? AND id = ? AND status = ?
+             AND linked_run_id IS ? AND updated_at = ?`,
+        [text, this.now(), project_slug, id, expected.status, expected.linked_run_id, expected.updated_at],
+      )
+      return result.changes === 1
+    })
+    if (recorded) this.emitChange(project_slug)
+    return recorded
+  }
+
   /** Clear a bound trident run — but ONLY if `run_id` is still the run bound to
    *  this item. Two concurrent dispatches can bind the same item in turn (the
    *  later `attachRun` supersedes the earlier `linked_run_id`); when the earlier
@@ -1352,6 +1396,9 @@ export class WorkBoardStore {
         'pr_url = NULL',
       ]
       const params: (string | number | null)[] = [run_id]
+      // Only a genuinely new admitted binding supersedes its refusal. Repeating
+      // attachment of the same run cannot erase the reason for refusing recovery.
+      if (current.linked_run_id !== run_id) sets.push('recovery_refusal = NULL')
       if (current.status === 'done') {
         // Re-open OFF done: clear the datestamp + restore the prior ordinal.
         sets.push('completed_at = NULL')
