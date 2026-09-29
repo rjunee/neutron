@@ -5,7 +5,7 @@ import type {
 } from './project-admission-store.ts';
 import type { DispatchAdmission } from '@neutronai/trident/dispatch-admission.ts';
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts';
-import { createNativeDispatchSigner, verifyNativeDispatchNotSubmitted,
+import { createNativeDispatchSigner, verifyNativeDispatchNotSubmitted, verifyNativeDispatchChildBound,
   type NativeDispatchAuthority, type NativeDispatchLease } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts';
 
 /** A participating producer's admission. `release` binds the exact lease
@@ -43,6 +43,12 @@ export interface NativeChildAdmission {
   releaseUnsubmitted?(request: BoundedWorkRequest, receipt: unknown): Promise<boolean>
   /** Exact-scope census. Unreadable identities throw; never infer an empty scope. */
   pending?(): readonly { runId: string; stepId: string; generation: number }[]
+  /** Authenticated original child only; continuation never acquires another lease. */
+  continuation?(request: BoundedWorkRequest, receipt: unknown): {
+    lease: NativeDispatchLease
+    read(): string | undefined
+    claim(preparation: string): Promise<boolean>
+  } | undefined
 }
 
 export interface ProjectAdmissionOptions {
@@ -175,6 +181,16 @@ export class ProjectAdmission {
    */
   forNativeChild(projectId: string | null): NativeChildAdmission {
     return {
+      continuation: (request, receipt) => {
+        const rows = this.listLeases('liveChild').filter(row => row.scope.projectId === projectId
+          && row.workRef === JSON.stringify([request.run_id, request.step_id]));
+        if (rows.length !== 1) return undefined;
+        const row = rows[0]!;
+        const lease = { ...row, reason: 'liveChild' as const };
+        if (!verifyNativeDispatchChildBound(receipt, request, lease)) return undefined;
+        return { lease, read: () => this.store.readNativeContinuation(row),
+          claim: preparation => this.store.claimNativeContinuation(row, preparation) };
+      },
       dispatchAuthority: (lease, request) => {
         const row = this.listLeases('liveChild').find(row => row.token === lease.token);
         if (!row || row.scope.ownerHandle !== lease.scope.ownerHandle || row.scope.projectId !== projectId

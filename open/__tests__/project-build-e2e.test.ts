@@ -1016,6 +1016,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
+  nativeContinuation?: 'available' | 'unavailable' | 'foreign-catalog' | 'lost-ack'
   verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
   reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
@@ -1234,8 +1235,23 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   fixtureCleanup(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   const worker = literalWorker(world)
   const projectsDir = join(dir, 'claude-projects')
+  const nativeInputs: string[] = []
+  let quotaDispatch = ''
   const session = { sessionId: 'e2e-session', childGeneration: 'e2e-generation', plannerRole: PLANNER_ROLE, authFingerprint: 'fixture-spawned-credential', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: dir, hasChildExited: () => false,
+    probeNativeToolCatalog: options.nativeContinuation ? async () => ({ status: 'observed' as const, source: 'native-provider-catalog' as const,
+      sessionId: options.nativeContinuation === 'foreign-catalog' ? 'other-session' : 'e2e-session', childGeneration: 'e2e-generation',
+      names: options.nativeContinuation === 'unavailable' ? ['Agent'] : ['Agent', 'SendMessage'] }) : undefined,
     child: { pid: process.pid, submitLine: async (line: string) => {
+      nativeInputs.push(line)
+      if (line.startsWith('Invoke SendMessage exactly once')) {
+        const args = JSON.parse(line.slice(line.indexOf('{')))
+        expect(args.to).toBe('quota')
+        const transcript = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session.jsonl')
+        await appendFile(transcript, JSON.stringify({ sessionId: 'e2e-session', type: 'assistant', message: { role: 'assistant',
+          content: [{ type: 'tool_use', id: 'continuation-tool', name: 'SendMessage', input: args }] } }) + '\n')
+        if (options.nativeContinuation === 'lost-ack') throw new Error('Lost continuation acknowledgement')
+        return worker(quotaDispatch)
+      }
       const spec = JSON.parse(line.slice(line.indexOf('{')))
       const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
       const requestLine = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
@@ -1261,6 +1277,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       // The provider owns this transcript envelope. No result file is written.
       const directory = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session', 'subagents')
       await mkdir(directory, { recursive: true })
+      await writeFile(join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session.jsonl'), '')
+      quotaDispatch = line
       await writeFile(join(directory, 'agent-quota.meta.json'), JSON.stringify({ description: args.description, toolUseId: 'tool-quota' }))
       const identity = { agentId: 'quota', sessionId: 'e2e-session', isSidechain: true }
       await writeFile(join(directory, 'agent-quota.jsonl'), [
@@ -1269,7 +1287,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
           isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-request' },
       ].map(row => JSON.stringify(row)).join('\n') + '\n')
       world.dispatches.push({ role: request.role, step_id: request.step_id, schema: request.result.schema, wrote: [] })
-    } }, acquireTurn: async () => () => {} }
+    } }, acquireTurn: async () => () => {}, acquireContinuationTurn: async () => () => {} }
 
   let registeredSession: typeof session | ReplSession = session
   if (options.reviewChild || options.nativeChild) {
@@ -1372,7 +1390,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   fixtureTimings.push(timing)
 
   return { dir, repo, origin, baseSha, db, store, row, input, context, prepare, github, commands, world,
-    register, key, codexCalls, admission, session: registeredSession }
+    register, key, codexCalls, admission, session: registeredSession, nativeInputs }
 }
 
 test('native planner consumes its closed host capability while builder retains candidate validation', async () => {
@@ -7312,7 +7330,7 @@ test('a typed subscription quota-limited synthesis stops without quotaLimits enr
   const f = await fixture({ rateLimitedSynthesis: true })
   const outcome = await drive(f)
   expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review', recipient: 'orchestrator',
-    on: 'infra-only: Review synthesis unavailable: Review seat synthesis: Claude child stopped at the provider rate limit.' })
+    on: expect.stringContaining('catalog-unknown') })
   expect(dispatchRoles(f.world)).toEqual(['plan', 'build', 'review', 'review', 'synthesis'])
   expect(f.world.dispatches.find(call => call.role === 'synthesis')?.wrote).toEqual([])
   expect(f.admission.listLeases('liveChild').map(lease => JSON.parse(lease.workRef)))
@@ -7321,6 +7339,28 @@ test('a typed subscription quota-limited synthesis stops without quotaLimits enr
   expect(f.github.prs[0]!.state).toBe('OPEN')
   const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
   expect(originMain.stdout).toBe(f.baseSha)
+}, 30_000)
+
+test('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates', async () => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available' })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(1)
+  expect(f.nativeInputs.filter(line => line.includes('synthesis:'))).toHaveLength(1)
+  expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(1)
+  expect(f.admission.listLeases('liveChild')).toHaveLength(0)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 30_000)
+
+for (const mode of ['unavailable', 'foreign-catalog', 'lost-ack'] as const) test(`native same-ID continuation refuses ${mode} without a replacement Agent or merge`, async () => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: mode })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('blocked')
+  expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(mode === 'lost-ack' ? 1 : 0)
+  expect(f.nativeInputs.filter(line => line.includes('synthesis:'))).toHaveLength(1)
+  expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(mode === 'lost-ack' ? 1 : 0)
+  expect(f.admission.listLeases('liveChild')).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 30_000)
 
 test('a design-gap escalation re-plans and rebuilds instead of dispatching a fix', async () => {

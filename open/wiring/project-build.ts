@@ -9,6 +9,7 @@ import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
+import { continueClaudeNativeChild, readClaudeContinuationResult } from '@neutronai/runtime/workers/claude-native-continuation.ts'
 import { bindPlannerWork, releasePlannerWork, PLANNER_ROLE, requiresPlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
 import { readArmedTrailerReservation } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { workContextPath } from '@neutronai/trident/production-host-effects.ts'
@@ -675,8 +676,60 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // Recovery uses the same request identity against the existing durable authority.
   if (context.provider === 'anthropic' && substrate.inRepl) {
     const runner = substrate.inRepl
+    const continuation = async (request: Parameters<typeof runner.run>[0], stopped: AbortSignal, deadline: number) => {
+      if (request.run_id !== run.id) return { kind: 'unknown' as const, detail: 'Native continuation request belongs to another host run.' }
+      const receipt = readClaudeNativeDispatchReceipt(state, request)
+      const authority = context.nativeChildAdmission.continuation?.(request, receipt)
+      if (!authority) return undefined
+      // Harvest before requiring a live parent or reconstructing a workspace.
+      // A completed original result survives both gateway and parent replacement.
+      const reservationKey = createHash('sha256').update(JSON.stringify([request.run_id, request.step_id])).digest('hex')
+      const held = await readArmedTrailerReservation(join(state, `claude-step-${reservationKey}.json`), JSON.stringify(request), { signal: stopped, deadline })
+      if (held.kind !== 'resume') return { kind: 'unknown' as const, detail: 'Native continuation original reservation is unavailable.' }
+      const harvested = await readClaudeContinuationResult({ request, decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, trailer) })
+      if (harvested?.kind === 'result') return harvested.outcome
+      if (harvested) return { kind: 'unknown' as const, detail: 'Native continuation original result is unreadable.' }
+      const candidates = liveProjectSessions(context.projectId)
+      if (candidates.length !== 1) return { kind: 'unknown' as const, detail: 'Native continuation parent is missing or ambiguous.' }
+      const [key, options] = candidates[0]!
+      const pending = pool.get(key)
+      if (!pending || Bun.peek.status(pending) !== 'fulfilled') return { kind: 'unknown' as const, detail: 'Native continuation parent is unavailable.' }
+      const session = await pending
+      if (!session || session.hasChildExited() || options.skip_permissions !== true || options.restricted || options.permissions
+        || (receipt as SignedNativeDispatchRecord).body.parent?.sessionId !== session.sessionId) return { kind: 'unknown' as const, detail: 'Native continuation parent identity is unavailable.' }
+      let workspace = nativeWorkspaces.get(request.step_id)
+      if (!workspace || !ownsNativeChildWorkspace(workspace, session, request)) {
+        if (!context.nativeChildAdmission.pending) return undefined
+        try {
+          workspace = await admitNativeChildWorkspace({ session, request, runId: run.id, worktree: run.worktree,
+            branch: run.branch, generation: authority.lease.generation, pending: () => context.nativeChildAdmission.pending!(),
+            git: async args => {
+              if (stopped.aborted || Date.now() >= deadline) throw new Error('Continuation budget expired')
+              const result = await context.runHost(['git', '-C', run.worktree, ...args], run.worktree, undefined, Math.max(1, deadline - Date.now()))
+              if (!result.ok || result.timed_out) throw new Error('Continuation worktree unknown')
+              return result.stdout.trim()
+            } })
+          nativeWorkspaces.set(request.step_id, workspace)
+        } catch { return { kind: 'unknown' as const, detail: 'Native continuation workspace identity is unavailable.' } }
+      }
+      const observed = await continueClaudeNativeChild({ request, receipt, authority, stateDir: state, session, workspace,
+        projectsDir: resolveTranscriptProjectsDir(options), deadline, signal: stopped,
+        decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, trailer) })
+      if (observed.kind === 'result') return observed.outcome
+      if (observed.kind === 'unknown') return { kind: 'unknown' as const, detail: `Native continuation ${observed.reason}; original child ownership retained.` }
+      if (observed.kind === 'submitted') return 'submitted' as const
+      return undefined
+    }
     const finish: typeof runner.run = async (...args) => {
-      const outcome = await runner.run(...args)
+      const deadline = Date.now() + args[0].budget.wall_ms
+      const stopped = AbortSignal.any([args[2], AbortSignal.timeout(Math.max(1, args[0].budget.wall_ms))])
+      let outcome = await runner.run(...args)
+      if (outcome.kind === 'blocked' || outcome.kind === 'unknown') {
+        const continued = await continuation(args[0], stopped, deadline)
+        if (continued === 'submitted' && runner.recover) outcome = await runner.recover(args[0], args[1], stopped)
+        else if (continued && continued !== 'submitted') outcome = outcome.kind === 'blocked' && continued.kind === 'unknown'
+          ? { kind: 'blocked', on: `${outcome.on} ${continued.detail}` } : continued
+      }
       if (outcome.kind === 'completed' || outcome.kind === 'blocked') await releaseValidatedChild(args[0])
       return outcome
     }
@@ -698,12 +751,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       } catch { /* Missing evidence or failed durable release preserves ownership. */ }
     }
     substrate.inRepl = { ...runner, run: finish, ...(runner.recover ? { recover: async (...args: Parameters<NonNullable<typeof runner.recover>>) => {
+      if (args[0].run_id !== run.id || args[1] !== 'in-repl' || !runner.supports(args[0].role, args[1]).ok) return runner.recover!(...args)
       try {
         if (args[0].run_id === run.id && await context.nativeChildAdmission.releaseUnsubmitted?.(args[0], readClaudeNativeDispatchReceipt(state, args[0]))) {
           return { kind: 'failed' as const, class: 'killed' as const, detail: 'Original native dispatch actor durably refused before submitting input.' }
         }
       } catch { return { kind: 'unknown' as const, detail: 'Original native dispatch lease reconciliation is unavailable.' } }
-      const outcome = await runner.recover!(...args)
+      const deadline = Date.now() + args[0].budget.wall_ms
+      const stopped = AbortSignal.any([args[2], AbortSignal.timeout(Math.max(1, args[0].budget.wall_ms))])
+      const continued = await continuation(args[0], stopped, deadline)
+      const outcome = continued && continued !== 'submitted' ? continued : await runner.recover!(args[0], args[1], stopped)
       if (outcome.kind === 'completed' || outcome.kind === 'blocked') await releaseValidatedChild(args[0])
       return outcome
     } } : {}) }

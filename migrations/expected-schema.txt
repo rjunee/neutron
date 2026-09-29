@@ -523,6 +523,12 @@ CREATE TABLE claude_mcp_handler_generations (
   covered INTEGER NOT NULL CHECK (covered IN (0, 1))
 )
 
+[table] claude_native_continuations (tbl=claude_native_continuations)
+CREATE TABLE claude_native_continuations (
+  lease_token TEXT PRIMARY KEY,
+  preparation TEXT NOT NULL
+)
+
 [table] code_ritual_runs (tbl=code_ritual_runs)
 CREATE TABLE code_ritual_runs (
     -- Minted per FIRE ATTEMPT (a UUID) — NOT the subagent run id: a validation

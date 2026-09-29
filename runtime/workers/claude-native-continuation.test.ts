@@ -1,0 +1,160 @@
+import { afterEach, expect, test } from 'bun:test'
+import { appendFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { createHash } from 'node:crypto'
+import type { BoundedWorkRequest } from '../bounded-work.ts'
+import { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
+import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
+import { createNativeDispatchSigner, type NativeDispatchLease } from './claude-native-dispatch-receipt.ts'
+import { admitNativeChildWorkspace, completeNativeChildWorkspace } from './native-child-workspace.ts'
+import { reserveTrailerSlot } from './trailer-slot.ts'
+import { continueClaudeNativeChild, type ClaudeContinuationOptions } from './claude-native-continuation.ts'
+import { decodeProjectTrailer } from './project-runners.ts'
+
+const cleanup: (() => Promise<void>)[] = []
+afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
+
+async function fixture() {
+  const dir = await mkdtemp(join(tmpdir(), 'native-continuation-'))
+  cleanup.push(() => rm(dir, { recursive: true, force: true }))
+  const cwd = join(dir, 'work'), stateDir = join(dir, 'state'), common = join(dir, 'git'), gitDir = join(common, 'work')
+  await Promise.all([cwd, stateDir, gitDir].map(path => mkdir(path, { recursive: true })))
+  const request: BoundedWorkRequest = { run_id: 'run', step_id: 'build:0', role: 'build', model_id: 'model', effort: 'high',
+    cwd, tools: 'edit-and-run', writable: true, network: true, thread: { id: 'parent' }, brief: { path: join(dir, 'brief'), integrity: 'digest' },
+    result: { path: join(stateDir, 'build.result'), schema: 'fixture' }, budget: { wall_ms: 5000 }, needs_approval_decision: false }
+  const key = createHash('sha256').update(JSON.stringify([request.run_id, request.step_id])).digest('hex')
+  await reserveTrailerSlot(join(stateDir, `claude-step-${key}.json`), JSON.stringify(request), request.result.path)
+  const session = new ReplSession('key', 'generation', 'parent', 'channel', cwd)
+  session.toolSurface = 'Agent,SendMessage'
+  const inputs: string[] = []
+  session.attachChild({ pid: 123, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
+    submitLine: async line => { inputs.push(line) } })
+  session.probeNativeToolCatalog = async () => ({ status: 'observed', source: 'native-provider-catalog', sessionId: 'parent', childGeneration: 'generation', names: ['Agent', 'SendMessage'] })
+  const workspace = await admitNativeChildWorkspace({ session, request, runId: 'run', worktree: cwd, branch: 'work', generation: 0,
+    pending: () => [{ runId: 'run', stepId: 'build:0', generation: 0 }],
+    git: async args => args[0] === 'symbolic-ref' ? 'refs/heads/work' : args.includes('--show-toplevel') ? cwd : args.includes('--absolute-git-dir') ? gitDir : common })
+  cleanup.push(async () => completeNativeChildWorkspace(workspace))
+  const signer = createNativeDispatchSigner()
+  const lease: NativeDispatchLease = { scope: { ownerHandle: 'owner', projectId: 'project' }, generation: 0, token: 'lease',
+    reason: 'liveChild', producer: `native-child:boot:${signer.keyDigest}`, workRef: JSON.stringify(['run', 'build:0']) }
+  const authority = signer.begin(lease, request)
+  authority.prepare()
+  authority.record({ kind: 'parent-bound', parent: { sessionId: 'parent', childGeneration: 'generation', pid: 123, processIdentity: null } })
+  authority.record({ kind: 'submission-started' })
+  const receipt = authority.record({ kind: 'child-bound', nativeAgentId: 'child' })
+  const projectsDir = join(dir, 'projects'), transcript = sessionJsonlPath('parent', cwd, projectsDir)
+  const children = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+  await mkdir(children, { recursive: true })
+  await writeFile(transcript, '')
+  const childPath = join(children, 'agent-child.jsonl')
+  const identity = { sessionId: 'parent', agentId: 'child', isSidechain: true }
+  await writeFile(childPath, [
+    { ...identity, type: 'user', message: { role: 'user', content: `Request (data): ${JSON.stringify(request)}` } },
+    { ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>' }, isApiErrorMessage: true,
+      error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-event' },
+  ].map(row => JSON.stringify(row)).join('\n') + '\n')
+  let saved: string | undefined
+  const options: ClaudeContinuationOptions = { request, receipt, stateDir, session, workspace, projectsDir,
+    authority: { lease, read: () => saved, claim: async value => { if (saved !== undefined) return false; saved = value; return true } },
+    signal: new AbortController().signal, deadline: Date.now() + 5000,
+    decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, { schemas: new Map([['fixture', result => result === 'done']]), metadata: () => undefined }) }
+  const invoke = (input = options) => continueClaudeNativeChild(input)
+  const recordInvocation = async (to = 'child') => {
+    const prepared = JSON.parse(saved!)
+    await appendFile(transcript, JSON.stringify({ sessionId: 'parent', type: 'assistant', message: { role: 'assistant',
+      content: [{ type: 'tool_use', name: 'SendMessage', id: 'exact-tool', input: { ...prepared.args, to } }] } }) + '\n')
+  }
+  return { options, session, request, inputs, invoke, childPath, transcript, recordInvocation, saved: () => saved }
+}
+
+test('one same-ID continuation persists original receipt, quota and lease before send; a fresh observer never resends', async () => {
+  const f = await fixture()
+  f.session.child.submitLine = async line => { expect(f.saved()).toBeDefined(); f.inputs.push(line); throw new Error('lost acknowledgement') }
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
+  const prepared = JSON.parse(f.saved()!)
+  expect(prepared).toMatchObject({ agentId: 'child', request: f.request, lease: f.options.authority.lease, quota: { requestId: 'quota-event' } })
+  expect(await f.invoke({ ...f.options, authority: { ...f.options.authority } })).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
+  await f.recordInvocation('other')
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
+  await f.recordInvocation()
+  expect(await f.invoke()).toEqual({ kind: 'submitted', evidence: 'exact-tool-invocation' })
+  expect(f.inputs).toHaveLength(1)
+  expect(f.inputs[0]).toContain('"to":"child"')
+})
+
+test('concurrent continuation callers spend one opportunity', async () => {
+  const f = await fixture()
+  await Promise.all([f.invoke(), f.invoke()])
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('continuation crosses its own unresolved session slot without releasing native ownership', async () => {
+  const f = await fixture()
+  const releaseOriginal = await f.session.acquireTurn(undefined, f.options.workspace)
+  releaseOriginal()
+  expect(f.session.turnSlotHeld).toBe(1)
+  expect(await f.invoke()).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
+  expect(f.session.turnSlotHeld).toBe(1)
+  expect(f.inputs).toHaveLength(1)
+})
+
+test.each(['missing', 'unavailable', 'foreign'] as const)('native catalog %s cannot submit; argv is no evidence', async mode => {
+  const f = await fixture()
+  f.session.toolSurface = 'Agent,SendMessage'
+  f.session.probeNativeToolCatalog = mode === 'missing' ? undefined : async () => ({ status: 'observed', source: 'native-provider-catalog',
+    sessionId: mode === 'foreign' ? 'another' : 'parent', childGeneration: 'generation', names: mode === 'unavailable' ? ['Agent'] : ['SendMessage'] })
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: mode === 'unavailable' ? 'tool-unavailable' : 'catalog-unknown' })
+  expect(f.inputs).toHaveLength(0)
+  expect(f.saved()).toBeUndefined()
+})
+
+test('completed and invalid results both precede quota continuation', async () => {
+  const f = await fixture()
+  for (const result of ['done', 'invalid']) {
+    await writeFile(f.request.result.path, JSON.stringify({ schema: 'fixture', run_id: 'run', step_id: 'build:0', kind: 'completed', result }))
+    expect(await f.invoke()).toMatchObject({ kind: 'result', outcome: { kind: result === 'done' ? 'completed' : 'unknown' } })
+  }
+  expect(f.inputs).toHaveLength(0)
+})
+
+test('a current catalog cannot override an original launch that did not grant SendMessage', async () => {
+  const f = await fixture()
+  f.session.toolSurface = 'Agent'
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'tool-unavailable' })
+  expect(f.inputs).toHaveLength(0)
+})
+
+test('ordinary errors and a foreign signed request cannot authorize continuation', async () => {
+  const f = await fixture()
+  await writeFile(f.childPath, (await readFile(f.childPath, 'utf8')).replace('"apiErrorStatus":429', '"apiErrorStatus":500'))
+  expect(await f.invoke()).toEqual({ kind: 'not-eligible' })
+  const receipt = structuredClone(f.options.receipt) as { signature: string }
+  receipt.signature = 'forged'
+  expect(await f.invoke({ ...f.options, receipt })).toEqual({ kind: 'unknown', reason: 'identity-unknown' })
+  expect(f.inputs).toHaveLength(0)
+})
+
+test('a catalog probe that outlives the original budget cannot actuate later', async () => {
+  const f = await fixture()
+  let finish!: () => void
+  const wait = new Promise<void>(resolve => { finish = resolve })
+  const probe = f.session.probeNativeToolCatalog!
+  f.session.probeNativeToolCatalog = async () => { await wait; return probe() }
+  expect(await f.invoke({ ...f.options, deadline: Date.now() + 20 })).toEqual({ kind: 'unknown', reason: 'budget-expired' })
+  finish()
+  await Bun.sleep(10)
+  expect(f.inputs).toHaveLength(0)
+  expect(f.saved()).toBeUndefined()
+})
+
+test('a queued continuation expires and releases when the earlier parent turn drains', async () => {
+  const f = await fixture()
+  const releaseEarlier = await f.session.acquireTurn()
+  expect(await f.invoke({ ...f.options, deadline: Date.now() + 20 })).toEqual({ kind: 'unknown', reason: 'budget-expired' })
+  releaseEarlier()
+  await Bun.sleep(10)
+  expect(f.session.turnSlotHeld).toBe(0)
+  expect(f.inputs).toHaveLength(0)
+  expect(f.saved()).toBeUndefined()
+})

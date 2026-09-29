@@ -182,6 +182,9 @@ export class ReplSession {
    *  whose requested surface differs, so a less-privileged turn (e.g. an import
    *  `tools:[]`) can never reuse a more-privileged warm REPL (Codex-r1-P1). */
   toolSurface = ''
+  /** Optional read-only native-provider catalog probe. Existing/adopted sessions
+   * have no such observation; callers must report UNKNOWN, never infer argv. */
+  probeNativeToolCatalog?: (() => Promise<import('../../../workers/claude-tool-contract.ts').ClaudeNativeToolCatalog>) | undefined
   /** Exact host-owned custom agent definition registered at process launch. */
   plannerRole: string | undefined
   /** P0-1 — whether this REPL was SPAWNED with the native-MCP tool bridge
@@ -526,11 +529,21 @@ export class ReplSession {
 
   private readonly backgroundChildren = new Map<Promise<void>, NativeChildWorkspace | undefined>()
 
+  /** Serializes another parent submission for the same admitted child without
+   * waiting for that child to finish itself. Its durable busy lease stays held. */
+  acquireContinuationTurn(workspace: NativeChildWorkspace): Promise<() => void> {
+    return this.acquireTurnSlot(undefined, workspace, true)
+  }
+
   /** Acquire the per-session write slot and a busy lease. A background dispatcher
    * may yield only after binding its child. Readers can overlap readers; host
    * admitted writers can overlap disjoint admitted writers. Other turns wait.
    * A queued writer owns the queue before waiting, so later readers cannot starve it. */
   async acquireTurn(backgroundDispatch?: (yieldDispatch: () => void) => void, workspace?: NativeChildWorkspace): Promise<() => void> {
+    return this.acquireTurnSlot(backgroundDispatch, workspace, false)
+  }
+
+  private async acquireTurnSlot(backgroundDispatch: ((yieldDispatch: () => void) => void) | undefined, workspace: NativeChildWorkspace | undefined, continuation: boolean): Promise<() => void> {
     let release: () => void = () => {}
     const prev = this.turnTail
     this.turnTail = new Promise<void>((res) => {
@@ -554,7 +567,7 @@ export class ReplSession {
     // An ambiguous child retains its durable lease, not an unfinishable local
     // queue wait. The caller reaches the lease guard and receives a refusal.
     await Promise.all([...this.backgroundChildren].filter(([, prior]) =>
-      !nativeChildWorkspaceAmbiguous(prior) && (!backgroundDispatch || !independentNativeChildren(workspace, prior))).map(([done]) => done))
+      !(continuation && workspace === prior) && !nativeChildWorkspaceAmbiguous(prior) && (!backgroundDispatch || !independentNativeChildren(workspace, prior))).map(([done]) => done))
     let released = false
     let finishReader!: () => void
     const reader = new Promise<void>(resolve => { finishReader = resolve })
@@ -581,7 +594,7 @@ export class ReplSession {
     // A writable child outlives observation timeout, cancellation and lost ack.
     // Only the host's validated completion (also used by recovery) releases it.
     const completion = workspace && nativeChildWorkspaceCompletion(workspace)
-    if (completion) {
+    if (completion && !continuation) {
       fireAndForget('persistent-repl.native-child-completion', completion.then(finish))
       return () => {
         if (yielded || released || ambiguousUnqueued) return

@@ -78,13 +78,23 @@ export function ownsNativeChildWorkspace(admission: NativeChildWorkspace, sessio
 /** Restart/foreign leases have no local proof. A duplicate identity is ambiguous.
  * Such work must be reconciled through its original reservation before dispatch. */
 export function nativeChildCensusKnown(admission: NativeChildWorkspace): boolean {
+  return censusKnown(admission, false)
+}
+
+/** A signed exact-child quota observer may continue its own ambiguous dispatch;
+ * other ambiguous or unknown children still prohibit parent input. */
+export function nativeChildContinuationCensusKnown(admission: NativeChildWorkspace): boolean {
+  return censusKnown(admission, true)
+}
+
+function censusKnown(admission: NativeChildWorkspace, continuation: boolean): boolean {
   const record = records.get(admission)
-  if (!record || record.completed || record.ambiguous) return false
+  if (!record || record.completed || (record.ambiguous && !continuation)) return false
   try {
     const pending = record.pending()
     return pending.filter(row => isDeepStrictEqual(row, record.identity)).length === 1
       && pending.every((row, index) => pending.findIndex(other => isDeepStrictEqual(row, other)) === index
-        && [...sessions.get(record.session) ?? []].some(other => !other.completed && !other.ambiguous && isDeepStrictEqual(other.identity, row)))
+        && [...sessions.get(record.session) ?? []].some(other => !other.completed && (!other.ambiguous || (continuation && other === record)) && isDeepStrictEqual(other.identity, row)))
   } catch { return false }
 }
 

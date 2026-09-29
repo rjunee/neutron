@@ -77,3 +77,34 @@ test('submission intent, lost acknowledgement, wrong request and re-signing all 
   expect(f.admission.listLeases('liveChild')).toHaveLength(1)
   expect(() => f.port.dispatchAuthority!(f.child.lease, { ...request, step_id: 'foreign' })).toThrow('unavailable')
 })
+
+test('native continuation claims once across database connections and retains the original lease', async () => {
+  const f = await fixture()
+  f.authority.record({ kind: 'parent-bound', parent: { sessionId: 'session', childGeneration: 'generation', pid: 42, processIdentity: null } })
+  f.authority.record({ kind: 'submission-started' })
+  const receipt = f.authority.record({ kind: 'child-bound', nativeAgentId: 'child' })
+  const reopened = ProjectDb.open(f.path); cleanup.push(() => reopened.close())
+  const restart = new ProjectAdmission({ db: reopened, ownerHandle: 'owner', bootId: 'restart' })
+  const original = f.port.continuation!(request, receipt)!
+  const recovered = restart.forNativeChild(null).continuation!(request, receipt)!
+  expect(original.read()).toBeUndefined()
+  const claims = await Promise.all([original.claim('original-preparation'), recovered.claim('second-preparation')])
+  expect(claims.filter(Boolean)).toHaveLength(1)
+  expect(original.read()).toBe(recovered.read())
+  expect(await recovered.claim('third-preparation')).toBe(false)
+  expect(restart.listLeases('liveChild')).toHaveLength(1)
+  expect(restart.forNativeChild('general').continuation!(request, receipt)).toBeUndefined()
+  expect(restart.forNativeChild(null).continuation!({ ...request, model_id: 'foreign' }, receipt)).toBeUndefined()
+})
+
+test('native continuation refuses a fence installed after authentication and cannot refund a spent lease', async () => {
+  const f = await fixture()
+  f.authority.record({ kind: 'parent-bound', parent: { sessionId: 'session', childGeneration: 'generation', pid: 42, processIdentity: null } })
+  f.authority.record({ kind: 'submission-started' })
+  const receipt = f.authority.record({ kind: 'child-bound', nativeAgentId: 'child' })
+  const continuation = f.port.continuation!(request, receipt)!
+  await f.admission.maintenance.beginMaintenance(f.admission.scopeFor(null))
+  expect(await continuation.claim('must-not-send')).toBe(false)
+  expect(continuation.read()).toBeUndefined()
+  expect(f.admission.listLeases('liveChild')).toHaveLength(1)
+})
