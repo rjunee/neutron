@@ -31,6 +31,7 @@ import type {
   ReplacementResult,
 } from '@neutronai/runtime/adapters/claude-code/persistent/generation-replacement.ts'
 import { SUBAGENT_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
+import { PLANNER_PROFILE_ID, PLANNER_ROLE } from '@neutronai/runtime/workers/planner-work.ts'
 import type { ProjectAdmission } from './project-admission.ts'
 import type { MaintenanceFence, MaintenancePhase } from './project-admission-store.ts'
 import type { ProjectLivenessCensus } from './project-liveness-census.ts'
@@ -115,6 +116,7 @@ export function attestReplacement(
     reasons.push(`replacement tool surface does not carry ${SUBAGENT_TOOL_NAME}`)
   }
   if (observation.toolBridgeActive !== expected.toolBridge) reasons.push('replacement tool bridge differs from the expected bridge')
+  if (observation.plannerRole !== PLANNER_ROLE) reasons.push('replacement lacks the current registered planner role')
   const row = observation.registry
   if (row === undefined) {
     reasons.push('replacement has no durable registry row')
@@ -123,6 +125,7 @@ export function attestReplacement(
     if (row.admission_generation !== expected.generation) reasons.push('registry row is not stamped with the fence generation')
     if (row.tool_surface !== observation.toolSurface) reasons.push('registry row tool surface disagrees with the live session')
     if (row.tool_bridge !== observation.toolBridgeActive) reasons.push('registry row tool bridge disagrees with the live session')
+    if (row.planner_profile !== PLANNER_PROFILE_ID) reasons.push('registry row lacks the current planner profile')
   }
   return reasons.length === 0 ? { ok: true } : { ok: false, reasons }
 }

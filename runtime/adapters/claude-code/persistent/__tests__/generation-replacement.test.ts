@@ -36,6 +36,8 @@ import { ReplSession } from '../repl-session.ts'
 import { gateFor } from '../spawn.ts'
 import type { PtyChild, PtyHost } from '../pty-host.ts'
 import type { ProcessIdentity } from '../process-identity.ts'
+import { PLANNER_PROFILE_ID, PLANNER_ROLE } from '../../../../workers/planner-work.ts'
+import { getRecord, patchRecord } from '../repl-registry.ts'
 
 const KEY = 'cc-agent-replace owner proj cred'
 const SESSION_ID = 'aaaaaaaa-1237-4000-8000-000000000001'
@@ -204,10 +206,13 @@ describe('observePooledSession', () => {
     const { session } = pooled()
     session.toolSurface = 'Read,Agent'
     session.admissionGeneration = 4
+    session.plannerRole = PLANNER_ROLE
     expect(observePooledSession(KEY)).toMatchObject({
       sessionId: SESSION_ID, childGeneration: 'gen-old', pid: 4242, exited: false, identified: true,
-      admissionGeneration: 4, toolSurface: 'Read,Agent', registry: undefined,
+      admissionGeneration: 4, toolSurface: 'Read,Agent', plannerRole: PLANNER_ROLE, registry: undefined,
     })
+    session.plannerRole = undefined
+    expect(observePooledSession(KEY)?.plannerRole).toBeUndefined()
   })
 })
 
@@ -330,7 +335,12 @@ describe('end to end over the real spawn path', () => {
     expect(after.toolSurface).toBe('Read,Agent')
     expect(after.identified).toBe(true)
     expect(after.exited).toBe(false)
-    expect(after.registry).toEqual({ sessionId: before.sessionId, admission_generation: 9, tool_surface: 'Read,Agent', tool_bridge: after.toolBridgeActive })
+    expect(after.registry).toEqual({ sessionId: before.sessionId, admission_generation: 9, tool_surface: 'Read,Agent', tool_bridge: after.toolBridgeActive, planner_profile: undefined })
+    // The observer reports independently measured runtime and registry evidence;
+    // a persisted profile must never manufacture a role in the live session.
+    patchRecord(options.replRegistryPath!, key, { reuse: { ...getRecord(options.replRegistryPath!, key)!.reuse!, planner_profile: PLANNER_PROFILE_ID } })
+    expect(observePooledSession(key)?.registry?.planner_profile).toBe(PLANNER_PROFILE_ID)
+    expect(observePooledSession(key)?.plannerRole).toBeUndefined()
     expect(requestedProfileFor(key, spec)).toEqual({ toolSurface: 'Read,Agent', toolBridge: after.toolBridgeActive })
     // The replacement RESUMED the conversation rather than starting a new one.
     const last = argvs[argvs.length - 1]!
