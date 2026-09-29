@@ -1,7 +1,7 @@
 ---
 title: Recover an intermediate task checkpoint before reviewing the card
 group: trident
-status: open
+status: done
 priority: P0
 cutover: true
 ---
@@ -93,9 +93,11 @@ or malformed evidence never authorizes adoption of a moved revision.
       `bunx tsc -p trident/tsconfig.json --noEmit`; the Open package check
       `bunx tsc -p open/tsconfig.json --noEmit` is additional.
       verify: `trident/task-sequence-crash-mutation.test.ts`.
-- [ ] The exact reviewed commit is merged and served, then a fresh live acceptance
+- [x] The exact reviewed commit is merged and served, then a fresh live acceptance
       run proves the task sequence reaches merge on that served revision. Record
       the merge/served identities and run evidence under the locked pivot's
       delivery rule (`docs/plans/harness-orchestrator-pivot-2026-09-11.md`, §4).
       Local consuming and mutation tests establish static recovery behavior only;
       they cannot satisfy this live criterion or mark this item done.
+
+Live acceptance: [sequence and publication witness](../as-built/trident-sequence-and-publication-live-acceptance.md).
