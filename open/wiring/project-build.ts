@@ -962,7 +962,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
           const checked = validateTrailer('forge', value?.result?.payload)
           if (checked.ok && checked.value.commitSha === snapshot.head) return checked.value.mutationClaim
         }
-        return null
+        // A validated worker omission is null. Unreadable, stale or foreign
+        // artifacts must not authorize the bounded missing-nomination repair.
+        return undefined
       } },
       reviewSuite: { strategy: input.test_strategy ?? '', scope: 'full-suite',
         // G063 REQUIRES A BUILD/FIX CHECKPOINT FOR THIS REVISION. Stubbed to `null`,

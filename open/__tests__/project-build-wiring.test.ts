@@ -154,7 +154,7 @@ test('option sources preserve pin, selected provider, workflow and unavailable s
   await writeCompleted(options, 'build', JSON.stringify({ result: { head: forge.commitSha, payload: forge } }))
   expect(await options.policy.mutation.readClaim({ head: 'a'.repeat(40), diff: '', pr: null })).toEqual(claim)
   await writeFile(options.workers.build.request.result.path, JSON.stringify({ result: { payload: { mutationClaim: claim } } }))
-  expect(await options.policy.mutation.readClaim({ head: 'a'.repeat(40), diff: '', pr: null })).toBeNull()
+  expect(await options.policy.mutation.readClaim({ head: 'a'.repeat(40), diff: '', pr: null })).toBeUndefined()
   // THE HOST RUNS THE SUITE FOR THE REVISION THE CHECKPOINT DESCRIBES.
   const head = 'a'.repeat(40)
   const suiteForge = { ...forge, testsPassed: false, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base is red too' }
@@ -239,7 +239,7 @@ test('publication, mutation and suite consumers require every completed original
     if (scenario === 'wrong-schema') envelope.schema = 'project-review'
     await writeFile(path, JSON.stringify(scenario === 'missing-envelope-identity' ? { result } : envelope))
     const before = f.commands.length
-    expect(await options.policy.mutation.readClaim(snapshot)).toBeNull()
+    expect(await options.policy.mutation.readClaim(snapshot)).toBeUndefined()
     expect(await options.policy.reviewSuite!.readCheckpoint(snapshot, 1)).toBeNull()
     await expect(options.production.publication(snapshot)).rejects.toThrow('does not match the reviewed head')
     expect(f.commands.slice(before).some(argv => argv[0] === 'bash')).toBe(false)
@@ -270,7 +270,7 @@ test('fix artifact consumers require a fixed completion rather than a built comp
 
   await writeWorkerAttempt(options, 'fix', JSON.stringify({ result }), 'wrong-stage')
   const before = f.commands.length
-  expect(await options.policy.mutation.readClaim(snapshot)).toBeNull()
+  expect(await options.policy.mutation.readClaim(snapshot)).toBeUndefined()
   expect(await options.policy.reviewSuite!.readCheckpoint(snapshot, 1)).toBeNull()
   await expect(options.production.publication(snapshot)).rejects.toThrow('does not match the reviewed head')
   expect(f.commands.slice(before).some(argv => argv[0] === 'bash')).toBe(false)
