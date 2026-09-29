@@ -32,6 +32,7 @@
  */
 
 import type { Capability, JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
+import type { ProjectChatOrchestratorAuthority } from './orchestrator-authority.ts'
 
 export type ApprovalPolicy = 'auto' | 'prompt-user' | 'prompt-admin'
 
@@ -70,6 +71,8 @@ export const PLATFORM_TOOL_PROVENANCE: ToolProvenance = { kind: 'platform' }
 
 /** Per-call context handed to a tool handler at invocation time. */
 export interface ToolCallContext {
+  /** Authenticated host invocation only; never taken from tool arguments. */
+  orchestratorAuthority?: ProjectChatOrchestratorAuthority
   project_slug: string
   /**
    * The ACTIVE project of the composing turn (the project the chat/agent turn

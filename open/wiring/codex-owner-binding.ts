@@ -24,6 +24,7 @@ import { assertOwnerScope, privatePath } from '@neutronai/runtime/adapters/codex
 import { abortAccountHandoff, completeAccountHandoff, prepareAccountHandoff, readGeneralOwnerAuthority } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-account-handoff.ts'
 import { probeCodexAccountViability } from '@neutronai/runtime/adapters/codex-cli/persistent/project-account-probe.ts'
 import type { ProjectWorkspaceLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
+import { dispatchCodexOrchestratorRecovery, type CodexOrchestratorRecoveryTransport } from './codex-orchestrator-recovery.ts'
 
 class CodexWorkRecoveryRequired extends Error {}
 interface BoundedOwnerWork {
@@ -73,6 +74,7 @@ async function refreshOwner(owner: CodexOwnerBootstrap): Promise<void> {
  * Production attaches only to an independently hosted durable native owner.
  */
 export class CodexOwnerBindings {
+  orchestratorRecovery?: CodexOrchestratorRecoveryTransport
   resolveApprovedServers?: (projectId: string | null) => Promise<readonly ResolvedOwnerMcpServer[]>
   /** #1226 — the composition's shared strict host, used for the gateway-side helper-tab
    * placement of a placed launch (never serialized across the helper boundary). */
@@ -162,10 +164,21 @@ export class CodexOwnerBindings {
           await receipt
           const assertTurn = () => {
             signal.throwIfAborted()
-            if (!current() || !turnId || request.params.turnId !== turnId || owner.broker.state().activeTurnId !== turnId
+            if (!current() || !turnId || request.params.threadId !== facts.threadId
+              || request.params.turnId !== turnId || owner.broker.state().activeTurnId !== turnId
               || this.builds.get(options.projectId)?.input || this.decodingBuilds.has(options.projectId)) throw new Error('Owner MCP requires the exact conversational turn')
           }
           assertTurn()
+          const args = request.params.arguments
+          if (args !== null && typeof args === 'object' && 'action' in args && args.action === 'replan_build') {
+            await this.revalidateProject(options.projectId, project)
+            assertTurn()
+            const result = await dispatchCodexOrchestratorRecovery({ request, projectId: options.projectId,
+              sessionId: facts.sessionId, threadId: facts.threadId, generation: facts.bindingRevision,
+              leaseId: clientId, assertCurrent: assertTurn, transport: this.orchestratorRecovery })
+            reply({ success: true, contentItems: [{ type: 'inputText', text: JSON.stringify(result) }] })
+            return
+          }
           if (!mcp) throw new Error('Owner MCP is unavailable on this binding')
           reply(await mcp.handle(request, clientId, assertTurn))
         })(), () => {
