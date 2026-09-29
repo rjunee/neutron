@@ -53,8 +53,8 @@ async function fixture() {
     expected_head: HEAD, expected_base: BASE, published_pr: 7, direction: 'Repair the missing semantic mutation nomination and obtain fresh review.' }
   const facts = { project_scope: 'project', project_id: 'project-id', call_id: 'decision', chat_id: 'chat',
     session_id: 'session', thread_id: 'thread', generation: 'generation', lease_id: 'lease' }
-  const invocation = () => ({ project_id: facts.project_id, call_id: facts.call_id,
-    authority: mintProjectChatOrchestratorAuthority({ facts, toolName: 'work_board_replan_build', args: request, assertCurrent() {} }) })
+  const invocation = (assertCurrent = () => {}) => ({ project_id: facts.project_id, call_id: facts.call_id,
+    authority: mintProjectChatOrchestratorAuthority({ facts, toolName: 'work_board_replan_build', args: request, assertCurrent }) })
   const calls: string[][] = []
   let remoteHead = HEAD
   const deps = { store, board, project_slug: 'project', repo_path: dir, projectAdmission: fixtureDispatchAdmission(db),
@@ -98,6 +98,52 @@ test('same-card terminal history permits only a later headless preparation failu
   await f.board.detachRun('project', later.id, 'failed')
   expect(rejectedRecoverySource(f.store, 'project', f.request).prior.id).toBe(f.prior.id)
   expect((await dispatchOrchestratorRecovery(f.request, f.invocation(), f.deps)).ok).toBe(true)
+})
+
+test('recovery revalidates the exact live owner invocation after remote evidence awaits', async () => {
+  const f = await fixture()
+  let current = true
+  const invocation = f.invocation(() => { if (!current) throw new Error('Owner lease ended') })
+  const result = await dispatchOrchestratorRecovery(f.request, invocation, { ...f.deps,
+    hostRunner: async argv => { const result = await f.deps.hostRunner(argv); current = false; return result } })
+  expect(result.ok).toBe(false)
+  expect(f.store.listNonTerminal()).toHaveLength(0)
+  expect(f.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM code_trident_orchestrator_recoveries')?.count).toBe(0)
+  expect(f.board.get('project', f.card.id)?.status).toBe('blocked')
+})
+
+test('structural authorization clone cannot alter a card or claim a source', async () => {
+  const f = await fixture()
+  const before = f.board.get('project', f.card.id)
+  const proof = f.invocation()
+  const result = await dispatchOrchestratorRecovery(f.request, { ...proof, authority: { ...proof.authority } }, f.deps)
+  expect(result.ok).toBe(false)
+  expect(f.board.get('project', f.card.id)).toEqual(before)
+  expect(f.store.listNonTerminal()).toHaveLength(0)
+})
+
+test('parallel exact recovery decisions admit only one successor and do not overwrite its binding', async () => {
+  const f = await fixture()
+  const results = await Promise.all([dispatchOrchestratorRecovery(f.request, f.invocation(), f.deps),
+    dispatchOrchestratorRecovery(f.request, f.invocation(), f.deps)])
+  expect(results.filter(r => r.ok)).toHaveLength(1)
+  const live = f.store.listNonTerminal()
+  expect(live).toHaveLength(1)
+  expect(f.board.get('project', f.card.id)).toMatchObject({ linked_run_id: live[0]!.id, status: 'in_progress', recovery_refusal: null })
+  expect(f.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM code_trident_orchestrator_recoveries')?.count).toBe(1)
+})
+
+test('a newer substantive same-card attempt vetoes recovery of the older rejected source', async () => {
+  const f = await fixture()
+  const later = await f.store.create({ slug: 'newer', task: TASK, project_slug: 'project',
+    repo_path: f.dir, branch: 'trident/newer', execution_strategy: 'task_sequence' })
+  await f.board.attachRun('project', f.card.id, later.id)
+  await f.store.update(later.id, { phase: 'failed', published_pr: 8 })
+  await f.board.detachRun('project', later.id, 'blocked')
+  const result = await dispatchOrchestratorRecovery(f.request, f.invocation(), f.deps)
+  expect(result).toMatchObject({ ok: false, message: expect.stringContaining('later attempt supersedes') })
+  expect(f.board.get('project', f.card.id)?.linked_run_id).toBe(later.id)
+  expect(f.store.listNonTerminal()).toHaveLength(0)
 })
 
 for (const fault of ['moved-head', 'wrong-event', 'wrong-card', 'wrong-pr', 'exhausted-review', 'exhausted-task'] as const)

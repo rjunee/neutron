@@ -61,6 +61,8 @@ export async function prepareLaunch(
     try {
       const decision = opts.read_orchestrator_recovery?.(run)
       if (!decision || !opts.record_recovery_refusal) throw new Error('Recovery launch lacks durable authorization storage')
+      if (modeState === null && (run.inner_checkpoint === null || run.inner_checkpoint_head !== decision.request.expected_head
+        || run.base_sha !== decision.request.expected_base)) throw new Error('Recovery launch seed lost its exact pins')
       if (modeState === null) await prepareRecoveryBranch(run, decision.request.expected_head, opts.run_host, decision)
       else if (modeState.checkpoint.orchestratorReplan)
         await verifyRecoveryRemote(run, decision.request.expected_head, opts.run_host, decision)
@@ -170,6 +172,15 @@ export async function prepareLaunch(
   // the seed existed: base re-pinned, leftover-branch guard armed, no resume arg
   // threaded to the workflow. Not a failure — there is nothing wrong with the
   // card, only with the shortcut.
+  // An ordinary retry seed is an optimization and may be falsified below. An
+  // explicitly authorized recovery is not: ANY second-probe mismatch, absence
+  // or unreadability must preserve its source/budget and refuse before that arm.
+  if (recoveryEvent && modeState === null && resume_live_head !== recorded) {
+    const reason = 'Orchestrator recovery refused: published source changed or became unreadable during launch; no fresh build was started'
+    await opts.record_recovery_refusal!(run.id, reason)
+    return { run: failedRun(run, reason, true), changed: true, waiting: false,
+      note: `${run.phase} → failed (recovery source refused)` }
+  }
   const never_recovered = (run.crash_recoveries ?? 0) === 0 && (run.infra_retries ?? 0) === 0
   const seeded_resume =
     modeState === null && run.inner_checkpoint !== null && run.workflow_run_id === null && never_recovered

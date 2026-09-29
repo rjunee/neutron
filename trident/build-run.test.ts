@@ -1293,6 +1293,46 @@ test('G040 resume diff is regenerated from pinned OID and empty diff rebuilds', 
   }
 })
 
+for (const verdict of ['approve', 'repeat', 'worse', 'second-replan'] as const)
+test(`authorized rejected-head replan consumes allowance before planning and retains arithmetic (${verdict})`, async () => {
+  const f = modeFixture('single')
+  const checkpoint = f.resume('built', 3, { findings: ['old'], blockingCount: 2 })
+  Object.assign(checkpoint, { replansUsed: 1, previousFindings: ['old'], previousBlockingCount: 2,
+    orchestratorReplan: { direction: 'Replace the defective design' } })
+  f.outcomes.set('run:plan:2', f.completed({ ...f.snapshot, payload: f.plan }))
+  if (verdict !== 'approve') f.decisions.push(verdict === 'second-replan'
+    ? { kind: 're-plan', findings: ['new'], blockingCount: 1, whatIsMissing: 'another design' }
+    : { kind: 'fix', findings: [verdict === 'repeat' ? 'old' : 'new'], blockingCount: verdict === 'worse' ? 3 : 1 })
+  const outcome = await f.run()
+  expect(outcome.kind).toBe(verdict === 'approve' ? 'merged' : 'blocked')
+  expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:2', 'run:build:2'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:3'])
+  expect(f.prepared[0]).toMatchObject({ role: 'plan', planner: 'full', findings: ['Replace the defective design', 'old'] })
+  expect(f.state.checkpoints[0]).toMatchObject({ replansUsed: 1, round: 3,
+    previousReview: { findings: ['old'], blockingCount: 2 }, pending: { phase: 'plan' } })
+  expect(f.state.checkpoints.find(c => c.pending?.phase === 'review')?.orchestratorReplan).toBeUndefined()
+  if (outcome.kind === 'blocked') expect(outcome.on).toContain(verdict === 'second-replan' ? 'already spent'
+    : verdict === 'repeat' ? 'repeated finding' : 'no-progress')
+})
+
+test('authorized replan restart reconciles the original planner without resetting spend or round', async () => {
+  const f = modeFixture('single')
+  Object.assign(f.resume('built', 3, { findings: ['old'], blockingCount: 2 }), {
+    replansUsed: 1, previousFindings: ['old'], previousBlockingCount: 2,
+    orchestratorReplan: { direction: 'Replace the defective design' },
+  })
+  f.outcomes.set('run:plan:2', { kind: 'unknown', detail: 'planner acknowledgment lost' })
+  expect(await f.run()).toMatchObject({ kind: 'unknown', phase: 'plan' })
+  f.state.resume = structuredClone(f.state.checkpoints.at(-1)!)
+  f.runner.calls.length = 0
+  f.input.workers.plan.runner = { ...f.runner, recover: f.runner.run }
+  f.outcomes.set('run:plan:2', f.completed({ ...f.snapshot, payload: f.plan }))
+  expect((await f.run()).kind).toBe('merged')
+  expect(f.runner.calls.map(c => c.step_id)).toEqual(['run:plan:2', 'run:build:2'])
+  expect(f.cross.calls.map(c => c.step_id.replace(/:head:[a-f0-9]+$/, ''))).toEqual(['run:review:3'])
+  expect(f.state.checkpoints.every(c => c.replansUsed === 1 && c.round >= 3)).toBe(true)
+})
+
 test('G041 resume inherits spent rounds and cannot restart exhausted budget', async () => {
   for (const stage of ['fixed', 'rejected'] as const) {
     const f = modeFixture('single'); const checkpoint = f.resume(stage, 10, { findings: ['prior'], blockingCount: 2 })
