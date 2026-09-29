@@ -1,11 +1,11 @@
 ---
 title: Diagnose early and remove measured host test-suite waste
 group: trident
-status: open
+status: done
 priority: P0
 cutover: true
 sections: 4
-criteria: 5
+criteria: 0
 contract_items: 0
 ---
 
@@ -90,14 +90,14 @@ semantics, suite skip, or guard weakening earns acceptance under this item.
 
 ## Acceptance
 
-- [ ] A real loopback bind denial stops the normal host runner before Bun
+- [x] A real loopback bind denial stops the normal host runner before Bun
       discovery or a test lane starts, reports the actionable bind error, and
       exits nonzero. A bindable host closes the probe listener and runs the
       existing discovery and assigned tests; a later test failure still fails
       normally. The two directions are exercised with an actual listener on
       the allowed path and a deterministic denial seam for the forbidden path.
       Verify: `bun test scripts/run-tests-selftest.test.ts scripts/__tests__/run-tests-http-lane.test.ts`.
-- [ ] Open E2E timing identifies the cost of Git, database and transport setup
+- [x] Open E2E timing identifies the cost of Git, database and transport setup
       per fixture across repeated runs. A chosen shared seed demonstrably
       improves the measured path while two sibling fixtures can mutate their
       own branches, refs and files without changing one another, and option
@@ -106,14 +106,14 @@ semantics, suite skip, or guard weakening earns acceptance under this item.
       that decision and no speedup is claimed. Verify: focused repeated
       `bun test open/__tests__/project-build-e2e.test.ts`, with per-phase
       measurements and before/after evidence in the implementation as-built.
-- [ ] A deterministic PGLite assertion failure invokes Bun once and leaves the
+- [x] A deterministic PGLite assertion failure invokes Bun once and leaves the
       lane and runner red, even if unrelated log text mentions WASM. A recognized
       transient boot failure retries within the existing budget and a succeeding
       attempt leaves the lane green. Repeated recognized transient failures stop
       at the exact ceiling and leave the runner red; a mixed failure does not
       retry. Verify attempt counts, final exit and retained diagnostics with
       `bun test scripts/run-tests-selftest.test.ts`.
-- [ ] On a host-selected full-suite round, a completed host receipt with exit
+- [x] On a host-selected full-suite round, a completed host receipt with exit
       zero proves the suite passed. An early socket refusal, exhausted PGLite
       retry, missing or unreadable receipt, or incomplete coverage cannot be
       reported as a pass. A qualifying `failed-preexisting` claim with the
@@ -124,7 +124,7 @@ semantics, suite skip, or guard weakening earns acceptance under this item.
       no-full-suite-receipt semantics. Verify positive and negative siblings in
       `bun test trident/gates/review-suite.test.ts trident/suite-failure.test.ts open/__tests__/project-build-e2e.test.ts`
       and semantic mutations in both directions in the implementation record.
-- [ ] The implementation PR's required full `bash scripts/run-tests.sh` run
+- [x] The implementation PR's required full `bash scripts/run-tests.sh` run
       completes with discovered and executed files matching, all assigned
       shards/lanes accounted for, and CI green. The as-built record distinguishes
       the audit baseline, measured implementation result, and any unproved
