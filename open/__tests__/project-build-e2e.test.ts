@@ -1770,6 +1770,171 @@ test(`authenticated rejected-head recovery refuses ${fault} at admission and lea
   expect(await gitOut(s.f.context.runHost, s.f.origin, ['rev-parse', 'refs/heads/main'])).toBe(s.f.baseSha)
 }, 300_000)
 
+test('remote movement between launch probes cannot falsify an authorized seed into a fresh build', async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const admitted = await s.dispatch()
+  expect(admitted.ok, JSON.stringify(admitted)).toBe(true)
+  if (!admitted.ok) return
+  const before = s.f.world.dispatches.length
+  const host = s.f.context.runHost
+  let movedAtSecondProbe = false
+  s.f.context.runHost = Object.assign(async (...args: Parameters<typeof host>) => {
+    const argv = args[0]
+    // Recovery's PR/branch checks use --exit-code. The ordinary resume probe
+    // uses --heads. Change the real bare origin in the gap between those reads.
+    if (!movedAtSecondProbe && argv[0] === 'git' && argv.includes('ls-remote') && argv.includes('--heads')) {
+      movedAtSecondProbe = true
+      await gitOut(host, s.f.repo, ['push', '--force', 'origin',
+        `${s.f.baseSha}:refs/heads/${s.prior.branch}`])
+    }
+    return host(...args)
+  }, { writesDiffOutput: true as const })
+  const orch = buildTridentOrchestrator({
+    fire_workflow: async () => { throw new Error('second-probe drift must refuse before worker fire') },
+    db_path: s.f.input.db_path, base_branch: 'main',
+    run_host: Object.assign(s.f.context.runHost, { writesDiffOutput: true as const }),
+    read_run: id => s.f.store.get(id), list_stage_events: id => s.f.store.stageEvents(id),
+    read_orchestrator_recovery: run => {
+      readOrchestratorRecovery(s.f.store, run)
+      return s.f.store.orchestratorRecovery(run.id)
+    },
+    record_recovery_refusal: (id, reason) => s.f.store.recordOrchestratorRecoveryRefusal(id, reason),
+    sleep: async () => {},
+  })
+  const refused = await orch.step(admitted.run)
+  expect(movedAtSecondProbe).toBe(true)
+  expect(refused.run).toMatchObject({ phase: 'failed', base_sha: s.f.baseSha,
+    inner_checkpoint_head: s.request.expected_head })
+  expect(refused.run.failure_reason).toContain('Orchestrator recovery refused')
+  expect(await s.f.store.saveIfActive(refused.run)).toBe(true)
+  await buildBoardReconcileObserver(s.board, { resolveRepoWebUrl: async () => null })!(s.f.store.get(admitted.run.id)!)
+  expect(s.board.get(s.prior.project_slug, s.card.id)).toMatchObject({ status: 'blocked',
+    linked_run_id: admitted.run.id, recovery_refusal: expect.stringContaining('published source changed') })
+  expect(s.f.world.dispatches).toHaveLength(before)
+  expect(s.f.github.prs[0]!.state).toBe('OPEN')
+  expect(await gitOut(host, s.f.origin, ['rev-parse', 'refs/heads/main'])).toBe(s.f.baseSha)
+}, 300_000)
+
+test('a crash after the authorized checkpoint import resumes the same review and task budget', async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const admitted = await s.dispatch()
+  expect(admitted.ok, JSON.stringify(admitted)).toBe(true)
+  if (!admitted.ok) return
+  const decision = s.f.store.orchestratorRecovery(admitted.run.id)!
+  await prepareRecoveryBranch(admitted.run, s.request.expected_head, s.f.context.runHost, decision)
+  s.f.input.run = admitted.run
+  const beforePlan = s.f.world.dispatches.filter(call => call.role === 'plan').length
+  const first = await createProjectBuildHost(await s.f.prepare())
+  const append = s.f.store.appendBuildModeState.bind(s.f.store)
+  let imported = false
+  const crashing = spyOn(s.f.store, 'appendBuildModeState').mockImplementation(async (...args) => {
+    const saved = await append(...args)
+    if (!imported && saved && JSON.parse(args[2]).checkpoint?.orchestratorReplan) {
+      imported = true
+      throw Error('fixture process died after durable recovery import')
+    }
+    return saved
+  })
+  let firstOutcome: BuildRunOutcome | null = null
+  try {
+    firstOutcome = await buildRun({ mode: 'implementation', start: 'resume', run_id: admitted.run.id,
+      workers: first.workers, repl_provider: 'anthropic', merge_mode: 'pr',
+      executionStrategy: admitted.run.execution_strategy, owned_pr: admitted.run.published_pr!,
+      taskIteration: admitted.run.task_iteration },
+    first.deps, new AbortController().signal)
+  } catch (error) {
+    expect(String(error)).toContain('fixture process died')
+  } finally { crashing.mockRestore() }
+  expect(imported).toBe(true)
+  expect(firstOutcome?.kind ?? 'crashed').not.toBe('merged')
+  expect(s.f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(beforePlan)
+  const persisted = s.f.store.stageEvents(admitted.run.id).filter(event => event.stage === 'build-mode-state')
+  expect(persisted).toHaveLength(1)
+  expect(JSON.parse(persisted[0]!.meta!).checkpoint).toMatchObject({ stage: 'built', round: 3,
+    replansUsed: 1, reviewBaseline: 'required' })
+  s.f.input.run = s.f.store.get(admitted.run.id)!
+  const recovered = await createProjectBuildHost(await s.f.prepare())
+  const outcome = await recovered.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(s.f, outcome)).toBe('merged')
+  expect(s.f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(beforePlan + 1)
+  expect(s.f.store.get(admitted.run.id)).toMatchObject({ task_iteration: 1, max_task_iterations: 4,
+    max_rounds: 4, base_sha: s.request.expected_base })
+  expect(s.f.store.get(s.prior.id)).toEqual(s.prior)
+}, 300_000)
+
+for (const phase of ['plan', 'build'] as const)
+test(`a lost ${phase} acknowledgement during authorized re-plan resumes the armed worker once`, async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const admitted = await s.dispatch()
+  expect(admitted.ok, JSON.stringify(admitted)).toBe(true)
+  if (!admitted.ok) return
+  await prepareRecoveryBranch(admitted.run, s.request.expected_head, s.f.context.runHost,
+    s.f.store.orchestratorRecovery(admitted.run.id)!)
+  s.f.input.run = admitted.run
+  const before = s.f.world.dispatches.filter(call => call.role === phase).length
+  const first = await createProjectBuildHost(await s.f.prepare())
+  const runner = first.workers[phase].runner
+  first.workers[phase].runner = { ...runner, run: async (...args) => {
+    expect((await runner.run(...args)).kind).toBe('completed')
+    return { kind: 'unknown', detail: 'fixture worker finished but its acknowledgement was lost' }
+  } }
+  const pending = await buildRun({ mode: 'implementation', start: 'resume', run_id: admitted.run.id,
+    workers: first.workers, repl_provider: 'anthropic', merge_mode: 'pr',
+    executionStrategy: admitted.run.execution_strategy, owned_pr: admitted.run.published_pr!,
+    taskIteration: admitted.run.task_iteration },
+  first.deps, new AbortController().signal)
+  expect(pending).toMatchObject({ kind: 'unknown', phase })
+  expect(s.f.world.dispatches.filter(call => call.role === phase)).toHaveLength(before + 1)
+  const state = s.f.store.stageEvents(admitted.run.id).filter(event => event.stage === 'build-mode-state').at(-1)!
+  expect(JSON.parse(state.meta!).checkpoint.pending).toMatchObject({ phase })
+  s.f.input.run = s.f.store.get(admitted.run.id)!
+  const recovered = await createProjectBuildHost(await s.f.prepare())
+  const outcome = await recovered.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
+  expect(outcome.kind, why(s.f, outcome)).toBe('merged')
+  expect(s.f.world.dispatches.filter(call => call.role === phase)).toHaveLength(before + 1)
+  expect(s.f.store.get(admitted.run.id)).toMatchObject({ task_iteration: 1,
+    max_task_iterations: 4, max_rounds: 4, base_sha: s.request.expected_base })
+  expect(s.f.store.get(s.prior.id)).toEqual(s.prior)
+}, 300_000)
+
+test('a real remote move after launch setup but before the re-planner dispatch is durably refused', async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const admitted = await s.dispatch()
+  expect(admitted.ok, JSON.stringify(admitted)).toBe(true)
+  if (!admitted.ok) return
+  await prepareRecoveryBranch(admitted.run, s.request.expected_head, s.f.context.runHost,
+    s.f.store.orchestratorRecovery(admitted.run.id)!)
+  s.f.input.run = admitted.run
+  const before = s.f.world.dispatches.length
+  const host = await createProjectBuildHost(await s.f.prepare())
+  const prepare = host.deps.prepareWork
+  let movedAtWorkerBoundary = false
+  host.deps.prepareWork = async (request, context) => {
+    if (!movedAtWorkerBoundary && request.role === 'plan') {
+      movedAtWorkerBoundary = true
+      await gitOut(s.f.context.runHost, s.f.repo, ['push', '--force', 'origin',
+        `${s.f.baseSha}:refs/heads/${s.prior.branch}`])
+    }
+    return prepare(request, context)
+  }
+  const outcome = await buildRun({ mode: 'implementation', start: 'resume', run_id: admitted.run.id,
+    workers: host.workers, repl_provider: 'anthropic', merge_mode: 'pr',
+    executionStrategy: admitted.run.execution_strategy, owned_pr: admitted.run.published_pr!,
+    taskIteration: admitted.run.task_iteration }, host.deps, new AbortController().signal)
+  expect(movedAtWorkerBoundary).toBe(true)
+  expect(outcome.kind).toBe('unknown')
+  expect(s.f.world.dispatches).toHaveLength(before)
+  const refusal = s.f.db.prepare<{ refusal: string | null }, [string]>(
+    'SELECT refusal FROM code_trident_orchestrator_recoveries WHERE run_id = ?').get(admitted.run.id)?.refusal
+  expect(refusal).toContain('before worker dispatch')
+  await s.f.store.update(admitted.run.id, { phase: 'failed', failure_reason: refusal ?? null })
+  await buildBoardReconcileObserver(s.board, { resolveRepoWebUrl: async () => null })!(s.f.store.get(admitted.run.id)!)
+  expect(s.board.get(s.prior.project_slug, s.card.id)).toMatchObject({ status: 'blocked',
+    linked_run_id: admitted.run.id, recovery_refusal: refusal })
+  expect(s.f.github.prs[0]!.state).toBe('OPEN')
+  expect(await gitOut(s.f.context.runHost, s.f.origin, ['rev-parse', 'refs/heads/main'])).toBe(s.f.baseSha)
+}, 300_000)
+
 test('an ordinary dispatch cannot turn the same rejected checkpoint into an authorized re-plan', async () => {
   const s = await rejectedHeadForOrchestratorRecovery()
   await s.board.detachRun(s.prior.project_slug, s.prior.id, 'failed')
