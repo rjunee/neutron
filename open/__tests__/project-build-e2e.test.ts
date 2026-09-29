@@ -8883,6 +8883,8 @@ test('Claude MCP handler drain does not release a delegated build or native chil
   const identity = { sessionId: 'handler-parent', childGeneration: 'handler-birth', projectId: null,
     admissionGeneration: admission.inspect(null)!.generation, adopted: false }
   const session = new ReplSession('handler-key', identity.childGeneration, identity.sessionId, 'channel', f.dir)
+  session.projectId = 'general'
+  session.bindToolProjectScope({ project_id: 'general', conversationProjectId: null })
   session.toolBridgeActive = true; session.admissionGeneration = identity.admissionGeneration
   const sink = new ReplSink()
   // Exercise the production request handler without opening a network listener.

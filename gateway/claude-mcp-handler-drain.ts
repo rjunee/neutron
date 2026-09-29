@@ -8,7 +8,7 @@ export class ClaudeMcpHandlerDrain implements ClaudeToolHandlerAdmission {
 
   private identity(input: ClaudeToolGeneration): { key: string; identity: string; scope: string } {
     if (!this.ownerHandle.trim() || !input.sessionId.trim() || !input.childGeneration.trim()
-      || (input.projectId !== null && !input.projectId.trim())
+      || (input.projectId !== null && (typeof input.projectId !== 'string' || !input.projectId.trim()))
       || !Number.isSafeInteger(input.admissionGeneration) || input.admissionGeneration! < 0) {
       throw new Error('Claude MCP handler generation is unknown')
     }

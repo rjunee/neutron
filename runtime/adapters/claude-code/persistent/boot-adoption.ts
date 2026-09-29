@@ -2474,6 +2474,7 @@ async function adoptRow(
   const session = new ReplSession(sessionKey, generation, record.sessionId, record.channelName, record.cwd)
   session.adopted = true
   session.projectId = options.project_id
+  session.bindToolProjectScope(options)
   const reuse = record.reuse
   if (reuse === undefined || typeof reuse.tool_surface !== 'string' || typeof reuse.tool_bridge !== 'boolean') {
     // A row from before this field existed, or a malformed one. The warm-reuse guards

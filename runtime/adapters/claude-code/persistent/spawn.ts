@@ -395,6 +395,7 @@ async function spawnSession(
   // it is stable for the session's whole lifetime). The `/tool-call` sink reads
   // it to bind the active project into a tool dispatch — see `ReplSession.projectId`.
   session.projectId = options.project_id
+  session.bindToolProjectScope(options)
   // P0-1 — stamp the bridge attachment so the reuse guard can refuse a
   // bridge-mismatched turn (matches the `requestedToolBridge` computation).
   session.toolBridgeActive = toolBridgeActive

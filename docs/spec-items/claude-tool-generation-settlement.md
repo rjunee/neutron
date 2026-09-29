@@ -39,6 +39,9 @@ fence is not a process fence or proof that native shell/file effects ended.
 - [ ] Every accepted Claude MCP invocation is bound by authenticated host state
       to its parent session, parent generation, project and admission generation;
       model-provided fields cannot select another identity.
+      Canonical General (`null`) and a project literally named `general` remain
+      distinct through spawn, adoption, admission, dispatch and closure. An
+      ambiguous legacy pool label without explicit scope refuses admission.
 - [ ] Generation closure and call admission serialize at the durable authority.
       A request authenticated before an asynchronous body read but admitted after
       closure is refused. An open, authorized generation still executes a valid

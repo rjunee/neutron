@@ -23,6 +23,50 @@ async function fixture() {
 }
 const call = '00000000-0000-4000-8000-000000000001'
 
+test('canonical General and literal general remain isolated through sink admission and closure', async () => {
+  const { db, ledger } = await fixture()
+  const { ReplSink, replToolBridgeRef } = await import('@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts')
+  const { ReplSession } = await import('@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts')
+  const sink = new ReplSink()
+  Reflect.set(sink, 'tokenValue', 'isolated-canonical-scope-token')
+  const previous = replToolBridgeRef.current
+  cleanups.push(() => { replToolBridgeRef.current = previous; sink.unregister(identity.sessionId) })
+  const seen: unknown[] = []
+  replToolBridgeRef.current = { listToolSchemas: () => [], claudeHandlerAdmission: {
+    dispatch: (id, invocation, binding, current, handler) => ledger.dispatch(id, invocation, binding, () => {
+      const original = session.toolProjectId
+      session.toolProjectId = original === null ? 'general' : null
+      expect(current()).toBe(false)
+      session.toolProjectId = original
+      return current()
+    }, handler),
+  },
+    dispatch: async input => { seen.push(input.project_id); return 'ok' } }
+  const request = () => new Request('http://localhost/tool-call', { method: 'POST',
+    headers: { 'X-Sink-Token': sink.credentialFor(session) },
+    body: JSON.stringify({ tool_name: 'write', call_id: call, project_id: 'forged', args: {} }) })
+  const handle = async () => (await Reflect.get(sink, 'handle').call(sink, request()) as Response).json() as Promise<{ ok: boolean; result?: unknown }>
+  const session = new ReplSession('key', identity.childGeneration, identity.sessionId, 'channel', '/tmp')
+  session.projectId = 'general'; session.toolBridgeActive = true; session.admissionGeneration = 0
+  sink.register(identity.sessionId, session)
+  for (const projectId of [null, 'general'] as const) {
+    await new ProjectAdmissionStore(db).register({ ownerHandle: 'owner', projectId })
+    session.bindToolProjectScope({ project_id: 'general', conversationProjectId: projectId })
+    expect(await handle()).toEqual({ ok: true, result: 'ok' })
+    await ledger.close({ ...identity, projectId })
+    expect((await ledger.proof({ ...identity, projectId })).status).toBe('mcp-handlers-drained')
+    expect((await handle()).ok).toBe(false)
+  }
+  expect(seen).toEqual([null, 'general'])
+  for (const project_id of [undefined, 'general', 'default']) {
+    session.bindToolProjectScope(project_id === undefined ? {} : { project_id })
+    expect((await handle()).ok).toBe(false)
+    await expect(ledger.dispatch({ ...identity, projectId: session.toolProjectId }, call, 'write', () => true,
+      async () => seen.push('unexpected'))).rejects.toThrow('unknown')
+  }
+  expect(seen).toEqual([null, 'general'])
+})
+
 test('open executes once; exact close refuses; returned downstream work is not effect settlement', async () => {
   const { ledger } = await fixture()
   let count = 0

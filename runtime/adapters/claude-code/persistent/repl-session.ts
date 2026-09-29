@@ -29,14 +29,18 @@ export class ReplSession {
   private readyResolve: (() => void) | undefined
   readonly ready: Promise<void>
   activeTurn: ActiveTurn | undefined
-  /** The ACTIVE project scope this warm REPL serves (`options.project_id`).
-   *  The pool key folds `project_id` in (`poolKeyFor`), so one session serves
-   *  exactly ONE project scope for its whole lifetime — `'general'` (or absent)
-   *  for the General surface, the project id otherwise. The topic-agnostic
-   *  `/tool-call` sink reads it to thread the active project into the tool
-   *  dispatch, so an agent `work_board_*` write scopes to the composing turn's
-   *  project instead of falling back to the owner/General slug. */
+  /** Legacy pool label (`options.project_id`). It can spell both General and
+   *  the literal project "general" identically; MCP authority uses toolProjectId. */
   projectId: string | undefined
+  /** Canonical MCP admission scope. Undefined is unknown, null is General;
+   * legacy pool labels cannot establish either General or a literal project. */
+  toolProjectId: string | null | undefined
+
+  bindToolProjectScope(options: { conversationProjectId?: string | null; project_id?: string }): void {
+    this.toolProjectId = options.conversationProjectId !== undefined ? options.conversationProjectId
+      : options.project_id && options.project_id !== 'general' && options.project_id !== 'default'
+        ? options.project_id : undefined
+  }
   /** ABANDON-POISON flag (2026-06-18 warm-session hang fix). Set true when a turn
    *  on this warm REPL is ABANDONED before its reply lands — the caller's budget
    *  elapsed (`handle.cancel()`, e.g. the synthesis `dispatchTurn` 90s timeout) OR

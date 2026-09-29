@@ -133,6 +133,18 @@ afterEach(async () => {
 })
 
 describe('a spawn stamps the admission generation its reader answers', () => {
+  for (const scope of [null, 'general'] as const) {
+    it(`spawn preserves canonical MCP scope ${JSON.stringify(scope)}`, async () => {
+      const options = optionsFor(join(scratch(), 'repl-registry.json'), async () => 7)
+      options.project_id = 'general'
+      options.conversationProjectId = scope
+      await drain(createPersistentReplSubstrate(options).start(spec('hi')))
+      const session = await pool.get(poolKeyFor(options))
+      expect(session?.projectId).toBe('general')
+      expect(session?.toolProjectId).toBe(scope)
+      expect(session?.admissionGeneration).toBe(7)
+    })
+  }
   it('stamps the session and the registry row', async () => {
     const registryPath = join(scratch(), 'repl-registry.json')
     let reads = 0
@@ -208,13 +220,14 @@ describe('adoption restores the stamp from the row', () => {
     sink.unregister(SESSION_ID)
   })
 
-  async function adopt(stamp: Record<string, unknown>): Promise<number | undefined> {
+  async function adopt(stamp: Record<string, unknown>, scope?: string | null): Promise<number | undefined> {
     const registryPath = join(scratch(), 'repl-registry.json')
     const registry = {
       [KEY]: {
         sessionKey: KEY, sessionId: SESSION_ID, cwd: '/tmp', channelName: CHANNEL, has_session: true,
         pid: 4242, devchannel_port: 45777, child_generation: 'gen-stamp-1', pane_handle: HANDLE,
         reuse: { tool_surface: 'Read', tool_bridge: false, auth_fingerprint: 'fp-stamp' },
+        ...(scope === undefined ? {} : { conversationProjectId: scope }),
         ...stamp,
       },
     }
@@ -227,17 +240,25 @@ describe('adoption restores the stamp from the row', () => {
     const options = {
       substrate_instance_id: 'inst', model_preference: ['claude-opus-5'], replRegistryPath: registryPath,
       project_id: 'proj', cwd: '/tmp', ptyHost: host,
+      ...(scope === undefined ? {} : { project_id: 'general', conversationProjectId: scope }),
     } as unknown as PersistentReplSubstrateOptions
     const outcome = await reconcileOwnRepl(options, KEY, { host, health: async () => true, log: () => {} })
     expect(outcome.kind).toBe('adopted')
     const session = await pool.get(KEY)
     expect(session?.adopted).toBe(true)
+    expect(session?.toolProjectId).toBe(scope === undefined ? 'proj' : scope)
     return session?.admissionGeneration
   }
 
   it('a stamped row adopts as participating', async () => {
     expect(await adopt({ admission_generation: 3 })).toBe(3)
   })
+
+  for (const scope of [null, 'general'] as const) {
+    it(`adoption preserves canonical MCP scope ${JSON.stringify(scope)}`, async () => {
+      expect(await adopt({ admission_generation: 3 }, scope)).toBe(3)
+    })
+  }
 
   it('a legacy row (no field) adopts as UNKNOWN, never as generation 0', async () => {
     expect(await adopt({})).toBeUndefined()

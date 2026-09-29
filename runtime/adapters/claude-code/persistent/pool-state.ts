@@ -488,7 +488,7 @@ export class ReplSink {
 
   private toolGeneration(session: ReplSession): import('./tool-handler-generation.ts').ClaudeToolGeneration {
     return { sessionId: session.sessionId, childGeneration: session.childGeneration,
-      projectId: session.projectId ?? null, admissionGeneration: session.admissionGeneration, adopted: session.adopted }
+      projectId: session.toolProjectId, admissionGeneration: session.admissionGeneration, adopted: session.adopted }
   }
 
   unregister(sessionId: string): void {
@@ -620,8 +620,9 @@ export class ReplSink {
         // scope — thread it in so a per-project tool (`work_board_*`, the trident
         // build-dispatch tools) scopes to the composing turn's project. There is no
         // longer an unregistered-session case to degrade: the guard above refused it.
-        const toolProjectId = session.projectId ?? null
+        const toolProjectId = session.toolProjectId
         try {
+          if (toolProjectId === undefined) throw new Error('Claude MCP handler project scope is unknown')
           if (!bridge.claudeHandlerAdmission) throw new Error('Durable Claude MCP handler admission unavailable')
           const identity = this.toolGeneration(session)
           const result = await bridge.claudeHandlerAdmission.dispatch(identity, callId,
@@ -629,7 +630,7 @@ export class ReplSink {
             () => this.byCredential.get(credential) === session && replToolBridgeRef.current === bridge
               && session.toolBridgeActive && session.sessionId === identity.sessionId
               && session.childGeneration === identity.childGeneration
-              && (session.projectId ?? null) === identity.projectId
+              && session.toolProjectId === identity.projectId
               && session.admissionGeneration === identity.admissionGeneration,
             async () => {
               if (toolName === PLANNER_TOOL) {

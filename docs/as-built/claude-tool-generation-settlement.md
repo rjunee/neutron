@@ -58,3 +58,16 @@ inventory explicitly includes 0165 and its named first-apply test passes.
 This is the safety foundation specified by
 [`claude-tool-generation-settlement`](../spec-items/claude-tool-generation-settlement.md),
 not completion of quota recovery or a served unattended-build acceptance witness.
+
+Scope review found that General's legacy pool label `general` disagreed with its
+canonical admission scope `null`. Both spawn and adoption now bind an explicit
+MCP scope, kept separate from the legacy pool label. The sink uses that scope for
+admission, authorization revalidation and dispatch. Explicit null and the literal
+project `general` remain distinct; absent/ambiguous legacy scope is unknown and
+refused. Existing parents with no canonical scope cannot gain it by inference.
+Real spawn/adoption controls and the durable sink test cover both identities;
+the latter closes General before executing the literal project's identical call
+identity, and verifies scope changes revoke authorization. Mapping null to the
+sentinel fails General's authorized control; mapping the literal project to null
+fails its independent authorized control. Both semantic mutants were restored.
+The consuming E2E now models General's actual legacy pool label and explicit null.
