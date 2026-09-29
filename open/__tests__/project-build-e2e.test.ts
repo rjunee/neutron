@@ -113,6 +113,7 @@ import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, projectBuildTrailerDecoder, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { claudeInReplRunner } from '@neutronai/runtime/workers/claude-in-repl.ts'
 import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
+import { createCodexHeadlessRunner, codexHeadlessReservation } from '@neutronai/runtime/workers/codex-headless.ts'
 import { decodeProjectTrailer } from '@neutronai/runtime/workers/project-runners.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { until, workerPlacementRig } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts'
@@ -937,7 +938,9 @@ const prompt = readFileSync(0, 'utf8')
 const requestLine = prompt.split('\\n').find(line => line.startsWith('Request (data): '))
 if (!requestLine) process.exit(91)
 const request = JSON.parse(requestLine.slice('Request (data): '.length))
-const brief = JSON.parse(readFileSync(request.brief.path, 'utf8'))
+const briefText = readFileSync(request.brief.path, 'utf8')
+let brief
+try { brief = JSON.parse(briefText) } catch { brief = { instruction: briefText } }
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv, cwd: process.cwd(), codexHome: process.env.CODEX_HOME, request, brief }) + '\\n')
 if (${JSON.stringify(identity)} === 'usage-limit' || ${JSON.stringify(identity)} === 'transport-error') {
   console.log(JSON.stringify({ type: 'thread.started', thread_id: 'e2e-codex-thread' }))
@@ -947,7 +950,9 @@ if (${JSON.stringify(identity)} === 'usage-limit' || ${JSON.stringify(identity)}
 const output = argv[argv.indexOf('-o') + 1]
 const envelope = { schema: request.result.schema,
   run_id: ${identity === 'wrong-run' ? "'some-other-run'" : 'request.run_id'}, step_id: request.step_id,
-  kind: 'completed', result: { verdict: 'APPROVE', findings: [] } }
+  kind: 'completed', result: request.result.schema === 'project-review'
+    ? { ...JSON.parse(readFileSync(request.brief.path + '.context.json', 'utf8')).snapshot, payload: { verdict: 'APPROVE', findings: [] } }
+    : { verdict: 'APPROVE', findings: [] } }
 writeFileSync(output, JSON.stringify({ envelope }))
 console.log(JSON.stringify({ type: 'thread.started', thread_id: 'e2e-codex-thread' }))
 console.log(JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 7, output_tokens: 3 } }))
@@ -1615,7 +1620,8 @@ function historicalPlannerTransport(f: Awaited<ReturnType<typeof fixture>>, opti
   const original = f.context.provider === 'anthropic' ? options.substrate.inRepl! : options.substrate.headless.anthropic!
   const wrapper = { ...original, run: (request: BoundedWorkRequest, placement: 'in-repl' | 'headless', signal: AbortSignal) => {
     if (request.role !== 'plan' || request.tools !== 'edit-and-run') return original.run(request, placement, signal)
-    expect(request.step_id).toBe(`${f.row.id}:plan:0`)
+    expect(request.step_id.startsWith(`${f.row.id}:`)).toBe(true)
+    expect(request.step_id.endsWith(':plan:0')).toBe(true)
     onDispatch()
     return historical.run(request, placement, signal)
   } }
@@ -1632,6 +1638,67 @@ async function historicalV4Planner(f: Awaited<ReturnType<typeof fixture>>, optio
   historicalPlannerTransport(f, options, onDispatch)
   return options
 }
+
+for (const phase of ['build', 'review'] as const) test.each(['exact', 'missing', 'foreign'] as const)(
+  `legacy planner bindings survive original Codex headless ${phase} reservation: %s`, async evidence => {
+  const f = await fixture({ codexReview: 'valid' })
+  f.input.phase_models = { ...f.input.phase_models, [phase === 'build' ? 'build' : 'review_adversarial']: { model: 'sol' } }
+  const options = await historicalV4Planner(f, await f.prepare())
+  const env = { ...f.context.env, CODEX_HOME: f.input.codex_home! }
+  const executions = join(f.dir, 'wrapper-executions')
+  const script = join(f.dir, 'fixture-codex-build.sh')
+  const diff = join(f.dir, 'fixture-codex.diff')
+  await writeFile(diff, '')
+  await writeFile(script, `#!/bin/bash\nprintf 'executed\\n' >> ${JSON.stringify(executions)}\nprintf 'NEUTRON_CODEX_BUILD_HEAD=${f.baseSha}\\nNEUTRON_CODEX_BUILD_DIFF=${diff}\\nNEUTRON_CODEX_BUILD_PR=\\n' > "$NEUTRON_CODEX_BUILD_TRAILER_FILE"\nprintf '%s\\n' '{"type":"thread.started","thread_id":"fixture-headless"}' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'\n`)
+  const build = createCodexHeadlessRunner({ env, buildScript: script, probe: { ok: true } })
+  if (phase === 'build') {
+    const transport = options.substrate.headless['openai-codex']!
+    options.substrate.headless['openai-codex'] = { ...transport,
+      run: (request, placement, signal) => request.role === 'build' ? build.run(request, placement, signal) : transport.run(request, placement, signal) }
+  }
+  const first = await createProjectBuildHost(options)
+  const original = first.workers[phase].runner
+  first.workers[phase].runner = { ...original, run: async (...args) => {
+    expect((await original.run(...args)).kind).toBe('completed')
+    return { kind: 'unknown', detail: 'Historical completed headless acknowledgement lost' }
+  } }
+  expect(await first.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal))
+    .toMatchObject({ kind: 'unknown', phase })
+  const pending = lastCheckpoint(f).pending as { recovery: { request: BoundedWorkRequest } }
+  const request = pending.recovery.request
+  const reservation = codexHeadlessReservation(request, env)
+  const bytes = await readFile(reservation.path, 'utf8')
+  expect(bytes).toBe(reservation.identity + '\n#dispatch-armed\n')
+  expect(bytes).not.toBe(JSON.stringify(request) + '\n#dispatch-armed\n')
+  if (evidence !== 'exact') {
+    if (evidence === 'missing') await rm(reservation.path)
+    else await writeFile(reservation.path, bytes.replace(request.model_id, 'foreign-model'))
+    const uncertain = await createProjectBuildHost(await f.prepare())
+    expect(await uncertain.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal))
+      .toMatchObject({ kind: 'unknown', phase })
+    await writeFile(reservation.path, bytes)
+  }
+  const resumedOptions = await f.prepare()
+  expect(resumedOptions.workers.plan.request.tools).toBe('edit-and-run')
+  const transport = resumedOptions.substrate.headless['openai-codex']!
+  let recovered = 0
+  resumedOptions.substrate.headless['openai-codex'] = { ...transport, recover: async (observed, placement, signal) => {
+    expect(observed).toEqual(request)
+    const result = await (phase === 'build' ? build : transport).recover!(observed, placement, signal)
+    expect(result.kind).toBe('completed')
+    recovered++
+    // Stop at the tested recovery boundary; this fixture is not acceptance proof.
+    return { kind: 'blocked', on: 'Fixture observed exact original headless recovery' }
+  } }
+  const resumed = await createProjectBuildHost(resumedOptions)
+  expect(await resumed.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal))
+    .toMatchObject({ kind: 'blocked', phase, on: 'Fixture observed exact original headless recovery' })
+  expect(recovered).toBe(1)
+  expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
+  if (phase === 'build') expect(await readFile(executions, 'utf8')).toBe('executed\n')
+  else expect((await readFile(f.codexCalls, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+    .filter(call => call.request.step_id === request.step_id)).toHaveLength(1)
+}, 60_000)
 
 test('missing project CI setup refuses before spending work, then an explicit binding completes the same run', async () => {
   const f = await fixture()
@@ -6865,8 +6932,10 @@ test(`historical pending ${strategy} planner recovers its original schema and re
     if (role === 'plan') expect(originalBrief).not.toBe(currentBrief)
     await writeFile(path, originalBrief)
     worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path },
+      ...(role === 'plan' ? { tools: 'edit-and-run' as const, network: true } : {}),
       result: { ...worker.request.result, ...(role === 'plan' ? { schema: 'project-plan' } : {}) } }
   }
+  historicalPlannerTransport(f, prepared)
   const host = await createProjectBuildHost(prepared)
   const runner = host.workers.plan.runner
   host.workers.plan.runner = { ...runner, async run(...args) {
@@ -6918,8 +6987,10 @@ test(`historical pending ${strategy} builder recovers only with ${source} proven
     const originalBrief = currentBrief.replace(/\n\nPLANNING WORK\.[^\n]*/, '')
     if (role === 'plan') expect(originalBrief).not.toBe(currentBrief)
     await writeFile(path, originalBrief)
-    worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path } }
+    worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path },
+      ...(role === 'plan' ? { tools: 'edit-and-run' as const, network: true } : {}) }
   }
+  historicalPlannerTransport(f, prepared)
   // The native pending reservation is created using the original path and
   // integrity before dispatch. Recovery cannot manufacture a replacement.
   const host = await createProjectBuildHost(prepared)
@@ -6986,9 +7057,10 @@ test(`historical pending ${strategy} builder recovers only with ${source} proven
   f.world.dispatches.length = 0
   const outcome = await restartThroughGateway(f)
   expect(outcome.kind, why(f, outcome)).toBe(source === 'planner' || fault !== 'none' ? 'unknown' : strategy === 'single' ? 'merged' : 'continued')
-  if (fault !== 'none') expect(outcome).toMatchObject({ kind: 'unknown', detail: fault === 'brief-path'
-    ? 'Original worker brief is not the reserved legacy artifact' : fault === 'brief-integrity'
-      ? 'Original worker brief integrity cannot be established' : 'Original worker routing or authority changed during recovery' })
+  // Changed pending identities fail the armed-reservation check before the
+  // older schema-migration validator can authorize the historical binding.
+  if (fault !== 'none') expect(outcome).toMatchObject({ kind: 'unknown',
+    detail: 'Original worker brief is not the reserved legacy artifact' })
   expect(f.world.dispatches.some(d => d.role === 'plan' || d.role === 'build')).toBe(false)
   expect(f.store.get(f.row.id)!.execution_strategy).toBe(strategy)
   // A recovered completed builder consumes its task at the durable handoff,

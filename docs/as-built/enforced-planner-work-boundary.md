@@ -50,6 +50,24 @@ Root, Open and Trident TypeScript checks passed. The complete consuming file and
 full host suite are intentionally consolidated in the integration gate, not claimed
 as author passes; interrupted exploratory runs are not acceptance evidence.
 
+The first frozen candidate's review found that legacy binding recovery assumed
+the native Codex reservation identity for configured headless work. Recovery now
+reuses the adapter's exact build/fix identity and its separate delegated review
+identity (`runtime/workers/codex-headless.ts:137`,
+`runtime/workers/codex-review.ts:38`). The original REPL provider must still match.
+Authenticated unversioned pending plans retain the existing migrated-strategy
+validator; bare old briefs remain insufficient. The corrective checks passed 114
+adapter tests and 22 focused consuming recovery cases, including actual headless
+reservations, missing/foreign refusal, restored recovery without replay, and old
+schema/policy controls. Earlier red historical fixtures are not counted as passes.
+
+The local full-tree privacy scan remained red. An independent immutable-tree
+comparison found the same 451 findings at the base and first frozen candidate;
+the linked worktree added one untracked administrative-pointer finding. The
+complete first-candidate diff and commit messages had zero findings with the
+canonical denylist. This distinguishes baseline findings from introduced ones;
+it does not waive the full-tree result or claim the final integration gate passed.
+
 An offline installed Claude 2.1.284 fixture observed the restricted child offering
 only the planner tool while its sibling retained ordinary tools; all ten assertions
 passed over nine scripted local requests, including real broker preparation,

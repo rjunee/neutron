@@ -18,7 +18,7 @@ import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/per
 import { admitNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest, ownsNativeChildWorkspace, nativeChildCensusKnown, type NativeChildWorkspace } from '@neutronai/runtime/workers/native-child-workspace.ts'
 import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
-import { createCodexHeadlessRunner } from '@neutronai/runtime/workers/codex-headless.ts'
+import { createCodexHeadlessRunner, codexHeadlessReservation } from '@neutronai/runtime/workers/codex-headless.ts'
 import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
 import { createWorkerPlacement, type WorkerPlacementHost, type WorkerPlacementScope } from '@neutronai/runtime/workers/worker-placement.ts'
 import { reconcileStoppedTrailerReservations } from '@neutronai/runtime/workers/trailer-slot.ts'
@@ -737,16 +737,26 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         const request = recovery.request
         const provider = recovery.inputs.workers[request.role]?.provider
         const prefix = provider === 'anthropic' ? 'claude' : provider === 'openai-codex' ? 'codex' : provider === 'pi' ? 'pi' : null
-        if (prefix && request.run_id === run.id) {
+        if (prefix && request.run_id === run.id && Reflect.get(recovery.inputs, 'repl_provider') === context.provider) {
           const hash = createHash('sha256').update(JSON.stringify([run.id, request.step_id])).digest('hex')
-          const held = await readArmedTrailerReservation(join(state, `${prefix}-step-${hash}.json`), JSON.stringify(request), { signal })
+          const reservation = provider === 'openai-codex' && context.provider !== provider
+            ? codexHeadlessReservation(request, codexEnv)
+            : { path: join(state, `${prefix}-step-${hash}.json`), identity: JSON.stringify(request) }
+          const held = await readArmedTrailerReservation(reservation.path, reservation.identity, { signal })
           if (held.kind === 'resume') pendingPlanner = recovery.inputs.workers.plan
         }
       }
     } catch { /* Unauthenticated legacy inputs cannot authorize a new planner. */ }
   }
   const legacyPlanner = pendingPlanner?.request.tools === 'edit-and-run' ? pendingPlanner : proofRetry?.workers.plan?.request.tools === 'edit-and-run' ? proofRetry.workers.plan : undefined
+  // The pre-strategy schema migration has its own exact validator in the build
+  // host. Only an authenticated pending reservation may select that binding.
+  const legacyRun = context.store.get(run.id)!
+  const unversionedPlanner = pendingPlanner?.request.tools === 'edit-and-run'
+    && legacyRun.strategy_source === 'legacy' && legacyRun.execution_strategy !== null
+    && pendingPlanner.request.brief.path === join(state, 'plan.brief.plan.host')
   const legacyPlanVersion = legacyPlanner?.request.brief.path.match(/\.strategy-v([234])\.brief\.plan\.host$/)?.[1]
+    ?? (unversionedPlanner ? '3' : undefined)
   const requestedModels = {} as ProjectBuildHostOptions['requestedModels']
   const invalidated: { role: string; cause: 'task' | 'reflection' }[] = []
   // Whether THIS run's latest persisted reservation was admitted with a v2 brief.
@@ -803,7 +813,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       ...(isBuilder && commitWrapper ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), run.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
       'Never publish or merge; the host owns those actions.',
     ].join('\n\n') + reflectionSuffix
-    let brief = renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true, planWorkBoundary: true })
+    let brief = renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true, planWorkBoundary: !unversionedPlanner })
     // A LEGACY V2 BRIEF IS EVIDENCE, NOT AUTHORITY (#1296). A pending reservation
     // is identified by `{ brief.path, brief.integrity }` alone (`build-run.ts`
     // resume validation), and neither the task text nor the owner reflection is

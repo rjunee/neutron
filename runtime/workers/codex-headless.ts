@@ -17,7 +17,7 @@ import type {
 import { unknownCause } from '../refusal-cause.ts'
 import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
 import { codexBuildObservation, isCodexBuildObservation, type CodexBuildObservation } from './codex-build-observation.ts'
-import { codexWorkerEnv, createCodexReviewTransport, type CodexReviewContract } from './codex-review.ts'
+import { codexWorkerEnv, codexReviewReservation, createCodexReviewTransport, type CodexReviewContract } from './codex-review.ts'
 import { createObservationPublisher, recoverProviderObservation } from './provider-observation-recovery.ts'
 import { codexObservation, readProviderObservation } from './provider-observation.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -132,6 +132,21 @@ function waitFor(child: ChildProcess, signal: AbortSignal, wallMs: number): Prom
   })
 }
 
+/** These are the adapter's existing durable identities, not a host-invented
+ * common serialization. Review deliberately retains its separate contract. */
+export function codexHeadlessReservation(req: BoundedWorkRequest, env: NodeJS.ProcessEnv) {
+  if (req.role === 'review' || req.role === 'synthesis') return codexReviewReservation(req, env)
+  const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
+  return { path: join(dirname(req.result.path), `codex-headless-step-${key}.json`), identity: JSON.stringify({
+    run: req.run_id, step: req.step_id, role: req.role, provider: 'openai-codex',
+    model: req.model_id, effort: req.effort, thread: req.thread?.id ?? null,
+    credentialHome: env.CODEX_HOME ?? null, cwd: resolve(req.cwd),
+    briefIntegrity: req.brief.integrity, schema: req.result.schema,
+    writable: req.writable, network: req.network, tools: req.tools,
+    needsApproval: req.needs_approval_decision,
+  }) }
+}
+
 export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = {}): WorkerRunner {
   const baseEnv = options.env ?? process.env
   const buildScript = options.buildScript ?? resolve(import.meta.dir, '../../trident/codex-build.sh')
@@ -161,14 +176,6 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
     return probe.ok ? null : probe
   }
 
-  const buildIdentity = (req: BoundedWorkRequest) => JSON.stringify({
-    run: req.run_id, step: req.step_id, role: req.role, provider: 'openai-codex',
-    model: req.model_id, effort: req.effort, thread: req.thread?.id ?? null,
-    credentialHome: baseEnv.CODEX_HOME ?? null, cwd: resolve(req.cwd),
-    briefIntegrity: req.brief.integrity, schema: req.result.schema,
-    writable: req.writable, network: req.network, tools: req.tools,
-    needsApproval: req.needs_approval_decision,
-  })
   const runner: WorkerRunner = {
     provider: 'openai-codex',
     supports(role, placement) {
@@ -178,9 +185,7 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       if (req.role === 'review' || req.role === 'synthesis') return review.observe(req)
       if (req.role !== 'build' && req.role !== 'fix') return undefined
       const started = Date.now()
-      const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
-      const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
-      const identity = buildIdentity(req)
+      const { path: reservation, identity } = codexHeadlessReservation(req, baseEnv)
       const current = await recoverProviderObservation(reservation, identity, `${reservation}.observation`, 'codex-cli-jsonl', undefined, bytes => {
         const receipt = JSON.parse(bytes)
         return receipt.identity === identity ? readProviderObservation(JSON.stringify(receipt.observation), 'codex-cli-jsonl') : undefined
@@ -220,13 +225,12 @@ export function createCodexHeadlessRunner(options: CodexHeadlessRunnerOptions = 
       // there is this step's own receipt, and the child that wrote it is long gone,
       // so destroying it would replay work whose outcome was already known.
       const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
-      const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
+      const { path: reservation, identity } = codexHeadlessReservation(req, baseEnv)
       // The reservation directory is the durable run state. A replacement host
       // may choose new brief/result filenames or a different remaining wait
       // budget there; those are transport coordinates, not a new paid attempt.
       // Retain the brief's bytes receipt and execution policy: changed work must
       // never inherit the previous completion merely because run/step match.
-      const identity = buildIdentity(req)
       const receiptPath = `${reservation}.receipt`
       const held = recoveryOnly
         ? await readArmedTrailerReservation(reservation, identity, { signal, deadline: Date.now() + req.budget.wall_ms })

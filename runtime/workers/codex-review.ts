@@ -34,6 +34,13 @@ export function codexWorkerEnv(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     !key.startsWith('GH_') && !key.startsWith('GITHUB_') && !CODEX_CLI_AUTH_ENV_VARS.includes(key)))
 }
 
+/** Exact existing review reservation coordinates; shared with read-only host recovery. */
+export function codexReviewReservation(req: BoundedWorkRequest, source: NodeJS.ProcessEnv) {
+  const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
+  return { path: join(dirname(req.result.path), `codex-headless-step-${key}.json`),
+    identity: JSON.stringify([req, codexWorkerEnv(source).CODEX_HOME]) }
+}
+
 /** Strict structured outputs require every declared property to be required.
  * Preserve optional-field omission as object alternatives, not invented nulls. */
 function strictSchema(value: unknown): unknown {
@@ -93,8 +100,7 @@ export function createCodexReviewTransport(options: {
     if (!cliReady) return { kind: 'refused', reason: 'cli-contract' }
 
     const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
-    const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
-    const identity = JSON.stringify([req, env.CODEX_HOME])
+    const { path: reservation, identity } = codexReviewReservation(req, env)
     const receiptPath = `${reservation}.receipt`
     const observationPath = `${reservation}.observation`
     let observation: ProviderObservation | undefined
@@ -263,9 +269,8 @@ export function createCodexReviewTransport(options: {
     } catch { return observed(unknown('Codex review result could not be committed')) }
               }
   const observe = async (req: BoundedWorkRequest) => {
-    const key = createHash('sha256').update(JSON.stringify([req.run_id, req.step_id])).digest('hex')
-    const reservation = join(dirname(req.result.path), `codex-headless-step-${key}.json`)
-    return recoverProviderObservation(reservation, JSON.stringify([req, env.CODEX_HOME]),
+    const { path: reservation, identity } = codexReviewReservation(req, env)
+    return recoverProviderObservation(reservation, identity,
       `${reservation}.observation`, 'codex-cli-jsonl')
   }
   const run = (req: BoundedWorkRequest, signal: AbortSignal) => execute(false, req, signal)
