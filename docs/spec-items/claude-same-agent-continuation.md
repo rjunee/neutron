@@ -143,10 +143,17 @@ spent-claim reconciliation remain independent of current capacity.
       `runtime/workers/claude-capacity-client.test.ts`.
 - [ ] Default native model aliases have an authoritative resolved-model binding
       before requesting capacity. A guessed alias mapping, model prose or
-      worker-writable transcript is not authority. Until such a binding exists,
-      aliases remain UNKNOWN; concrete configured requests alone do not complete
-      ordinary Fable quota recovery.
+      worker-writable transcript is not authority. The fresh Fable path must bind
+      host-owned zero-inference native metadata under protected executable and
+      launcher ancestry to the actual parent model and native family override.
+      Require exact environment/settings parity and reject model force, policy,
+      hooks or contradictory auth-source metadata. Other unbound aliases remain
+      UNKNOWN; a concrete-only fixture does not complete ordinary Fable recovery.
+      Verify: `runtime/adapters/claude-code/persistent/__tests__/native-model-launch.test.ts`
+      and the alias cases in `open/__tests__/project-build-e2e.test.ts`.
 
 The current capacity protocol does not retain an A-only native failure, an
 old-account reset receipt or a post-B observation that A remains capped. Those
-live controls and the authoritative alias-resolution interface remain open.
+live controls remain open. Fresh-parent auth observation currently exists only in
+host memory: restoring its authenticated provenance for a surviving parent across
+gateway restart is also required. Legacy parents without it remain UNKNOWN.

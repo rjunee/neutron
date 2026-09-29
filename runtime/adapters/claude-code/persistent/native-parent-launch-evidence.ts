@@ -4,6 +4,7 @@ import { createReadStream, realpathSync, statSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
 import { observeNativeFileAuth, type NativeFileAuthEvidence, type NativeFileAuthObservation } from './native-file-auth.ts'
 import { readProcessIdentity } from './process-identity.ts'
+import { prepareNativeModelLaunch, protectedNativeLauncher, type NativeModelLaunchEvidence } from './native-model-launch.ts'
 
 /** Host-observed launch inputs, not a catalog or proof of a tool invocation.
  * Copy into the original signed dispatch receipt before worker submission to
@@ -17,6 +18,7 @@ export interface NativeParentLaunchEvidence {
   readonly argv: readonly string[]
   readonly tools: readonly string[]
   readonly fileAuth?: NativeFileAuthEvidence
+  readonly model?: NativeModelLaunchEvidence
 }
 
 const launches = new WeakMap<object, NativeParentLaunchEvidence>()
@@ -89,23 +91,27 @@ export async function prepareNativeParentLaunch(input: {
   sessionId: string; childGeneration: string; projectId: string
   argv: readonly string[]; tools: readonly string[]; cwd: string
   env: Record<string, string | undefined>
-}): Promise<{ argv: string[]; record(session: object): void } | undefined> {
+}): Promise<{ argv: string[]; env: Record<string, string | undefined>; record(session: object): void } | undefined> {
   if (!input.projectId || !input.tools.includes('Agent') || !input.tools.includes('SendMessage')) return undefined
   try {
     const selected = Bun.which(input.argv[0]!, { cwd: input.cwd, PATH: input.env['PATH'] ?? process.env['PATH'] ?? '' })
     if (!selected) return undefined
     const observation = await observeNativeExecutable(selected, input.cwd, input.env)
     if (!observation) return undefined
-    const argv = [...input.argv]
-    const auth = observeNativeFileAuth(input)
+    const initialAuth = observeNativeFileAuth(input)
+    const model = initialAuth && protectedNativeLauncher(selected)
+      ? await prepareNativeModelLaunch({ ...input, executable: observation.executable, auth: initialAuth }) : undefined
+    const argv = model?.argv ?? [...input.argv], env = model?.env ?? input.env
+    const auth = observeNativeFileAuth({ ...input, argv, env })
     const evidence: NativeParentLaunchEvidence = Object.freeze({ version: 1,
       sessionId: input.sessionId, childGeneration: input.childGeneration, projectId: input.projectId,
       executable: observation.executable, argv: Object.freeze([...argv]), tools: Object.freeze([...input.tools]),
+      ...(model ? { model: model.evidence } : {}),
       ...(auth ? { fileAuth: auth.evidence } : {}) })
-    return { argv, record(session) {
+    return { argv, env, record(session) {
       // A replaced executable during spawn invalidates this observation.
       try {
-        if (observation.isCurrent()) {
+        if (observation.isCurrent() && (!model || model.current() && protectedNativeLauncher(selected))) {
           recordNativeParentLaunchEvidence(session, evidence, auth)
         }
       } catch { /* unknown */ }

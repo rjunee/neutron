@@ -1,11 +1,11 @@
 ## 2026-09-29 — Authenticate concrete-model capacity before native continuation
 
 This is a partial integration, not release readiness or completion of #1416.
-Default native aliases still lack an authenticated resolved-model binding.
-The client refuses aliases rather than guessing a provider model from mutable
-transcripts or metadata. The consuming positive explicitly configures a concrete
-model through the existing model selector; that does not prove ordinary Fable
-recovery. The normative item is `docs/spec-items/claude-same-agent-continuation.md`.
+The fresh-parent integration binds the checked Fable alias through host-owned
+native local-command metadata, never mutable transcripts or guessed model IDs.
+Other aliases and legacy parents without the original binding remain UNKNOWN.
+Synthetic success does not prove live Fable recovery. The normative item is
+`docs/spec-items/claude-same-agent-continuation.md`.
 
 `runtime/workers/claude-capacity-client.ts` consumes the existing authenticated
 local capacity protocol using independently provisioned public verification
@@ -55,5 +55,33 @@ respectively. The earlier full consuming run was explicitly stopped after more
 than 200 passing cases to fix this finding; it is not a full-suite acceptance
 receipt. Preclaim failure preserves the opportunity; postclaim expiry or lost
 transport remains spent and observation-only, an explicit liveness limitation.
-These checks do not establish a complete installed-CLI effective-auth attestation
-or resolve the default alias blocker.
+These checks do not establish a complete installed-CLI effective-auth attestation.
+
+The fresh Fable launch now uses the standalone native resolver under protected
+executable and launcher ancestry, with the intended environment, working directory,
+explicit settings and normal settings-source order. Independent installed-CLI
+zero-inference controls established the Fable family override; native Agent's
+same-family inheritance means the parent model must also be pinned. The actual
+new parent therefore receives both concrete `--model` and the matching family
+environment override. Force overrides, external hooks, model allowlists, changed
+profile inputs and contradictory native API-key source metadata refuse. Native
+`apiKeySource: none` remains insufficient auth evidence.
+
+The original signed launch retains the resolution and pin. Continuation requires
+that same current parent binding, independently retained auth observation and
+unchanged original request. The socket receives the resolved concrete model, while
+its request digest still covers the original alias request. Consuming controls
+passed 33 cases with 186 assertions, including Fable success, absent/conflicting
+pin, contradictory source, forced model and parent mismatch. Bidirectional alias
+mutants detect admission of a contradictory source and denial of a valid alias.
+Restored runtime/launch checks passed 126 cases with 284 assertions; both
+TypeScript projects and targeted ESLint passed. These are launch-configuration
+observations, not proof against a later native in-process model change or proof
+of the model/account actually used by a provider request.
+
+Auth observation is currently in host memory. Gateway restart loses admission
+even for a surviving candidate-launched parent; durable restoration is a separate
+required change. No legacy parent is retroactively upgraded. Genuine provider
+A-only/reset/B same-child controls and full installed-CLI auth provenance remain
+release blockers. No live provider request or parent input was made by this client
+integration lane.

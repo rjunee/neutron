@@ -11,6 +11,7 @@ export function hasCompetingClaudeAuth(env: Record<string, string | undefined>):
   return Object.entries(env).some(([key, value]) => Boolean(value) && (
     /^ANTHROPIC_(?!DEFAULT_.*_MODEL$|MODEL$)/.test(key)
     || /^CLAUDE_CODE_(?:OAUTH|API_KEY|HOST_|AUTH|PROVIDER_|USE_|PROXY_AUTH|SESSION_ACCESS|SDK_HAS_)/.test(key)
+    || key === 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE' || key === 'CLAUDE_CODE_SUBAGENT_MODEL'
     || key === 'CCR_OAUTH_TOKEN_FILE' || key === 'CLAUDE_CONFIG_FILE' || key === 'CLAUDE_CODE_SETTINGS_PATH'
     || key === 'CLAUDE_CODE_MANAGED_SETTINGS_PATH'))
 }
@@ -41,8 +42,10 @@ export function observeNativeFileAuth(input: { cwd: string; argv: readonly strin
       paths.add(join(cwd, '.claude', 'settings.json')); paths.add(join(cwd, '.claude', 'settings.local.json'))
       const parent = dirname(cwd); if (parent === cwd) break; cwd = parent
     }
+    const originalEnv = { ...input.env }
     const snapshot = () => {
       if (hasCompetingClaudeAuth(input.env)) throw Error('Launch environment changed')
+      if (JSON.stringify(input.env) !== JSON.stringify(originalEnv)) throw Error('Launch profile changed')
       if (realpathSync(config) !== config) throw Error('Config changed')
       // An implicit Anthropic profile is a different auth source. Do not inspect
       // its credential files or guess whether a cached login will outrank it.
@@ -68,8 +71,9 @@ export function observeNativeFileAuth(input: { cwd: string; argv: readonly strin
           if (!stat.isFile() || stat.nlink !== 1n || stat.size > 65536n || realpathSync(path) !== path) throw Error('Settings source unknown')
           const bytes = readFileSync(fd), value = JSON.parse(bytes.toString('utf8'))
           if (!value || typeof value !== 'object' || Array.isArray(value)
-            || ['primaryApiKey', 'apiKey', 'apiKeyHelper', 'env', 'awsAuthRefresh', 'awsCredentialExport', 'gcpAuthRefresh', 'proxyAuthHelper', 'processWrapper']
-              .some(key => Object.hasOwn(value, key))) throw Error('Competing settings auth')
+            || ['primaryApiKey', 'apiKey', 'apiKeyHelper', 'env', 'awsAuthRefresh', 'awsCredentialExport', 'gcpAuthRefresh', 'proxyAuthHelper', 'processWrapper', 'availableModels', 'modelOverrides']
+              .some(key => Object.hasOwn(value, key))
+            || !settings.includes(path) && Object.hasOwn(value, 'hooks')) throw Error('Competing settings auth or model policy')
           const after = fstatSync(fd, { bigint: true })
           if (stat.size !== after.size || stat.ctimeNs !== after.ctimeNs || stat.mtimeNs !== after.mtimeNs) throw Error('Settings changed')
           digest.update([stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':')).update(bytes)

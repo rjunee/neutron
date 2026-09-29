@@ -16,6 +16,7 @@ import { readArmedTrailerReservation } from './trailer-slot.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
 import { nativeChildContinuationCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
 import { acquireClaudeCapacity, type AcquireClaudeCapacity, type ClaudeCapacityReceipt } from './claude-capacity-client.ts'
+import { NATIVE_CONTINUATION_PROFILE, nativeModelPin } from '../adapters/claude-code/persistent/native-model-launch.ts'
 
 type Boundary = { offset: number; dev: number; ino: number; prefixDigest: string }
 interface Preparation {
@@ -55,8 +56,7 @@ const message = (nonce: string) => `Continue the original bounded task with its 
 
 /** Launch-input compatibility pin, NOT a served catalog or account witness.
  * Upgrading this profile requires the same native continuation controls. */
-export const CLAUDE_CONTINUATION_PROFILE = Object.freeze({ version: '2.1.285',
-  sha256: '33dad1ec615a2e08cc78b494f05c110e49916de2c79d78ec8799ebf46b233d29' })
+export const CLAUDE_CONTINUATION_PROFILE = NATIVE_CONTINUATION_PROFILE
 
 function knownLaunch(launch: NativeParentLaunchEvidence | undefined, sessionId: string, generation: string, projectId: string | null): boolean {
   if (!launch || launch.version !== 1 || launch.sessionId !== sessionId || launch.childGeneration !== generation
@@ -161,9 +161,18 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
       if (!currentParentKnown()) return unknown('launch-unknown')
       const auth = readNativeParentFileAuth(session)
       if (!options.capacity || !auth || !parent.launch?.fileAuth
-        || parent.launch.fileAuth.configDir !== auth.evidence.configDir
+        || !isDeepStrictEqual(parent.launch.fileAuth, auth.evidence)
         || options.capacity.configDir !== auth.evidence.configDir) return unknown('capacity-unavailable')
+      let modelId = request.model_id
+      if (!modelId.startsWith('claude-')) {
+        const model = parent.launch.model, current = readNativeParentLaunchEvidence(session)?.model
+        if (!model || model.selector !== modelId || !isDeepStrictEqual(nativeModelPin(model), model)
+          || !isDeepStrictEqual(current, model)
+          || parent.launch.argv.flatMap((arg, i) => arg === '--model' ? [parent.launch!.argv[i + 1]] : []).join() !== model.modelId) return unknown('capacity-unavailable')
+        modelId = model.modelId
+      }
       const capacity = await (options.capacity.acquire ?? acquireClaudeCapacity)({ request, leaseId: authority.lease.token,
+        modelId,
         childId: agentId, eventDigest: quota.digest, configDir: options.capacity.configDir, env: options.capacity.env,
         signal, deadline: options.deadline })
       if (capacity.kind !== 'available') return unknown(capacity.kind === 'waiting' ? 'capacity-waiting' : 'capacity-unavailable')

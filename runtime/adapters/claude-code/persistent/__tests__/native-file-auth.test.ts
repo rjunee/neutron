@@ -24,12 +24,12 @@ test('fresh clean file-auth source observation is credential-free and settings c
   expect(f.observe()).toBeUndefined()
 })
 
-test.each(['ANTHROPIC_UNIX_SOCKET', 'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR', 'ANTHROPIC_PROFILE', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR'])('inherited %s is not file authentication', async key => {
+test.each(['ANTHROPIC_UNIX_SOCKET', 'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR', 'ANTHROPIC_PROFILE', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR', 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE'])('inherited %s is not file authentication', async key => {
   const f = await fixture(); f.input.env[key] = 'fixture'
   expect(f.observe()).toBeUndefined()
 })
 
-test.each(['user-helper', 'project-env', 'policy-helper', 'drop-in-env', 'legacy-key', 'profile'])('alternate auth source %s refuses', async mode => {
+test.each(['user-helper', 'project-env', 'policy-helper', 'drop-in-env', 'legacy-key', 'profile', 'hooks', 'allowlist'])('alternate auth source %s refuses', async mode => {
   const f = await fixture()
   let path = join(f.config, 'settings.json'), value: object = { apiKeyHelper: 'never-execute' }
   if (mode === 'project-env') { path = join(f.cwd, '.claude', 'settings.local.json'); value = { env: { ANTHROPIC_AUTH_TOKEN: 'test-only' } } }
@@ -37,6 +37,8 @@ test.each(['user-helper', 'project-env', 'policy-helper', 'drop-in-env', 'legacy
   if (mode === 'drop-in-env') { path = join(f.policy, 'managed-settings.d', 'auth.json'); value = { env: {} } }
   if (mode === 'legacy-key') { path = join(f.config, '.claude.json'); value = { primaryApiKey: 'test-only' } }
   if (mode === 'profile') path = join(f.root, '.config', 'anthropic', 'config.json')
+  if (mode === 'hooks') value = { hooks: {} }
+  if (mode === 'allowlist') value = { availableModels: ['haiku'] }
   await mkdir(join(path, '..'), { recursive: true }); await writeFile(path, JSON.stringify(value))
   expect(f.observe()).toBeUndefined()
 })

@@ -579,7 +579,7 @@ async function spawnSession(
         : undefined
       child = await ptyHost.spawn(launch?.argv ?? argv, {
       cwd,
-      env: childEnv,
+      env: launch?.env ?? childEnv,
       ...(options.repl_pane_label !== undefined ? { label: options.repl_pane_label } : {}),
       ...(options.projectPlacement !== undefined ? { projectPlacement: options.projectPlacement } : {}),
       // SNAPSHOT-REPLACE, not append — on either backend. Each delivery is the child's

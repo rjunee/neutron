@@ -11,6 +11,9 @@ export interface ClaudeCapacityPin {
 }
 export interface ClaudeCapacityInput {
   request: BoundedWorkRequest; leaseId: string; childId: string; eventDigest: string
+  /** Concrete ID independently bound by the host to the original native launch.
+   * The original request remains unchanged and is digested in full. */
+  modelId?: string
   configDir: string; env: Record<string, string | undefined>; signal: AbortSignal; deadline: number
 }
 interface CapacityRequest {
@@ -78,12 +81,13 @@ export function claudeCapacityFileAuth(pin: ClaudeCapacityPin, input: Pick<Claud
  * Exported separately from provisioning for real-socket consuming tests. */
 export async function connectClaudeCapacity(pin: ClaudeCapacityPin, input: ClaudeCapacityInput): Promise<ClaudeCapacityOutcome> {
   try {
+    const modelId = input.modelId ?? input.request.model_id
     if (!validPin(pin) || !claudeCapacityFileAuth(pin, input) || input.signal.aborted || Date.now() >= input.deadline
-      || !/^claude-[a-z0-9][a-z0-9.-]{1,119}$/.test(input.request.model_id)
+      || !/^claude-[a-z0-9][a-z0-9.-]{1,119}$/.test(modelId)
       || !text(input.leaseId) || !text(input.childId) || !digest(input.eventDigest)) return unknown()
     const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
     const request: CapacityRequest = { version: 1, kind: 'claude-capacity-request', instanceId: pin.instanceId,
-      challenge: randomBytes(24).toString('base64url'), modelId: input.request.model_id,
+      challenge: randomBytes(24).toString('base64url'), modelId,
       requestDigest: createHash('sha256').update(JSON.stringify(input.request)).digest('hex'),
       leaseId: input.leaseId, childId: input.childId, eventDigest: input.eventDigest }
     const started = Date.now(), deadline = Math.min(input.deadline, started + 85_000)
