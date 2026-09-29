@@ -821,7 +821,8 @@ function fakeGithub(input: { origin: string; repo: string }) {
       const [ref, head] = line.split(' ')
       return [ref!, head!] as const
     }) : [])
-    const all: Record<string, unknown> = { number: pr.number, state: pr.state, headRefName: pr.headRefName,
+    const all: Record<string, unknown> = { number: pr.number, state: pr.state,
+      url: `https://github.com/fixture/project/pull/${pr.number}`, headRefName: pr.headRefName,
       baseRefName: pr.baseRefName, baseRefOid: heads.get(refs[0]!) ?? '', isCrossRepository: false, headRefOid: heads.get(refs[1]!) ?? '', mergeable: 'MERGEABLE', isDraft: pr.isDraft ?? false }
     return Object.fromEntries(fields.map(field => [field, all[field]]))
   }
