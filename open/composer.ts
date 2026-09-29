@@ -83,6 +83,7 @@ import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
 import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
 import { reconcileClaudeNativeDispatches } from './wiring/claude-native-dispatch-reconcile.ts'
+import { reconcileClaudeNativeUsage } from './wiring/claude-native-usage-reconcile.ts'
 import { reconcileNativeHostTerminations } from './wiring/native-host-termination.ts'
 import type { NativeHostRecoveryAuthority } from '@neutronai/runtime/workers/native-host-termination.ts'
 import { buildAdmissionReleaseObserver } from '@neutronai/gateway/proactive/admission-release.ts'
@@ -4600,6 +4601,13 @@ export function buildOpenGraphComposer(
     // row. Stateless wrapper — a second instance elsewhere is harmless.
     const boardRunStore = new TridentRunStore(db)
     const reconcileNativeDispatches = async () => {
+      // Accounting is independent of result recovery and remains eligible after
+      // successful child admission was released. Failures never veto recovery.
+      try {
+        await reconcileClaudeNativeUsage({ attempts: new TridentAttemptLedger(db), ownerHandle: projectAdmission.ownerHandle,
+          runs: boardRunStore, projectIdForRun: run => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+          event: (runId, stage, meta) => boardRunStore.recordStageEvent(runId, stage, meta) })
+      } catch { log.warn('native_usage_reconciliation_unavailable') }
       const result = await reconcileClaudeNativeDispatches({
         stateRoot: projectBuildStateRoot, admission: projectAdmission, runs: boardRunStore,
         attempts: new TridentAttemptLedger(db), listProjectIds,

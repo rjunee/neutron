@@ -74,6 +74,7 @@ import { decodeLedger } from '../../tests/fixtures/trident-ledger-delta/decode.t
 // eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
 import { compareLedgerDelta } from '../../tests/fixtures/trident-ledger-delta/compare.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { reconcileClaudeNativeUsage } from '../wiring/claude-native-usage-reconcile.ts'
 import { retryModeSource, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
 import { dispatchBoardBoundBuild, type BoardBoundBuildDeps } from '@neutronai/trident/board-dispatch.ts'
@@ -7395,6 +7396,52 @@ test('a driver restarted during a worker turn refuses to re-fire it', async () =
   expect(f.github.prs).toHaveLength(1)
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 300_000)
+
+test('accepted native result archives authority before lease release and enriches late ACK usage after restart', async () => {
+  const f = await fixture({ nativeUsage: true })
+  expect((await drive(f)).kind).toBe('merged')
+  const attempt = f.context.attempts.list(f.row.id).find(row => row.role === 'build')!
+  const binding = f.context.attempts.nativeUsageBinding(attempt)!
+  expect(binding).not.toBeNull()
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+  expect(f.context.attempts.receipt(attempt)).toMatchObject({ input_tokens: 7, output_tokens: 3, cost_usd: null })
+  const beforeAttempts = f.context.attempts.list(f.row.id)
+  const beforeRun = f.store.get(f.row.id)
+  const { parent, nativeAgentId, request } = binding.receipt.body
+  const late = { agentId: nativeAgentId, sessionId: parent!.sessionId, isSidechain: true, type: 'assistant',
+    message: { id: 'late-ack', role: 'assistant', model: request.model_id,
+      usage: { input_tokens: 11, output_tokens: 5, cache_read_input_tokens: 13, cache_creation_input_tokens: 0 } } }
+  await appendFile(join(binding.directory, `agent-${nativeAgentId}.jsonl`), `${JSON.stringify(late)}\n${JSON.stringify(late)}\n`)
+  // Neither the unsigned observer file nor metadata can redirect the archive.
+  await writeFile(join(f.context.stateRoot, f.row.id,
+    `claude-observer-${createHash('sha256').update(attempt.step_id).digest('hex')}.json`), '{}')
+  await writeFile(join(binding.directory, `agent-${nativeAgentId}.meta.json`), '{}')
+  pool.delete(f.key); supervisedBySessionKey.delete(f.key)
+  f.world.dispatches.length = 0
+  const reopened = ProjectDb.open(join(f.dir, 'project.db')); cleanups.push(() => reopened.close())
+  const attempts = new TridentAttemptLedger(reopened), runs = new TridentRunStore(reopened)
+  const reconcile = () => reconcileClaudeNativeUsage({ attempts, runs, ownerHandle: f.admission.ownerHandle,
+    projectIdForRun: () => null, event: (id, stage, meta) => runs.recordStageEvent(id, stage, meta) })
+  expect((await reconcile()).observed).toBeGreaterThan(0)
+  expect(attempts.receipt(attempt)).toMatchObject({ input_tokens: 18, output_tokens: 8, cache_read_tokens: 15, cost_usd: null })
+  await reconcile()
+  expect(attempts.receipt(attempt)?.input_tokens).toBe(18)
+  expect(attempts.list(f.row.id)).toEqual(beforeAttempts)
+  expect(runs.get(f.row.id)).toEqual(beforeRun)
+  expect(f.world.dispatches).toEqual([])
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+}, 30_000)
+
+test('native usage archive failure cannot veto an accepted result or retain its released admission', async () => {
+  const f = await fixture({ nativeUsage: true })
+  const archive = spyOn(f.context.attempts, 'archiveNativeUsage').mockRejectedValue(new Error('unavailable telemetry store'))
+  try {
+    expect((await drive(f)).kind).toBe('merged')
+    expect(archive).toHaveBeenCalled()
+    expect(f.admission.listLeases('liveChild')).toEqual([])
+    expect(f.store.stageEvents(f.row.id).some(event => event.stage === 'attempt-usage-binding-unavailable')).toBe(true)
+  } finally { archive.mockRestore() }
+}, 30_000)
 
 test('attempt accounting reconciles pre-crash provider spend through actual pending gateway recovery without dispatch or approval', async () => {
   const f = await fixture({ blockRoles: ['review'], nativeUsage: true })

@@ -634,6 +634,18 @@ CREATE TABLE code_trident_dispatch_holds (
     updated_at        TEXT NOT NULL
 )
 
+[table] code_trident_native_usage_bindings (tbl=code_trident_native_usage_bindings)
+CREATE TABLE code_trident_native_usage_bindings (
+    run_id TEXT NOT NULL,
+    step_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    binding TEXT NOT NULL CHECK (json_valid(binding)),
+    checked_at INTEGER CHECK (checked_at BETWEEN 0 AND 9007199254740991),
+    PRIMARY KEY (run_id, step_id, attempt_id),
+    FOREIGN KEY (run_id, step_id, attempt_id)
+      REFERENCES code_trident_attempts(run_id, step_id, attempt_id) ON DELETE CASCADE
+) STRICT
+
 [table] code_trident_phase_usage (tbl=code_trident_phase_usage)
 CREATE TABLE code_trident_phase_usage (
     run_id TEXT NOT NULL REFERENCES code_trident_runs(id) ON DELETE CASCADE,

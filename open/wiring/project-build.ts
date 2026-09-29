@@ -9,7 +9,7 @@ import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
-import { createClaudeNativeDispatchReceipt, readClaudeNativeDispatchReceipt, type NativeDispatchEvidence } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
+import { createClaudeNativeDispatchReceipt, readClaudeNativeDispatchReceipt, verifyNativeDispatchChildBound, type NativeDispatchAuthority, type SignedNativeDispatchRecord, type NativeDispatchEvidence } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
 import { admitNativeChildWorkspace, completeNativeChildWorkspace, completeNativeChildWorkspaceRequest, type NativeChildWorkspace } from '@neutronai/runtime/workers/native-child-workspace.ts'
 import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
@@ -443,6 +443,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // (see the acting turn below). Resolves or spawns the project REPL and hands
   // the step to it as a native child.
   const nativeWorkspaces = new Map<string, NativeChildWorkspace>()
+  const usageLocations = new Map<string, { session: string; directory: string }>()
   const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0], generation: number, onDispatchSubmitted: () => void,
     evidence: (event: NativeDispatchEvidence) => void, enterActor: () => void): ReturnType<ProjectActingTurn> => {
     const deadline = turn.deadline_ms ?? Date.now() + Math.min(turn.timeout_ms, turn.request.budget.wall_ms)
@@ -512,6 +513,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     const transcript = sessionJsonlPath(session.sessionId, session.cwd, resolveTranscriptProjectsDir(options))
     const observer = JSON.stringify({ request: turn.request, session: session.sessionId,
       directory: join(transcript.slice(0, -'.jsonl'.length), 'subagents') })
+    usageLocations.set(turn.request.step_id, { session: session.sessionId,
+      directory: join(transcript.slice(0, -'.jsonl'.length), 'subagents') })
     try { await writeFile(observerPath(turn.request.step_id), observer, { flag: 'wx', mode: 0o600 }) }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await readFile(observerPath(turn.request.step_id), 'utf8') !== observer) {
@@ -572,6 +575,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       }
       let outcome: Awaited<ReturnType<ProjectActingTurn>> | undefined
       let receipt: ReturnType<typeof createClaudeNativeDispatchReceipt> | undefined
+      let authority: NativeDispatchAuthority | undefined
       let actorEntered = false
       let notSubmitted = false
       const evidence = (event: NativeDispatchEvidence) => {
@@ -580,7 +584,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         if (event.kind === 'not-submitted') notSubmitted = true
       }
       try {
-        const authority = context.nativeChildAdmission.dispatchAuthority?.(child.lease, turn.request)
+        authority = context.nativeChildAdmission.dispatchAuthority?.(child.lease, turn.request)
         if (!authority) return { kind: 'unknown', detail: 'Original native dispatch signing authority is unavailable' }
         try { receipt = createClaudeNativeDispatchReceipt(state, turn.request, authority) }
         catch { return { kind: 'unknown', detail: 'Original native dispatch receipt cannot be exclusively established' } }
@@ -598,6 +602,21 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
           try { evidence({ kind: 'not-submitted' }) } catch { /* Incomplete durable evidence keeps the lease. */ }
         }
         receipt?.close()
+        // Capture accounting provenance before a validated result can release
+        // admission. Telemetry failure cannot veto that result.
+        const location = usageLocations.get(turn.request.step_id)
+        if (authority && location) {
+          try {
+            const signed = readClaudeNativeDispatchReceipt(state, turn.request)
+            const pin = authority.lease
+            if (verifyNativeDispatchChildBound(signed, turn.request, pin)
+              && (signed as SignedNativeDispatchRecord).body.parent?.sessionId === location.session) {
+              await context.attempts.archiveNativeUsage({ run_id: run.id, step_id: turn.request.step_id, attempt_id: 'dispatch' },
+                { version: 1, lease: pin, receipt: signed as SignedNativeDispatchRecord, directory: location.directory, captured_at: Date.now() }, turn.request)
+            }
+          } catch { await accounting.recordEvent('attempt-usage-binding-unavailable', { run_id: run.id, step_id: turn.request.step_id }) }
+        }
+        usageLocations.delete(turn.request.step_id)
         context.nativeChildAdmission.finishPreparing?.(child.lease)
         // Parent-turn completion does not establish child completion. Only a
         // refusal before dispatch releases here; the consuming trailer validator
