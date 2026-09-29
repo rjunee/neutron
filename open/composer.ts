@@ -202,7 +202,7 @@ import {
   provisionAgentSkills,
   resolveAgentSkillsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
-import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { TridentRunStore, type TridentRun, type PendingAgentWakeCursor } from '@neutronai/trident/store.ts'
 import { TridentUsageAnalytics } from '@neutronai/trident/usage-analytics.ts'
 import { TranscriptUsageIngestor } from '@neutronai/trident/transcript-usage.ts'
 import { findNewestRollout } from '@neutronai/trident/codex-rotation-io.ts'
@@ -4906,11 +4906,19 @@ export function buildOpenGraphComposer(
     const terminalBuildWake = async (_run: TridentRun): Promise<void> => {
       terminalDecisionRetry.wake()
     }
+    // Scheduling position only: durable completion still belongs to the observer.
+    // A restart begins oldest first; a read failure leaves this position intact.
+    let terminalWakeCursor: PendingAgentWakeCursor | undefined
     const terminalDecisionRetry = new SupervisedLoop({
       name: 'terminal-build-decisions', intervalMs: 60_000,
       tick: async () => {
-        for (const run of boardRunStore.listPendingAgentWakes()) {
-          await observeTerminalBuildWake(run)
+        for (const run of boardRunStore.listPendingAgentWakes(undefined, terminalWakeCursor)) {
+          try {
+            await observeTerminalBuildWake(run)
+          } finally {
+            // Refusal or failure must not pin every later sweep to the same rows.
+            terminalWakeCursor = { last_advanced_at: run.last_advanced_at, id: run.id }
+          }
         }
       },
     })

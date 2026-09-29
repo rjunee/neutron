@@ -77,6 +77,24 @@ is the thing being rebuilt.
       reading the old file top to bottom — and pin each. A gate silently lost in a rewrite
       is the most likely real defect in this whole item.
 
+- [x] **Pending terminal decisions receive bounded fair selection.** With a finite,
+      stable inbox and settling observer attempts, five older refused wakes cannot
+      indefinitely exclude a sixth ready project. Each sweep attempts at most five
+      rows. Selection rotates in deterministic `(last_advanced_at, id)` order;
+      refused rows remain durably pending and become eligible again on wraparound.
+      Completed and removed rows do not shift an offset or block progress; incoming
+      rows remain eligible. A failed inbox read preserves the scheduling position,
+      and an attempted observer failure advances it without recording completion.
+      Restart resets the position to oldest first and recovers the pending inbox.
+      All existing admission, custody and lease gates remain in force; only a
+      durably posted decision permits completion. This is selection fairness across
+      sweeps, not a wall-clock deadline: admission and chat-queue waiting precede
+      the acting-turn timeout. Repeated restarts or a continuously growing inbox
+      are outside the finite stable-inbox progress guarantee.
+      Verify: `bun test trident/store.test.ts open/__tests__/open-terminal-build-wake-wiring.test.ts`
+      (including held-to-ready, retry-after-reopen, read/observer failure, tie and
+      churn controls). Consuming build path: `bun test open/__tests__/project-build-e2e.test.ts`.
+
 The removed Work Board mutation box was agent-authored and appears in no governing spec;
 it is not an owner requirement and must not be reinstated as acceptance criteria.
 

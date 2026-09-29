@@ -170,22 +170,16 @@ describe('claimAgentWake', () => {
   // after 0127 shipped would have driven 152 of them at once — every run that
   // went terminal between 2026-08-07 and 2026-08-22, none from the last day.
   test('the pending sweep is bounded, and drains oldest first', async () => {
-    const store = new TridentRunStore(db)
+    let stamp = 1_700_000_000_000
+    const store = new TridentRunStore(db, () => new Date(stamp += 1000).toISOString())
     const ids: string[] = []
     for (let i = 0; i < 8; i++) {
       const run = await store.create({
         slug: `wake-backlog-${i}`, project_slug: 't1', repo_path: '/r', task: 't',
         chat_id: 'app:owner:t1',
       })
-      // A FULL SNAPSHOT SAVE, because `last_advanced_at` is not a patchable field
-      // and the ordering under test is entirely about it. Spacing the stamps by a
-      // second means the ASC the sweep relies on is being read from the column and
-      // not from an incidental insertion order.
-      await store.save({
-        ...run,
-        phase: 'done',
-        last_advanced_at: new Date(1_700_000_000_000 + i * 1000).toISOString(),
-      })
+      // The injected clock gives the writer distinct, deterministic ordering keys.
+      await store.update(run.id, { phase: 'done' })
       ids.push(run.id)
     }
 
@@ -208,6 +202,48 @@ describe('claimAgentWake', () => {
 
     await store.save(store.get(run.id)!)
     expect(await store.claimAgentWake(run.id)).toBe(false)
+  })
+
+  test('pending cursor wraps with deterministic ties, bounded reads, churn and a fresh reader', async () => {
+    let stamp = '2026-01-01T00:00:00.000Z'
+    const store = new TridentRunStore(db, () => stamp)
+    const make = async (slug: string, chat_id: string | null = 'app:owner:p', terminal = true) => {
+      const run = await store.create({ slug, project_slug: 'p', repo_path: '/r', task: 't', chat_id })
+      if (terminal) await store.update(run.id, { phase: 'done' })
+      return store.get(run.id)!
+    }
+    const tied = await Promise.all(Array.from({ length: 7 }, (_, i) => make(`tied-${i}`)))
+    tied.sort((a, b) => a.id < b.id ? -1 : 1)
+    await make('no-chat', null)
+    await make('empty-chat', '')
+    await make('active', 'app:owner:p', false)
+    const completed = await make('completed')
+    await store.claimAgentWake(completed.id)
+    const first = store.listPendingAgentWakes()
+    expect(first.map(run => run.id)).toEqual(tied.slice(0, 5).map(run => run.id))
+    const cursor = first[4]!
+    expect(store.listPendingAgentWakes(undefined, cursor).map(run => run.id))
+      .toEqual([...tied.slice(5), ...tied.slice(0, 3)].map(run => run.id))
+    // Reading and wrapping do not stamp completion or mutate the ordering key.
+    for (const run of tied) {
+      expect(store.agentWakeCompleted(run.id)).toBe(false)
+      expect(store.get(run.id)?.last_advanced_at).toBe(stamp)
+    }
+    expect(store.listPendingAgentWakes(100)).toHaveLength(5)
+    expect(store.listPendingAgentWakes(0)).toEqual([])
+    for (const limit of [-1, NaN, Infinity, 1.5]) expect(() => store.listPendingAgentWakes(limit)).toThrow(RangeError)
+    await store.delete(cursor.id)
+    await store.claimAgentWake(tied[5]!.id)
+    stamp = '2026-01-02T00:00:00.000Z'
+    const incoming = await make('incoming')
+    expect(store.listPendingAgentWakes(undefined, cursor).map(run => run.id))
+      .toEqual([tied[6]!, incoming, ...tied.slice(0, 3)].map(run => run.id))
+    // Completion of the cursor row is also harmless; no offset into a shrinking set.
+    await store.claimAgentWake(incoming.id)
+    expect(store.listPendingAgentWakes(undefined, incoming).map(run => run.id))
+      .toEqual([...tied.slice(0, 4), tied[6]!].map(run => run.id))
+    expect(new TridentRunStore(db).listPendingAgentWakes().map(run => run.id))
+      .toEqual([...tied.slice(0, 4), tied[6]!].map(run => run.id))
   })
 })
 
