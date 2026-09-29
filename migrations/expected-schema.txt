@@ -506,6 +506,23 @@ CREATE TABLE button_prompts (
     resolution_channel_kind TEXT
 , kind TEXT) STRICT
 
+[table] claude_mcp_handler_calls (tbl=claude_mcp_handler_calls)
+CREATE TABLE claude_mcp_handler_calls (
+  generation_key TEXT NOT NULL REFERENCES claude_mcp_handler_generations(generation_key),
+  invocation_id TEXT NOT NULL,
+  binding TEXT NOT NULL,
+  outcome TEXT,
+  PRIMARY KEY (generation_key, invocation_id)
+)
+
+[table] claude_mcp_handler_generations (tbl=claude_mcp_handler_generations)
+CREATE TABLE claude_mcp_handler_generations (
+  generation_key TEXT PRIMARY KEY,
+  identity TEXT NOT NULL,
+  closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1)),
+  covered INTEGER NOT NULL CHECK (covered IN (0, 1))
+)
+
 [table] code_ritual_runs (tbl=code_ritual_runs)
 CREATE TABLE code_ritual_runs (
     -- Minted per FIRE ATTEMPT (a UUID) — NOT the subagent run id: a validation
