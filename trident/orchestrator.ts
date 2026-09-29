@@ -3051,7 +3051,13 @@ export function buildTridentOrchestrator(
     } else if (out.waiting && worker.state !== 'unknown') {
       out.note += `; worker=${worker.state}; ${worker.detail}`
     }
-    if (out.changed && out.run.phase === 'failed' && !isTerminalPhase(run.phase)) {
+    // The authenticated recovery's pre-fire refusal is terminal by design. It
+    // has not produced new work, and treating its inherited published branch as
+    // stranded work could invoke the ordinary PR publisher after the source
+    // failed its second remote check. The source/card refusal is already durable.
+    const recoverySourceRefused =
+      out.run.failure_reason?.startsWith('Orchestrator recovery refused:') === true
+    if (out.changed && out.run.phase === 'failed' && !isTerminalPhase(run.phase) && !recoverySourceRefused) {
       const salvaged = await reconcile_stranded(out.run)
       if (salvaged !== null) {
         const publishedNow =
