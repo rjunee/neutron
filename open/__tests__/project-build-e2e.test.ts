@@ -55,7 +55,7 @@ import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/c
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { projectInstallAvailableBytes } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { appendFile, chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -97,6 +97,7 @@ import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { createProjectBuildHost, type ProjectBuildOutcome } from '@neutronai/trident/project-build-host.ts'
 import { spawnCapture as captureProcess, type HostCommandResult } from '@neutronai/trident/git-mode.ts'
 import { runHostSuite } from '@neutronai/trident/host-suite.ts'
+import { buildTestStrategyDetail } from '@neutronai/trident/test-strategy.ts'
 import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
 import { VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { taskLedgerPath, workContextPath } from '@neutronai/trident/production-host-effects.ts'
@@ -979,6 +980,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   hostLedger?: boolean
   bunWorkspace?: boolean
   bunWorkspaceDefaultConfig?: boolean
+  bunPackageSuite?: boolean
   bunWorkspacePeer?: boolean
   bunWorkspaceSibling?: boolean
   manifest?: Record<string, unknown>
@@ -1089,11 +1091,14 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       // isolated store and package-local resolution, just like the production suite.
       await mkdir(join(repo, 'app'), { recursive: true })
       await mkdir(join(repo, 'vendor', 'package'), { recursive: true })
-      await writeFile(join(repo, '.gitignore'), 'node_modules/\n')
+      await writeFile(join(repo, '.gitignore'), 'node_modules/\n' + (options.bunPackageSuite ? '.env\n' : ''))
       await writeFile(join(repo, 'package.json'), JSON.stringify({ name: 'fixture', private: true, workspaces: options.bunWorkspaceSibling ? ['app', 'cores/sdk'] : ['app'],
-        scripts: { postinstall: 'touch lifecycle-ran' } }))
+        ...(options.bunPackageSuite ? { dependencies: { 'fixture-dependency': 'file:vendor/dependency.tgz' } } : {}),
+        scripts: { postinstall: 'touch lifecycle-ran', ...(options.bunPackageSuite ? { test: 'bash scripts/run-tests.sh' } : {}) } }))
       if (!options.bunWorkspaceDefaultConfig) await writeFile(join(repo, 'bunfig.toml'), '[install]\nlinker = "isolated"\n')
-      await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js' }))
+      await writeFile(join(repo, 'vendor', 'package', 'package.json'), JSON.stringify({ name: 'fixture-dependency', version: '1.0.0', main: 'index.js',
+        ...(options.bunPackageSuite ? { bin: { 'suite-local-helper': 'helper.sh' } } : {}) }))
+      if (options.bunPackageSuite) await writeFile(join(repo, 'vendor/package/helper.sh'), '#!/bin/sh\nprintf "package-local helper\\n"\n', { mode: 0o755 })
       await writeFile(join(repo, 'vendor', 'package', 'index.js'), 'exports.message = "dependency consumed"\n')
       const packed = await spawnCapture(['tar', '-czf', 'dependency.tgz', 'package'], join(repo, 'vendor'))
       expect(packed.ok).toBe(true)
@@ -1123,6 +1128,16 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await rm(join(repo, 'lifecycle-ran'))
       await rm(join(repo, 'node_modules'), { recursive: true, force: true })
       await rm(join(repo, 'app', 'node_modules'), { recursive: true, force: true })
+      if (options.bunPackageSuite) {
+        for (const path of ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh']) {
+          await mkdir(dirname(join(repo, path)), { recursive: true })
+          await copyFile(new URL(`../../${path}`, import.meta.url), join(repo, path))
+        }
+        // Production nests retry worktrees below the original installed repo.
+        // Keep a populated ancestor bin without letting it supply launcher tools.
+        await mkdir(join(repo, 'node_modules/.bin'), { recursive: true })
+        await writeFile(join(repo, 'node_modules/.bin/ancestor-only-tool'), '#!/bin/sh\nexit 0\n', { mode: 0o755 })
+      }
     }
     await writeFile(join(repo, 'NOTES.md'), 'seed\n')
     if (options.spec) await writeFile(join(repo, 'SPEC.md'), '# Project specification\n\nRecord and verify notes.\n')
@@ -3393,8 +3408,10 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
   expect(f.world.dispatches).toHaveLength(0)
 }, 120_000)
 
-for (const changed of ['none', 'head', 'dependencies', 'environment', 'strategy', 'subset', 'legacy', 'red', 'invalidated'] as const)
-test(`prepared cross-run suite proof handles ${changed} inputs in a distinct retry worktree`, async () => {
+for (const launcher of ['bare', 'package'] as const)
+for (const changed of ['none', 'head', 'dependencies', 'environment', 'strategy', 'subset', 'legacy', 'red', 'invalidated',
+  ...(launcher === 'package' ? ['hooks', 'config', 'tool-resolution', 'bash-shadow', 'node-absent', 'startup-env', 'runner', 'inner-env'] as const : [])] as const)
+test(`prepared cross-run ${launcher} suite proof handles ${changed} inputs in a distinct retry worktree`, async () => {
   // The outer CI shard selects this test, not the nested project's full suite.
   const outerShard = process.env.NEUTRON_TEST_SHARD
   cleanups.push(() => {
@@ -3403,8 +3420,13 @@ test(`prepared cross-run suite proof handles ${changed} inputs in a distinct ret
   })
   delete process.env.NEUTRON_TEST_SHARD
   const task = 'Record a note in NOTES.md and verify the resulting change with the complete regression suite'
-  const f = await fixture({ bunWorkspace: true, bunWorkspaceDefaultConfig: true, dispatchTask: task,
+  const f = await fixture({ bunWorkspace: true, bunWorkspaceDefaultConfig: true, bunPackageSuite: launcher === 'package', dispatchTask: task,
     testStrategy: 'TEST EXECUTION: run the card regression.\n\nFull suite (stage 2), run exactly this:\n\n  bun test\n' })
+  if (launcher === 'package') {
+    f.input.test_strategy = buildTestStrategyDetail(f.repo, { cores: 2, active_runs: 1, mem_available_bytes: 4 * 1024 ** 3, base_branch: 'main' }).block
+    expect(f.input.test_strategy).toContain('bun run test')
+    expect(f.input.test_strategy).toContain('export NEUTRON_TEST_JOBS=')
+  }
   let suites = 0
   const original = f.context.runSuite!
   f.context.runSuite = async (...args) => { suites++; return original(...args) }
@@ -3412,7 +3434,12 @@ test(`prepared cross-run suite proof handles ${changed} inputs in a distinct ret
   const sourceWorktree = f.store.get(f.row.id)!.worktree!
   await writeFile(join(sourceWorktree, 'app', 'proof.test.ts'),
     'import { expect, test } from "bun:test"\nimport { message } from "fixture-dependency"\n'
-    + `test("installed dependency is consumed", () => expect(message).toBe(${JSON.stringify(changed === 'red' ? 'wrong dependency' : 'dependency consumed')}))\n`)
+    + `test("installed dependency is consumed", () => expect(message).toBe(${JSON.stringify(changed === 'red' ? 'wrong dependency' : 'dependency consumed')}))\n`
+    + (launcher === 'package' ? 'test("package PATH is preserved", () => expect(Bun.spawnSync(["suite-local-helper"]).stdout.toString().trim()).toBe("package-local helper"))\n'
+      // Bun 1.3.13 omits its file-count summary when every test is filtered out.
+      // This real passing test gives the unmodified runner's discovery probe a
+      // summary; the complete suite still executes every fixture test afterward.
+      + 'test("__neutron_runtests_no_match__ fixture discovery control", () => expect(true).toBe(true))\n' : ''))
   expect((await spawnCapture(['git', 'add', 'app/proof.test.ts'], sourceWorktree)).ok).toBe(true)
   expect((await spawnCapture(['git', 'commit', '-m', 'test: real portable suite'], sourceWorktree)).ok).toBe(true)
   const first = await createProjectBuildHost(preparedFirst)
@@ -3461,14 +3488,53 @@ test(`prepared cross-run suite proof handles ${changed} inputs in a distinct ret
   }
   const prepared = await f.prepare()
   const destination = f.store.get(dispatched.run.id)!.worktree!
+  if (launcher === 'package') {
+    expect(destination.startsWith(join(f.repo, '.trident-worktrees') + '/')).toBe(true)
+    expect((await stat(join(f.repo, 'node_modules/.bin'))).isDirectory()).toBe(true)
+  }
   expect(destination).not.toBe(sourceWorktree)
   expect((await stat(destination)).ino).not.toBe(sourceInode)
   if (changed === 'head') expect((await spawnCapture(['git', 'commit', '--allow-empty', '-m', 'test: moved suite revision'], destination)).ok).toBe(true)
   if (changed === 'dependencies') await writeFile(join(destination, 'node_modules', 'proof-input'), 'changed installed input')
+  if (changed === 'hooks') {
+    const manifest = JSON.parse(await readFile(join(destination, 'package.json'), 'utf8'))
+    manifest.scripts.pretest = 'true'
+    await writeFile(join(destination, 'package.json'), JSON.stringify(manifest))
+  }
+  if (changed === 'config') await writeFile(join(destination, 'bunfig.toml'), '[run]\nshell = "system"\n')
+  if (changed === 'runner') await appendFile(join(destination, 'scripts/run-tests.sh'), '\n# changed runner\n')
+  if (changed === 'inner-env') await writeFile(join(destination, '.env'), 'ENV=/unread/fixture-startup\n')
+  if (changed === 'tool-resolution' || changed === 'bash-shadow') {
+    // An ancestor PATH shadow must invalidate even though it is outside the
+    // destination's dependency tree and its Git revision has not moved.
+    const shell = changed === 'tool-resolution' ? 'sh' : 'bash'
+    await writeFile(join(f.repo, `node_modules/.bin/${shell}`), `#!/bin/sh\nexec /bin/${shell} "$@"\n`, { mode: 0o755 })
+  }
+  if (changed === 'node-absent') {
+    const directory = join(f.dir, 'without-node'), previous = process.env.PATH
+    await mkdir(directory)
+    for (const name of ['git', 'bash', 'sh', 'python3', 'bun', 'dirname', 'sysctl', 'nproc', 'find', 'sort', 'grep', 'tail',
+      'awk', 'mktemp', 'rm', 'sed', 'cat', 'wc', 'tr', 'sleep', 'head', 'date', 'readlink']) {
+      const selected = Bun.which(name)
+      if (selected) await symlink(selected, join(directory, name))
+    }
+    cleanups.push(() => { if (previous === undefined) delete process.env.PATH; else process.env.PATH = previous })
+    process.env.PATH = directory
+    expect(Bun.which('node', { PATH: directory })).toBeNull()
+  }
+  if (changed === 'startup-env') {
+    const previous = process.env.ENV
+    cleanups.push(() => { if (previous === undefined) delete process.env.ENV; else process.env.ENV = previous })
+    process.env.ENV = '/unread/fixture-startup'
+  }
+  if (['hooks', 'config', 'runner'].includes(changed)) {
+    expect((await spawnCapture(['git', 'add', '.'], destination)).ok).toBe(true)
+    expect((await spawnCapture(['git', 'commit', '-m', 'test: changed launcher inputs'], destination)).ok).toBe(true)
+  }
   const host = await createProjectBuildHost(prepared)
   const measured = await host.deps.measure()
   if (measured.kind !== 'known') throw Error('Expected measured retry')
-  if (changed === 'head') {
+  if (['head', 'hooks', 'config', 'runner'].includes(changed)) {
     // The review gate additionally binds the build checkpoint. A moved head
     // cannot inherit that authority even after publication acquires fresh proof.
     expect(await host.deps.reviewSuite!(measured.value, 1)).toMatchObject({ kind: 'unknown' })

@@ -209,12 +209,26 @@ barrier at `trident/build-run.ts:691-697`.
   run/event/round provenance under atomic ownership before using the observation.
   An adopted receipt is not itself a source for another cross-run adoption in
   this slice. No approval or mutation proof is imported by this mechanism.
-  Portable proof is limited to exact `bun test`, or the byte-verified first-party
-  `bash scripts/run-tests.sh` runner and its discovery/dependency helpers, with
-  documented numeric performance exports. Selected runtime and runner utility
-  executables are measured. Other strategies still run normally but cannot mint
-  portable proof. Tracked symlinks/gitlinks and unmeasured runtime/runner overrides
-  refuse portability; this does not claim hermetic execution of arbitrary tests.
+  Portable proof is limited to exact `bun test`, the byte-verified first-party
+  `bash scripts/run-tests.sh` runner and its discovery/dependency helpers, or
+  exact `bun run test` resolving to that exact package script, with documented
+  numeric performance exports. The package-script extension retains Bun's
+  invocation and requires absent pre/post-test hooks, closed local configuration,
+  and a fresh matching inner-process launcher record. Under the admitted Linux
+  default system-shell selector, measure every bash/sh/zsh candidate, the actual
+  inner Bash, selected Bun/Node bytes and versions, and runner utilities under
+  Bun's observed transformed PATH. Measure the full child PATH and environment
+  plus inner startup options; normalize only positively observed package-root
+  coordinates, retaining inherited environment identity and ancestor coordinates.
+  Ancestor bin directories are not dependency evidence and may not supply a
+  shadowed launcher tool. Unknown selectors/configuration/transformations,
+  missing Node or generated aliases, startup injection, and unresolved or
+  shadowed tools refuse portability. This measures a conservative interpreter
+  candidate set, not the identity of a transient interpreter after it has exec'd.
+  No Bun version allowlist substitutes for the measured record. Other strategies
+  still run normally but cannot mint portable proof. Tracked symlinks/gitlinks and
+  unmeasured runtime/runner overrides refuse portability; this does not claim
+  hermetic execution of arbitrary tests.
 
   Governed host suites execute the explicit configured command in a non-login
   Bash shell (`--noprofile --norc -c`) with `BASH_ENV` cleared. The inherited
@@ -223,7 +237,13 @@ barrier at `trident/build-run.ts:691-697`.
   put required setup in their configured suite command or tracked scripts.
   Verify real prepared retry reuse and refusal, continued review/merge gates,
   and profile-hook exclusion in `open/__tests__/project-build-e2e.test.ts`, with
-  identity and predecessor mutations in the focused suite-receipt tests.
+  identity and predecessor mutations in the focused suite-receipt tests. Package
+  launcher controls start at the real strategy generator and prepared nested
+  worktrees: the original green proof saves exactly one retry suite, while
+  changed lifecycle hooks, configuration, executable resolution, runner,
+  dependencies, environment, revision, or red/subset/legacy receipts require
+  fresh proof. Focused launcher controls also pair unchanged records with
+  shell shadows, absent Node and inner-startup-input refusals.
 
 - [ ] **Efficiency cannot reset budgets or bypass a gate.** Review rounds, one
   bounded re-plan, infrastructure retry ceilings/backoff and atomic claims retain
