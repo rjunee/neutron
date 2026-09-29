@@ -251,6 +251,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad project-id validation regex matches identity-name candidates; registered conservatively. No env access: validates explicit scope from the private owner launch descriptor before building the strict workspace host. Exact project/General scope and missing or foreign descriptor refusal are pinned in open/__tests__/codex-workspace-placement.test.ts; production scope propagation is pinned in open/__tests__/codex-workspace-composition.test.ts.',
   'runtime/workers/codex-build-observation.ts':
     'Broad thread-id validation regexes in isCodexBuildObservation and codexBuildObservation match identity-name candidates; registered conservatively. No env access. Provider observation behavior is pinned in runtime/workers/codex-build-observation.test.ts.',
+  'runtime/workers/claude-child-observation.ts':
+    'Broad child-id validation regex matches identity-name candidates; registered conservatively. No env access. Provider observation behavior is pinned in runtime/workers/claude-child-observation.test.ts.',
   'runtime/workers/codex-headless.ts':
     'Broad requested-thread-id validation regex matches identity-name candidates; registered conservatively. No identity-home resolution: the added CODEX_HOME read binds a receipt to its credential-home selector, not NEUTRON_HOME/OWNER_HOME/NEUTRON_DB_PATH. Thread and changed-credential-home behavior is pinned in runtime/workers/codex-headless.test.ts.',
   'agent-dispatch/command.ts':
@@ -963,6 +965,18 @@ test('claimed-path tokenizer is a regex match, not a direct identity env reader'
   expect(READ_PATTERNS.some((pattern) => pattern.test(realReader))).toBe(true)
   expect(processEnvAccess.test(realReader)).toBe(true)
   expect(identityKeyAccess.test(realReader)).toBe(true)
+})
+
+test('Claude child observation child-id validator is a conservative regex match', () => {
+  const observer = readFileSync(join(ROOT, 'runtime/workers/claude-child-observation.ts'), 'utf8')
+  const realReader = readFileSync(join(ROOT, 'migrations/db-path.ts'), 'utf8')
+  const processEnvAccess = /\bprocess\s*\.\s*env\b/
+  expect(namesIdentityVar(observer, 'runtime/workers/claude-child-observation.ts')).toBe(true)
+  expect(READ_PATTERNS.some((pattern) => pattern.test(observer))).toBe(false)
+  expect(processEnvAccess.test(observer)).toBe(false)
+  expect(namesIdentityVar(realReader, 'migrations/db-path.ts')).toBe(true)
+  expect(READ_PATTERNS.some((pattern) => pattern.test(realReader))).toBe(true)
+  expect(processEnvAccess.test(realReader)).toBe(true)
 })
 
 test('timeline importer evidence-reference validator is a conservative regex match', () => {

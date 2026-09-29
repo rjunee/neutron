@@ -86,6 +86,29 @@ the production startup hook. Positive legitimate controls pass after restoration
 The two live-capture/result-veto mutants fail in the named consuming E2E tests;
 the startup-hook mutant fails in actual Open composition, not a helper mock.
 
+The first integrated shared-host gate passed all 51 TypeScript projects and
+declared, discovered and executed the same 1,755 test files across 19 lanes.
+It exited 1: four tests failed in two lanes. Both explicit later-migration lists
+in `migrations/__tests__/live-ledger-125-repair.test.ts:93,177` omitted migration
+0162, while the identity registry had not classified the observer's child-ID
+validation regex (`runtime/workers/claude-child-observation.ts:55`). The suite
+input identity remained unchanged through that run:
+`d7db3bb78e5ee9effaa9655b36533b92a0c35efa2cc28292a1927c642cc677e6`.
+
+The bounded validation repair appends 162 to both explicit ordered lists and
+registers that broad regex conservatively
+(`tests/integration/identity-env-readers-registry.test.ts:254–255`). The added
+control at `tests/integration/identity-env-readers-registry.test.ts:970–980`
+detects the observer as a regex candidate, rejects actual env-read classification,
+and recognizes `migrations/db-path.ts` as the actual-reader positive control.
+The migration repair, identity registry and observer suites reproduced the four
+failures (43 passing tests, 169 assertions), then passed after repair (48 tests,
+190 assertions). Removing the registry entry caused its two completeness guards
+to fail; removing 162 from the explicit lists caused both migration assertions
+to fail. Restoring both repairs passed the same three suites again. These were
+semantic assertion failures. The corrected integrated full gate is still pending;
+the focused proof does not replace it.
+
 ### Deliberate boundary
 
 This is later observed-prefix enrichment, not proof that all lifetime tokens are
@@ -93,5 +116,5 @@ complete. A transcript may remain partial or later disappear. Attempts without
 a successfully captured original host binding are not retroactively trusted.
 No stop notification or transcript text becomes result, cancellation, admission,
 or lease-release authority. No provider/model/configuration change, live database
-write, paid probe or full-suite run was performed for this slice; the integrated
-full gate belongs to the publishing batch.
+write or paid probe was performed for this slice. The integrated gate above is
+red; publication still requires the corrected candidate's full gate.
