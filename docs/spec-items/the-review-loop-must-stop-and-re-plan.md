@@ -111,7 +111,7 @@ must remain `REVIEW_NOT_RUN` with no reviewer decision event.
       manufacture reviewed provenance or an Argus decision.
       verify: `bun test trident/gates/review-progress.test.ts trident/project-launcher.test.ts`
 
-### Follow-up proposal: orchestrator-authorized re-plan from a rejected head
+### Orchestrator-authorized re-plan from a rejected head (#1415)
 
 This is a separate recovery change, not permission to widen ordinary retry's
 checkpoint whitelist. `build-mode-state.ts` refuses a `rejected` terminal source.
@@ -120,7 +120,7 @@ checkpoints can still resume their permitted fix. Neither path authorizes a new
 orchestrator re-plan, and historical rows without the durable veto are not upgraded
 by widening the terminal-source whitelist.
 
-The proposed recovery action belongs to the authenticated project-chat
+The recovery action belongs to the authenticated project-chat
 orchestrator. It records a durable, one-use decision bound to project, card, prior
 run, exact latest checkpoint event, base OID, published PR number and head OID,
 and a nonempty reason/revised planning direction. Neither model output nor an
@@ -145,8 +145,37 @@ without resetting it. Approval and provider receipts are never inherited.
 Every refusal stays visible on the card and preserves its source binding and
 BLOCKED lane. Delivering that refusal surface requires the dispatch API, durable
 board reason storage and both card renderers, beyond the terminal transport fix.
+Once the one-use source claim commits, startup salvage must not publish the
+consumed predecessor's branch again, including after a successor launch refusal
+and gateway restart. Ordinary failed builds with no consumed recovery remain
+eligible for their existing bounded salvage.
 
-Real-Git test plan for that follow-up:
+`work_board_replan_build` takes `board_item_id`, `source_run_id`,
+`source_event_id`, `expected_head`, `expected_base`, `published_pr`, and `direction`.
+Its authority is an opaque host-owned invocation, not an argument: the exact
+project scope, native parent thread, active turn lease and invocation arguments
+must still match immediately before the atomic claim. The current authenticated
+transport is the native Codex project-chat owner route. Claude's shared stdio
+bridge does not distinguish parent calls from native workers and therefore
+refuses this action; this item is not fully delivered for that transport.
+
+The durable decision also pins the canonical origin repository and PR base branch.
+The original launch-base OID remains fixed and must be an ancestor of the published
+head; it is not confused with today's potentially advanced base-branch tip.
+Terminal card history may establish ownership after a later headless preparation
+failure, but a later published implementation, worker checkpoint, retry import or
+veto prevents selecting the older source. Matching titles are never ownership.
+
+Before admission, refusals preserve the observed source binding. After atomic
+admission, the successor binding and its durable source link remain intact on a
+launch refusal; the card becomes BLOCKED without fabricating arithmetic evidence
+or restoring an old pointer. Both the second launch head probe and the final
+new-worker preparation reject drift, rather than entering ordinary retry's
+fresh-build fallback. A full re-plan may replace execution details, but cannot
+erase or reorder the accepted host-owned pending task sequence.
+
+Real-Git acceptance checks (release acceptance also requires independent review;
+the implemented Codex transport is not a claim of live verification):
 
 - Recover a published rejected head after removing its local branch and worktree;
   assert exact parent/base ancestry, imported findings/counters, one planner/build,
