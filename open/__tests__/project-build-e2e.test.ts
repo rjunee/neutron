@@ -54,6 +54,8 @@ import { recordNativeParentLaunchEvidence } from '@neutronai/runtime/adapters/cl
 import { prepareAdoptedNativeParentLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/adopted-native-parent-launch.ts'
 import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
 import { CLAUDE_CONTINUATION_PROFILE } from '@neutronai/runtime/workers/claude-native-continuation.ts'
+import { capacityFixture } from '@neutronai/runtime/workers/claude-capacity-client.test-support.ts'
+import { getBestModel, setBestModelOverride } from '@neutronai/runtime/models.ts'
 import { reserveTrailerSlot } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { createClaudeNativeDispatchReceipt } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { PLANNER_ROLE, dispatchPlannerWork, requiresPlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
@@ -1023,6 +1025,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
   nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable'
+  nativeCapacity?: string
   nativeQueuedOrdinary?: boolean
   verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
@@ -1248,7 +1251,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   let emitQuota: (() => Promise<void>) | undefined
   let quotaEmission: Promise<void> | undefined
   let quotaDispatch = ''
-  const session = { sessionId: 'e2e-session', childGeneration: 'e2e-generation', plannerRole: PLANNER_ROLE, authFingerprint: 'fixture-spawned-credential',
+  const session = { sessionId: 'e2e-session', childGeneration: 'e2e-generation', plannerRole: PLANNER_ROLE, authFingerprint: options.nativeContinuation ? '' : 'fixture-spawned-credential',
     toolSurface: PROJECT_REPL_TOOL_DEFS.map(tool => tool.name).filter(name => !['unavailable', 'adopted-unavailable'].includes(options.nativeContinuation ?? '') || name !== 'SendMessage').join(','), cwd: dir, hasChildExited: () => false,
     child: { pid: process.pid, submitLine: async (line: string) => {
       nativeInputs.push(line)
@@ -1369,6 +1372,13 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     argv: ['/opt/claude', '--session-id', registeredSession.sessionId, '--tools', registeredSession.toolSurface], tools: registeredSession.toolSurface.split(','),
   })
 
+  const capacity = options.nativeContinuation ? await capacityFixture(options.nativeCapacity) : undefined
+  if (capacity) {
+    fixtureCleanup(() => capacity.close())
+    const previous = getBestModel()
+    setBestModelOverride('claude-opus-4-6')
+    fixtureCleanup(() => setBestModelOverride(previous))
+  }
   const register = (registration: { key?: string; projectId?: string; instanceId?: string
     state?: 'ready' | 'pending' | 'missing' | 'empty' | 'exited' } = {}) => {
     const sessionKey = registration.key ?? key
@@ -1377,7 +1387,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       substrate_instance_id: registration.instanceId ?? 'cc-agent-e2e',
       project_id: registration.projectId ?? 'e2e-project',
       skip_permissions: true, extra_dirs: [dir],
-      env: { CLAUDE_CODE_OAUTH_TOKEN: 'fixture-native-credential', ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined },
+      env: { CLAUDE_CODE_OAUTH_TOKEN: capacity && options.nativeCapacity !== 'competing-auth' ? undefined : 'fixture-native-credential', ANTHROPIC_AUTH_TOKEN: undefined, ANTHROPIC_API_KEY: undefined },
+      ...(capacity ? { claudeConfigDir: capacity.configDir } : {}),
       projectsDir,
     } as never)
     if (registration.state === 'missing') { pool.delete(sessionKey); return }
@@ -1403,6 +1414,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     },
     // #1237 — the REAL native-child admission over the fixture's own database.
     nativeChildAdmission: admission.forNativeChild(options.nativeContinuation ? 'e2e-project' : null),
+    ...(capacity ? { acquireClaudeCapacity: capacity.acquire } : {}),
   }
 
   const input: InnerLoopInput = {
@@ -1415,7 +1427,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     test_strategy: options.testStrategy ?? suiteStrategy,
     // Only the adversarial core seat stays on by default. A Codex case supplies a
     // local subscription-shaped home and CLI boundary; Kimi remains out of scope.
-    phase_models: { review_rubric: { model: 'none' },
+    phase_models: { ...(capacity ? { synthesis: { model: 'opus' } } : {}), review_rubric: { model: 'none' },
       review_codex: { model: options.codexReview ? 'sol' : 'none' }, review_kimi: { model: 'none' } },
   }
 
@@ -7439,6 +7451,9 @@ test.each(['fresh', 'queued', 'adopted'] as const)('native same-ID continuation 
   expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(1)
   expect(f.nativeInputs.filter(line => line.includes('synthesis:'))).toHaveLength(1)
   expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(1)
+  const saved = f.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations')!
+  expect(JSON.parse(saved.preparation).capacity.body).toMatchObject({ kind: 'claude-capacity',
+    modelId: 'claude-opus-4-6', childId: 'quota', accountGeneration: 'a'.repeat(64), status: 'available' })
   expect(f.admission.listLeases('liveChild')).toHaveLength(0)
   expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 30_000)
@@ -7450,6 +7465,16 @@ for (const mode of ['unavailable', 'foreign-launch', 'lost-ack', 'adopted-unavai
   expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(mode === 'lost-ack' ? 1 : 0)
   expect(f.nativeInputs.filter(line => line.includes('synthesis:'))).toHaveLength(1)
   expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(mode === 'lost-ack' ? 1 : 0)
+  expect(f.admission.listLeases('liveChild')).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+}, 30_000)
+
+test.each(['all-full', 'unknown', 'forged', 'wrong-modelId', 'wrong-childId', 'wrong-leaseId', 'wrong-eventDigest', 'wrong-requestDigest', 'wrong-instanceId', 'wrong-bootId', 'wrong-challenge', 'stale', 'disconnect', 'competing-auth'])('native capacity refuses %s without spending continuation or child ownership', async mode => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeCapacity: mode })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('blocked')
+  expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(0)
+  expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(0)
   expect(f.admission.listLeases('liveChild')).toHaveLength(1)
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 30_000)

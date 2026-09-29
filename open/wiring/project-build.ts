@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto'
 import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { continueClaudeNativeChild, readClaudeContinuationResult } from '@neutronai/runtime/workers/claude-native-continuation.ts'
+import type { AcquireClaudeCapacity } from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { bindPlannerWork, releasePlannerWork, PLANNER_ROLE, requiresPlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
 import { readArmedTrailerReservation } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { workContextPath } from '@neutronai/trident/production-host-effects.ts'
@@ -121,6 +122,8 @@ const log = createLogger('project-build')
 // (`live-project-sessions.ts`) so the liveness census asks the very same question.
 
 export interface ProjectBuildContext {
+  /** Host dependency seam. Production loads the independently provisioned public pin. */
+  acquireClaudeCapacity?: AcquireClaudeCapacity
   /** Host filesystem measurement at the actual dependency-install boundary. */
   measureInstallAvailableBytes?: typeof projectInstallAvailableBytes
   store: ProjectBuildHostOptions['production']['store']
@@ -715,6 +718,9 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         } catch { return { kind: 'unknown' as const, detail: 'Native continuation workspace identity is unavailable.' } }
       }
       const observed = await continueClaudeNativeChild({ request, receipt, authority, stateDir: state, session, workspace,
+        ...(!session.authFingerprint ? { capacity: { configDir: options.claudeConfigDir ?? mergeEnv(options.env).CLAUDE_CONFIG_DIR
+          ?? join(mergeEnv(options.env).HOME ?? '', '.claude'), env: mergeEnv(options.env),
+          ...(context.acquireClaudeCapacity ? { acquire: context.acquireClaudeCapacity } : {}) } } : {}),
         projectsDir: resolveTranscriptProjectsDir(options), deadline, signal: stopped,
         decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, trailer) })
       if (observed.kind === 'result') return observed.outcome

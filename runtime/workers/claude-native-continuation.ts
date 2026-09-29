@@ -15,6 +15,7 @@ import { verifyNativeDispatchChildBound, type NativeDispatchLease, type SignedNa
 import { readArmedTrailerReservation } from './trailer-slot.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
 import { nativeChildContinuationCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
+import { acquireClaudeCapacity, type AcquireClaudeCapacity, type ClaudeCapacityReceipt } from './claude-capacity-client.ts'
 
 type Boundary = { offset: number; dev: number; ino: number; prefixDigest: string }
 interface Preparation {
@@ -29,11 +30,12 @@ interface Preparation {
   nonce: string
   args: { to: string; message: string }
   boundary: Boundary
+  capacity: ClaudeCapacityReceipt
 }
 export type ClaudeContinuationOutcome = { kind: 'result'; outcome: BoundedWorkOutcome }
   | { kind: 'not-eligible' }
   | { kind: 'submitted'; evidence: 'terminal-acknowledgement' | 'exact-tool-invocation' }
-  | { kind: 'unknown'; reason: 'tool-unavailable' | 'launch-unknown' | 'identity-unknown' | 'submission-unknown' | 'budget-expired' }
+  | { kind: 'unknown'; reason: 'tool-unavailable' | 'launch-unknown' | 'identity-unknown' | 'submission-unknown' | 'budget-expired' | 'capacity-unavailable' | 'capacity-waiting' }
 
 export interface ClaudeContinuationOptions {
   request: BoundedWorkRequest
@@ -46,6 +48,7 @@ export interface ClaudeContinuationOptions {
   deadline: number
   signal: AbortSignal
   decodeTrailer(bytes: string, request: BoundedWorkRequest): ProjectTrailerOutcome
+  capacity?: { configDir: string; env: Record<string, string | undefined>; acquire?: AcquireClaudeCapacity }
 }
 
 const message = (nonce: string) => `Continue the original bounded task with its original request, brief, worktree and result contract. Preserve completed work and write the original result. Continuation receipt: ${nonce}`
@@ -156,18 +159,27 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
       if (!ownsNativeChildWorkspace(options.workspace, session, request) || !nativeChildContinuationCensusKnown(options.workspace)
         || !isDeepStrictEqual(await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request), quota)) return unknown('identity-unknown')
       if (!currentParentKnown()) return unknown('launch-unknown')
+      if (!options.capacity) return unknown('capacity-unavailable')
+      const capacity = await (options.capacity.acquire ?? acquireClaudeCapacity)({ request, leaseId: authority.lease.token,
+        childId: agentId, eventDigest: quota.digest, configDir: options.capacity.configDir, env: options.capacity.env,
+        signal, deadline: options.deadline })
+      if (capacity.kind !== 'available') return unknown(capacity.kind === 'waiting' ? 'capacity-waiting' : 'capacity-unavailable')
+      try {
+      const afterCapacity = await result()
+      if (afterCapacity) return afterCapacity
+      if (!capacity.current() || !isDeepStrictEqual(await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request), quota)) return unknown('capacity-unavailable')
       const boundary = await readBoundary(transcript)
       if (!boundary) return unknown('submission-unknown')
       const nonce = randomUUID()
       const args = { to: agentId, message: message(nonce) }
       const preparation: Preparation = { version: 1, request, lease: authority.lease, receiptSignature: receipt.signature,
-        sessionId: session.sessionId, childGeneration: session.childGeneration, agentId, quota, nonce, args, boundary }
+        sessionId: session.sessionId, childGeneration: session.childGeneration, agentId, quota, nonce, args, boundary, capacity: capacity.receipt }
       const line = `Invoke ${SUBAGENT_CONTINUATION_TOOL_NAME} exactly once with these JSON arguments, then end this parent turn: ${JSON.stringify(args)}`
       const before = async () => {
-        if (expired() || !currentParentKnown()) throw new Error('Continuation budget or parent identity unavailable')
+        if (expired() || !currentParentKnown() || !capacity.current()) throw new Error('Continuation budget, capacity or parent identity unavailable')
         if (session.child.paneHandle !== undefined && (!session.child.readScreen || !claudeComposerEmpty(await session.child.readScreen()))) throw new Error('Composer unavailable')
         // Commit before Enter. Failure, timeout or restart never refunds this claim.
-        if (expired() || !await authority.claim(JSON.stringify(preparation)) || expired()) throw new Error('Continuation already claimed, fenced or expired')
+        if (expired() || !capacity.current() || !await authority.claim(JSON.stringify(preparation)) || expired() || !capacity.current()) throw new Error('Continuation already claimed, fenced or expired')
       }
       const timeout = AbortSignal.timeout(Math.max(1, options.deadline - Date.now()))
       const stopped = AbortSignal.any([signal, timeout])
@@ -176,6 +188,7 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
         await session.child.submitLineGuarded(line, before, stopped)
       } else { await before(); await session.child.submitLine(line, stopped) }
       return { kind: 'submitted', evidence: 'terminal-acknowledgement' }
+      } finally { capacity.release() }
     } finally { release() }
   } catch { return unknown('submission-unknown') }
 }

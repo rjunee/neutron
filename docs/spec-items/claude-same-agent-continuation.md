@@ -96,8 +96,12 @@ invocation, conflicting recipient or inconclusive response remains UNKNOWN.
 The host launch producer and signed receipt are implemented; this live native
 positive remains a release prerequisite, not a synthetic fixture result.
 
-For behavioral cross-account continuity, an isolated file-auth profile must first
-produce a genuine quota-category 429 on account A with a future reset. A matched
+For behavioral cross-account continuity, a disposable project parent using the
+normal Managed-owned file-auth destination must first produce a genuine
+quota-category 429 on account A with a future reset. Do not copy credentials,
+create another credential bank, or manually force a shared account switch
+for this proof. Use the approved authenticated local capacity socket and normal
+exact-model selection after a natural rejection. A matched
 A-only same-ID continuation must fail. After the authorized account selector
 installs B, require the same parent session and child ID to answer a fresh
 post-rejection challenge with a new child-attributed provider response before A's
@@ -106,3 +110,32 @@ and concurrent writers. Keep all publication gates. This is behavioral evidence,
 not cryptographic proof of the token used by each request. File replacement,
 mtime, selector receipts, synthetic 429 fixtures and 401 recovery alone cannot
 establish 429 account consumption. Failure to complete these controls is UNKNOWN.
+
+## Capacity admission
+
+Before spending the one-use continuation claim, Open obtains an exact-model
+capacity response over the authenticated local Unix endpoint. Independently
+provisioned, protected public verification material binds the host, instance,
+socket and canonical credential directory. Open verifies the signature, current
+boot, fresh challenge, request digest, original lease, native child, provider-event
+digest and observation freshness. Competing authentication sources refuse.
+`available` retains the direct connection through bounded submission and saves
+the signed opaque account generation in the durable claim; this is selection
+evidence only. `all-full`, `unknown`, missing authority and transport failure
+neither spend the claim nor release the child. Original-result harvesting and
+spent-claim reconciliation remain independent of current capacity.
+
+- [ ] Real-socket consuming controls exercise signed availability, all-full,
+      uncertainty, forged and miscorrelated responses, disconnect and competing
+      auth; no refusal dispatches a replacement or reaches merge.
+      Verify: `bun test open/__tests__/project-build-e2e.test.ts` and
+      `runtime/workers/claude-capacity-client.test.ts`.
+- [ ] Default native model aliases have an authoritative resolved-model binding
+      before requesting capacity. A guessed alias mapping, model prose or
+      worker-writable transcript is not authority. Until such a binding exists,
+      aliases remain UNKNOWN; concrete configured requests alone do not complete
+      ordinary Fable quota recovery.
+
+The current capacity protocol does not retain an A-only native failure, an
+old-account reset receipt or a post-B observation that A remains capped. Those
+live controls and the authoritative alias-resolution interface remain open.

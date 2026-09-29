@@ -14,16 +14,19 @@ import { admitNativeChildWorkspace, bindNativeChildWorkspace, completeNativeChil
 import { reserveTrailerSlot } from './trailer-slot.ts'
 import { CLAUDE_CONTINUATION_PROFILE, continueClaudeNativeChild, type ClaudeContinuationOptions } from './claude-native-continuation.ts'
 import { decodeProjectTrailer } from './project-runners.ts'
+import { capacityFixture } from './claude-capacity-client.test-support.ts'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 
 async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' | 'wrong-digest' | 'wrong-version' | 'adopted' | 'adopted-unavailable' = 'valid') {
+  const capacity = await capacityFixture()
+  cleanup.push(() => capacity.close())
   const dir = await mkdtemp(join(tmpdir(), 'native-continuation-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const cwd = join(dir, 'work'), stateDir = join(dir, 'state'), common = join(dir, 'git'), gitDir = join(common, 'work')
   await Promise.all([cwd, stateDir, gitDir].map(path => mkdir(path, { recursive: true })))
-  const request: BoundedWorkRequest = { run_id: 'run', step_id: 'build:0', role: 'build', model_id: 'model', effort: 'high',
+  const request: BoundedWorkRequest = { run_id: 'run', step_id: 'build:0', role: 'build', model_id: 'claude-fable-5-1', effort: 'high',
     cwd, tools: 'edit-and-run', writable: true, network: true, thread: { id: 'parent' }, brief: { path: join(dir, 'brief'), integrity: 'digest' },
     result: { path: join(stateDir, 'build.result'), schema: 'fixture' }, budget: { wall_ms: 5000 }, needs_approval_decision: false }
   const key = createHash('sha256').update(JSON.stringify([request.run_id, request.step_id])).digest('hex')
@@ -75,6 +78,7 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
   ].map(row => JSON.stringify(row)).join('\n') + '\n')
   let saved: string | undefined
   const options: ClaudeContinuationOptions = { request, receipt, stateDir, session, workspace, projectsDir,
+    capacity: { configDir: capacity.configDir, env: {}, acquire: capacity.acquire },
     authority: { lease, read: () => saved, claim: async value => { if (saved !== undefined) return false; saved = value; return true } },
     signal: new AbortController().signal, deadline: Date.now() + 5000,
     decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, { schemas: new Map([['fixture', result => result === 'done']]), metadata: () => undefined }) }
@@ -93,8 +97,19 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
     cleanup.push(async () => completeNativeChildWorkspace(workspace))
     return { ...options, session: restored, workspace }
   }
-  return { options, session, request, inputs, invoke, restore, childPath, transcript, recordInvocation, saved: () => saved }
+  return { options, session, request, inputs, invoke, restore, childPath, transcript, recordInvocation, capacity, saved: () => saved }
 }
+
+test('all-full retains the original claim opportunity until fresh signed capacity permits that same child', async () => {
+  const f = await fixture()
+  f.capacity.setMode('all-full')
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'capacity-waiting' })
+  expect(f.saved()).toBeUndefined(); expect(f.inputs).toHaveLength(0)
+  f.capacity.setMode('available')
+  expect(await f.invoke()).toMatchObject({ kind: 'submitted' })
+  expect(f.inputs).toHaveLength(1)
+  expect(JSON.parse(f.saved()!).capacity.body).toMatchObject({ accountGeneration: 'a'.repeat(64), childId: 'child', modelId: f.request.model_id })
+})
 
 test('one same-ID continuation persists original receipt, quota and lease before send; a fresh observer never resends', async () => {
   const f = await fixture()
