@@ -46,3 +46,25 @@ recovery still reads the reserved result and usage only
 restarted or settled by this change. Final-acknowledgement usage collection
 also remains separate unfinished work. Full-suite and complete typecheck
 matrix proof belong to the integrated publication head.
+
+### Consolidated local publication receipt
+
+The integrated candidate `0416cbcbb2a4c081345591a3c4fe456d65e301f8`
+passed `bash scripts/check-shared-host.sh` with exit status zero on
+2026-09-29. Its complete matrix passed all 51 TypeScript configurations,
+including `tsc -p tsconfig.json` and `tsc -p trident/tsconfig.json`.
+The full suite covered all 1,754 declared and Bun-discovered files across
+19 bounded-memory lanes with zero failed lanes: 1,516 general, 22 PGLite,
+43 device and 173 real-HTTP files. Individual conditional skips remain
+skips, not claimed execution. The consuming
+`open/__tests__/project-build-e2e.test.ts` and
+`open/__tests__/project-suite-identity.test.ts` were included.
+The wrapper verified unchanged suite input identity
+`67bb6eb280461bcd7385d95dee63244dce8fff4f8fdf933f86112f1e7e15bfa8`.
+
+This receipt records that tested revision, not a transfer of suite authority
+to another checkout or a claim that the later evidence-recording commit
+ran this gate. Required CI must pass for the exact final publication head.
+Deployment, served-code controls and a fresh parallel unattended-merge
+witness remain unverified for this batch. Planner baseline waste and
+final-acknowledgement usage coverage remain unfinished; #1196 stays open.
