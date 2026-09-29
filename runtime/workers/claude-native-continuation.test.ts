@@ -6,7 +6,8 @@ import { createHash } from 'node:crypto'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
-import { recordNativeParentLaunchEvidence, type NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
+import { readNativeParentLaunchEvidence, recordNativeParentLaunchEvidence, type NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
+import { prepareAdoptedNativeParentLaunch } from '../adapters/claude-code/persistent/adopted-native-parent-launch.ts'
 import { readProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
 import { createNativeDispatchSigner, type NativeDispatchLease } from './claude-native-dispatch-receipt.ts'
 import { admitNativeChildWorkspace, bindNativeChildWorkspace, completeNativeChildWorkspace } from './native-child-workspace.ts'
@@ -17,7 +18,7 @@ import { decodeProjectTrailer } from './project-runners.ts'
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 
-async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' | 'wrong-digest' | 'wrong-version' = 'valid') {
+async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' | 'wrong-digest' | 'wrong-version' | 'adopted' | 'adopted-unavailable' = 'valid') {
   const dir = await mkdtemp(join(tmpdir(), 'native-continuation-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const cwd = join(dir, 'work'), stateDir = join(dir, 'state'), common = join(dir, 'git'), gitDir = join(common, 'work')
@@ -32,12 +33,20 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
   const inputs: string[] = []
   session.attachChild({ pid: process.pid, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}),
     submitLine: async line => { inputs.push(line) } })
-  if (profile === 'unavailable') session.toolSurface = 'Agent'
+  if (profile === 'unavailable' || profile === 'adopted-unavailable') session.toolSurface = 'Agent'
   const launch: NativeParentLaunchEvidence = { version: 1, sessionId: profile === 'foreign' ? 'another' : 'parent', childGeneration: 'generation', projectId: 'project',
     executable: { realPath: '/opt/claude', ...CLAUDE_CONTINUATION_PROFILE,
       ...(profile === 'wrong-digest' ? { sha256: '0'.repeat(64) } : {}), ...(profile === 'wrong-version' ? { version: '0.0.0' } : {}) },
     argv: ['/opt/claude', '--session-id', 'parent', '--tools', session.toolSurface], tools: session.toolSurface.split(',') }
-  if (profile !== 'missing') recordNativeParentLaunchEvidence(session, launch)
+  if (profile === 'adopted' || profile === 'adopted-unavailable') {
+    const argv = ['claude', '--session-id', 'parent', '--tools', session.toolSurface, '--dangerously-load-development-channels', 'server:channel']
+    const observed = await prepareAdoptedNativeParentLaunch({ pid: process.pid, sessionId: 'parent', childGeneration: 'generation', projectId: 'project',
+      channelName: 'channel', cwd, claudeBasename: 'claude', argv, inspect: async () => ({ kind: 'live', pid: process.pid, argv }) }, {
+      readIdentity: () => readProcessIdentity(process.pid), readArgv: () => argv,
+      observeExecutable: async () => ({ executable: launch.executable, isCurrent: () => true }),
+    })
+    observed?.record(session)
+  } else if (profile !== 'missing') recordNativeParentLaunchEvidence(session, launch)
   const admit = (session: ReplSession) => admitNativeChildWorkspace({ session, request, runId: 'run', worktree: cwd, branch: 'work', generation: 0,
     pending: () => [{ runId: 'run', stepId: 'build:0', generation: 0 }],
     git: async args => args[0] === 'symbolic-ref' ? 'refs/heads/work' : args.includes('--show-toplevel') ? cwd : args.includes('--absolute-git-dir') ? gitDir : common })
@@ -48,8 +57,9 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
     reason: 'liveChild', producer: `native-child:boot:${signer.keyDigest}`, workRef: JSON.stringify(['run', 'build:0']) }
   const authority = signer.begin(lease, request)
   authority.prepare()
+  const originalLaunch = readNativeParentLaunchEvidence(session)
   authority.record({ kind: 'parent-bound', parent: { sessionId: 'parent', childGeneration: 'generation', pid: process.pid,
-    processIdentity: readProcessIdentity(process.pid) ?? null, ...(profile === 'missing' ? {} : { launch }) } })
+    processIdentity: readProcessIdentity(process.pid) ?? null, ...(originalLaunch ? { launch: originalLaunch } : {}) } })
   authority.record({ kind: 'submission-started' })
   const receipt = authority.record({ kind: 'child-bound', nativeAgentId: 'child' })
   const projectsDir = join(dir, 'projects'), transcript = sessionJsonlPath('parent', cwd, projectsDir)
@@ -108,6 +118,31 @@ test('a unique exact native invocation reconciles the original spent opportunity
   await f.recordInvocation()
   expect(await f.invoke()).toEqual({ kind: 'submitted', evidence: 'exact-tool-invocation' })
   expect(f.inputs).toHaveLength(1)
+})
+
+test.each(['wrong-recipient', 'same-recipient', 'after-exact', 'unrelated'] as const)('nonce conflict reconciliation: %s', async mode => {
+  const f = await fixture()
+  expect(await f.invoke()).toMatchObject({ kind: 'submitted' })
+  const saved = f.saved()!, prepared = JSON.parse(saved)
+  if (mode === 'after-exact') await f.recordInvocation()
+  await appendFile(f.transcript, JSON.stringify({ sessionId: 'parent', type: 'assistant', message: { role: 'assistant', content: [{
+    type: 'tool_use', name: 'SendMessage', id: 'other-tool', input: { to: mode === 'same-recipient' ? 'child' : 'other',
+      message: mode === 'unrelated' ? 'An independent message without this attempt receipt.' : `Altered instruction; ${prepared.nonce}` },
+  }] } }) + '\n')
+  if (mode !== 'after-exact') await f.recordInvocation()
+  expect(await f.invoke()).toEqual(mode === 'unrelated'
+    ? { kind: 'submitted', evidence: 'exact-tool-invocation' } : { kind: 'unknown', reason: 'submission-unknown' })
+  expect(f.inputs).toHaveLength(1)
+  expect(f.saved()).toBe(saved)
+})
+
+test.each(['adopted', 'adopted-unavailable'] as const)('a new child after %s parent observation has bounded continuation authority', async profile => {
+  const f = await fixture(profile)
+  const available = profile === 'adopted'
+  expect(readNativeParentLaunchEvidence(f.session) !== undefined).toBe(available)
+  expect(await f.invoke()).toEqual(available ? { kind: 'submitted', evidence: 'terminal-acknowledgement' } : { kind: 'unknown', reason: 'tool-unavailable' })
+  await f.invoke()
+  expect(f.inputs).toHaveLength(available ? 1 : 0)
 })
 
 test('authorized same-session restoration requires the current generation launch before input', async () => {

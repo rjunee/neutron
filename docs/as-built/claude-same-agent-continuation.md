@@ -74,3 +74,24 @@ tests and 151 existing parent-queue/model/revocation tests. The earlier sandboxe
 queue run could not bind its fake loopback sink; the same tests passed with test
 network access. Final exact-head full consuming and typecheck receipts accompany
 the handoff, rather than being inferred from these focused runs.
+
+The frozen intermediate candidate `2a32d1488` passed all 524 consuming tests
+(7,345 assertions). A subsequent review narrowed an evidence gap: a native
+`SendMessage` retaining this attempt's nonce but changing its message must refuse
+even if an exact invocation also exists. Controls cover both recipients and
+conflict ordering, while unrelated native messages remain eligible; none refunds
+the durable claim or causes a second input.
+
+The adopted-parent producer is now consumed before a newly dispatched child's
+original signed receipt is written. The Open fixture remeasures an adopted parent
+through explicit fake kernel/host boundaries, dispatches a new child, observes its
+quota error, and reaches merge after one same-ID continuation. Its Agent-only
+adoption control never obtains continuation authority. This closes the earlier
+post-adoption new-child launch-memory gap without inferring capability from a
+registry label. These additions require the next frozen-head full-suite receipt;
+the 524-test baseline is not substituted for it.
+The nonce guard's old exact-message mutation accepts altered receipt-bearing
+input, while a reject-all-messages mutation refuses unrelated traffic; both fail
+the new opposite controls. The adopted-parent merge control also fails under a
+deny-all launch guard, and foreign launch refusal fails under allow-all. All
+mutations were restored before freezing the integration.

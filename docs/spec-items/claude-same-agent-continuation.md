@@ -29,6 +29,12 @@ is insufficient. This authenticates launch inputs, not a served tool catalog or
 an executed process image. Missing/mismatched launch evidence remains UNKNOWN;
 a current launch without `SendMessage` reports tool-unavailable. Old parents
 without the signed observation stay fenced. No state permits a replacement child.
+For a new child dispatched after parent adoption, the host may remeasure the
+survivor's kernel executable, exact argv and process-start identity, cross-check
+the pane host, and record the observation only after ownership publication. That
+observation enters the new child's signed original receipt. Mutable registry
+labels alone never provide launch evidence; an Agent-only survivor remains
+unavailable.
 
 A lost acknowledgement or restart makes the saved attempt observation-only.
 Authorized startup restoration may change the parent process generation while
@@ -56,6 +62,9 @@ stable regular-file reader; symlinks, FIFOs and changing snapshots refuse safely
       merge gates. Known-unavailable and foreign launch profiles refuse with no replacement
       `Agent`, no merge and the original child lease retained.
       Verify: `bun test open/__tests__/project-build-e2e.test.ts`.
+- [ ] A new child dispatched after independently observed parent adoption can
+      continue on its same ID and reach merge. An adopted Agent-only parent refuses
+      without continuation input or replacement. Verify: the same consuming suite.
 - [ ] Completed and invalid current results take precedence; ordinary errors,
       foreign request/receipt/lease/launch, fencing and expired budget cannot send.
       A concurrent claimant, lost acknowledgement and a newly constructed observer

@@ -51,6 +51,8 @@
  */
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { recordNativeParentLaunchEvidence } from '@neutronai/runtime/adapters/claude-code/persistent/native-parent-launch-evidence.ts'
+import { prepareAdoptedNativeParentLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/adopted-native-parent-launch.ts'
+import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
 import { CLAUDE_CONTINUATION_PROFILE } from '@neutronai/runtime/workers/claude-native-continuation.ts'
 import { reserveTrailerSlot } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { createClaudeNativeDispatchReceipt } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
@@ -1020,7 +1022,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
-  nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack'
+  nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable'
   nativeQueuedOrdinary?: boolean
   verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
@@ -1247,7 +1249,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   let quotaEmission: Promise<void> | undefined
   let quotaDispatch = ''
   const session = { sessionId: 'e2e-session', childGeneration: 'e2e-generation', plannerRole: PLANNER_ROLE, authFingerprint: 'fixture-spawned-credential',
-    toolSurface: PROJECT_REPL_TOOL_DEFS.map(tool => tool.name).filter(name => options.nativeContinuation !== 'unavailable' || name !== 'SendMessage').join(','), cwd: dir, hasChildExited: () => false,
+    toolSurface: PROJECT_REPL_TOOL_DEFS.map(tool => tool.name).filter(name => !['unavailable', 'adopted-unavailable'].includes(options.nativeContinuation ?? '') || name !== 'SendMessage').join(','), cwd: dir, hasChildExited: () => false,
     child: { pid: process.pid, submitLine: async (line: string) => {
       nativeInputs.push(line)
       if (line.startsWith('Invoke SendMessage exactly once')) {
@@ -1349,7 +1351,18 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     fixtureCleanup(async () => { await Promise.all(children); expect(errors).toEqual([]); expect(live.turnSlotHeld).toBe(0) })
   }
 
-  if (options.nativeContinuation) recordNativeParentLaunchEvidence(registeredSession, {
+  if (options.nativeContinuation === 'adopted' || options.nativeContinuation === 'adopted-unavailable') {
+    const argv = ['claude', '--session-id', registeredSession.sessionId, '--tools', registeredSession.toolSurface,
+      '--dangerously-load-development-channels', 'server:e2e-channel']
+    const observed = await prepareAdoptedNativeParentLaunch({ pid: process.pid, sessionId: registeredSession.sessionId,
+      childGeneration: registeredSession.childGeneration, projectId: 'e2e-project', channelName: 'e2e-channel', cwd: dir,
+      claudeBasename: 'claude', argv, inspect: async () => ({ kind: 'live', pid: process.pid, argv }) }, {
+      readIdentity: () => readProcessIdentity(process.pid), readArgv: () => argv,
+      observeExecutable: async () => ({ executable: { realPath: '/opt/claude', ...CLAUDE_CONTINUATION_PROFILE }, isCurrent: () => true }),
+    })
+    expect(observed !== undefined).toBe(options.nativeContinuation === 'adopted')
+    observed?.record(registeredSession)
+  } else if (options.nativeContinuation) recordNativeParentLaunchEvidence(registeredSession, {
     version: 1, sessionId: options.nativeContinuation === 'foreign-launch' ? 'another-session' : registeredSession.sessionId,
     childGeneration: registeredSession.childGeneration, projectId: 'e2e-project',
     executable: { realPath: '/opt/claude', ...CLAUDE_CONTINUATION_PROFILE },
@@ -7419,8 +7432,8 @@ test('a typed subscription quota-limited synthesis stops without quotaLimits enr
   expect(originMain.stdout).toBe(f.baseSha)
 }, 30_000)
 
-test.each([false, true])('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates (queued ordinary: %s)', async nativeQueuedOrdinary => {
-  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeQueuedOrdinary })
+test.each(['fresh', 'queued', 'adopted'] as const)('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates: %s', async parent => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: parent === 'adopted' ? 'adopted' : 'available', nativeQueuedOrdinary: parent === 'queued' })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(1)
@@ -7430,7 +7443,7 @@ test.each([false, true])('native same-ID continuation consumes the retained synt
   expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 30_000)
 
-for (const mode of ['unavailable', 'foreign-launch', 'lost-ack'] as const) test(`native same-ID continuation refuses ${mode} without a replacement Agent or merge`, async () => {
+for (const mode of ['unavailable', 'foreign-launch', 'lost-ack', 'adopted-unavailable'] as const) test(`native same-ID continuation refuses ${mode} without a replacement Agent or merge`, async () => {
   const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: mode })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('blocked')

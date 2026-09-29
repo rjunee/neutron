@@ -227,10 +227,11 @@ async function exactInvocation(path: string, saved: Preparation): Promise<boolea
       const row = JSON.parse(line)
       if (row.sessionId !== saved.sessionId || row.type !== 'assistant' || row.message?.role !== 'assistant' || !Array.isArray(row.message.content)) continue
       for (const block of row.message.content) {
-        // A copied continuation nonce sent to another native recipient is a
+        // A copied receipt nonce with altered recipient or message is a
         // conflicting actuation, not unrelated conversation to skip past.
         if (block.type === 'tool_use' && block.name === SUBAGENT_CONTINUATION_TOOL_NAME
-          && block.input?.message === saved.args.message && !isDeepStrictEqual(block.input, saved.args)) return false
+          && typeof block.input?.message === 'string' && block.input.message.includes(saved.nonce)
+          && !isDeepStrictEqual(block.input, saved.args)) return false
         if (block.type === 'tool_use' && block.name === SUBAGENT_CONTINUATION_TOOL_NAME
           && typeof block.id === 'string' && isDeepStrictEqual(block.input, saved.args)) matches.push(block.id)
       }
