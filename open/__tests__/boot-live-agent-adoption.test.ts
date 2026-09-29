@@ -381,6 +381,11 @@ test('#1226 a live survivor adopted on boot is never slept over: the lifecycle r
     expect(persisted.pane_handle).toBe(HANDLE)
     expect(persisted.asleep_at).toBeUndefined()
     expect(await lifecycle.isAsleep(PROJECT)).toBe(false)
+    // The actual composition fences sleep synchronously, before its recovery
+    // drain promise can settle and before boot starts awaiting listener shutdown.
+    const draining = composition.on_shutdown_start!()
+    expect(await lifecycle.sleep(PROJECT)).toEqual({ status: 'refused', reason: 'lifecycle closed' })
+    await draining
   } finally {
     for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
   }

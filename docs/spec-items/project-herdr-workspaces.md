@@ -107,6 +107,10 @@ Gateway restart preserves active work and is not a sleep event.
       an idle owned workspace closes without deleting conversation history and
       resumes on wake. Restart adopts surviving work without duplication.
       Verify lifecycle integration tests and a fresh deployed live cycle.
+      Teardown fences a sampled sleep at the final pool retirement check and
+      prevents delayed idle retries or dispatch finalizers from arming timers.
+      A fresh lifecycle can still use and sleep the same surviving conversation.
+      Verify the shutdown controls in `open/__tests__/project-scope-sleep.test.ts`.
 - [ ] Empty-workspace cleanup uses only the advertised atomic operation: an empty
       owned workspace retires; an arriving foreign pane or changed ownership survives.
       Lost replies, stale acknowledgements and concurrent journal rewrites never

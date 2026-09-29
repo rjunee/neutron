@@ -1076,6 +1076,10 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // invisible: for eight deploys the only evidence that shutdown() had been
     // entered at all was systemd's own kill line 30 seconds later.
     log.info('shutdown_started', { forced: opts?.force === true })
+    // Run synchronous quiescing before the first await (including listener drain).
+    // Observe rejection immediately; the existing drain point below propagates it.
+    const shutdownStart = onShutdownStart?.()
+    shutdownStart?.catch(() => {})
     try {
       await stopListenerWithinBudget(boundServer, opts, LISTENER_DRAIN_BUDGET_MS, log)
     } catch (err) {
@@ -1099,7 +1103,7 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // Recovery can finish by publishing an owner and arming its watchdogs.
     // Drain it BEFORE the graph and persistent pool stop those resources, not
     // in the later realmode cleanup phase. A failed drain must not race teardown.
-    await onShutdownStart?.()
+    await shutdownStart
     if (graph !== null) {
       try {
         await graph.shutdown()

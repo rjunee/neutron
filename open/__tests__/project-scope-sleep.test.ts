@@ -15,6 +15,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
+import { boot } from '@neutronai/gateway/index.ts'
+import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { newCredentialPool, reportFailure, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -507,6 +509,117 @@ test('idle timer: a settled turn sleeps after idleMs; a dispatch before it fires
   expect(chatCloses(r)).toHaveLength(0)
   await until(() => chatCloses(r).length === 1, 3000)
   expect(r.peer.children[0]!.child.hasExited()).toBe(true)
+  expect(await r.lifecycle.isAsleep('p-one')).toBe(true)
+})
+
+test('shutdown fences a sampled sleep at the pool retirement boundary and preserves the conversation for restart', async () => {
+  let entered!: () => void
+  let release!: () => void
+  const entering = new Promise<void>(resolve => { entered = resolve })
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  let pause = true
+  const r = await rig({
+    retire: async (key, sleep) => {
+      if (pause) { entered(); await barrier }
+      return retirePersistentRepl(key, undefined, sleep)
+    },
+  })
+  expect(await turn(r, 'p-one')).toBe(true)
+  const first = r.peer.children[0]!
+  const key = keyOf(r, first.sessionId)!
+  const sleeping = r.lifecycle.sleep('p-one')
+  await entering
+  r.lifecycle.close()
+  release()
+  expect(await sleeping).toEqual({ status: 'refused', reason: 'lifecycle closed' })
+  expect(first.child.hasExited()).toBe(false)
+  expect(chatCloses(r)).toHaveLength(0)
+  expect(getRecord(r.registryPath, key)?.asleep_at).toBeUndefined()
+  expect(retiringSessionKeys.size).toBe(0)
+  // A new gateway lifetime can still use, and subsequently sleep, the exact owner.
+  pause = false
+  r.restart()
+  expect(await turn(r, 'p-one')).toBe(true)
+  expect(r.peer.children).toHaveLength(1)
+  expect((await r.lifecycle.sleep('p-one')).status).toBe('retired')
+  expect(first.child.hasExited()).toBe(true)
+})
+
+test('gateway shutdown fences idle retirement while its first listener await is held', async () => {
+  const r = await rig({ idleMs: 60 })
+  const previousDb = process.env.NEUTRON_DB_PATH
+  process.env.NEUTRON_DB_PATH = join(tempDir('shutdown-listener-'), 'db')
+  let release!: () => void
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  let listenerEntered!: () => void
+  const entered = new Promise<void>(resolve => { listenerEntered = resolve })
+  let handle: Awaited<ReturnType<typeof boot>> | undefined
+  let stopping: Promise<void> | undefined
+  let restoreListener: (() => void) | undefined
+  try {
+    handle = await boot({ port: 0, composer: ({ db, project_slug }) => ({
+      db, project_slug, platform: STUB_PLATFORM,
+      topic_handler: async () => {},
+      approval_notifier: { notify: async () => undefined },
+      watchdog_notifier: { notify: async () => undefined },
+      reminder_dispatcher: { dispatch: async () => undefined },
+      heartbeat_tracker: { lastHeartbeatAt: () => Date.now() },
+      on_shutdown_start: async () => { r.lifecycle.close(); await barrier },
+    }) })
+    // Boot itself must not quiesce normal idle retirement.
+    expect(await turn(r, 'p-one')).toBe(true)
+    expect((await r.lifecycle.sleep('p-one')).status).toBe('retired')
+    expect(await turn(r, 'p-one')).toBe(true)
+    const child = r.peer.children[1]!
+    const key = keyOf(r, child.sessionId)!
+    const stop = handle.server.stop.bind(handle.server)
+    handle.server.stop = async opts => { listenerEntered(); await barrier; await stop(opts) }
+    restoreListener = () => { handle!.server.stop = stop }
+    stopping = handle.shutdown({ force: true })
+    await entered
+    await Bun.sleep(180)
+    expect(child.child.hasExited()).toBe(false)
+    expect(chatCloses(r)).toHaveLength(1)
+    expect(getRecord(r.registryPath, key)?.asleep_at).toBeUndefined()
+    expect(await r.lifecycle.sleep('p-one')).toEqual({ status: 'refused', reason: 'lifecycle closed' })
+  } finally {
+    release()
+    restoreListener?.()
+    await stopping
+    await handle?.shutdown({ force: true })
+    if (previousDb === undefined) delete process.env.NEUTRON_DB_PATH
+    else process.env.NEUTRON_DB_PATH = previousDb
+  }
+})
+
+test('shutdown prevents an in-flight idle retry and a late dispatch finalizer from rearming sleep', async () => {
+  let entered!: () => void
+  let release!: () => void
+  const entering = new Promise<void>(resolve => { entered = resolve })
+  const barrier = new Promise<void>(resolve => { release = resolve })
+  let pause = true
+  const r = await rig({ idleMs: 40, liveness: () => ({
+    census: async () => {
+      if (pause) { entered(); await barrier; return censusOf('unknown') }
+      return censusOf('idle')
+    },
+  }) })
+  expect(await turn(r, 'p-one')).toBe(true)
+  await entering
+  r.lifecycle.close()
+  pause = false
+  release()
+  await until(() => r.logged.some(row => row.event === 'project_scope_sleep'))
+  const attempts = r.logged.filter(row => row.event === 'project_scope_sleep').length
+  r.lifecycle.armIdle('p-one')
+  await Bun.sleep(200)
+  expect(r.logged.filter(row => row.event === 'project_scope_sleep')).toHaveLength(attempts)
+  expect(chatCloses(r)).toHaveLength(0)
+  expect(r.peer.children[0]!.child.hasExited()).toBe(false)
+  expect(await r.lifecycle.sleep('p-one')).toEqual({ status: 'refused', reason: 'lifecycle closed' })
+  r.restart()
+  r.lifecycle.armIdle('p-one')
+  await until(() => chatCloses(r).length === 1)
   expect(await r.lifecycle.isAsleep('p-one')).toBe(true)
 })
 

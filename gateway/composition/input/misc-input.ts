@@ -40,8 +40,9 @@ export interface MiscCompositionInput {
   }
   /** Awaited after graph tools and HTTP wiring exist, before accepting traffic. */
   on_graph_ready?: () => Promise<void>
-  /** Stop and drain work that can create REPL owners before graph or persistent
-   * REPL teardown begins. Also awaited on post-composition boot failure. */
+  /** Invoked before the first shutdown await: synchronously fence project sleep,
+   * then drain work that can create REPL owners. Awaited before graph/persistent
+   * teardown, and on post-composition boot failure. */
   on_shutdown_start?: () => Promise<void>
   db: ProjectDb
   project_slug: string
