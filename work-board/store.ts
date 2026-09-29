@@ -1367,15 +1367,19 @@ export class WorkBoardStore {
         current.updated_at !== expected.updated_at || current.inline_active === 1 ||
         current.linked_run_id === run_id ||
         (current.linked_run_id !== null && this.isRunLive?.(current.linked_run_id))) return false
-    const result = tx.runSync(
+    // SQLite's `changes` can include AFTER-trigger updates from a real run's
+    // strategy/counter propagation. RETURNING identifies the matched card row
+    // itself, independent of those additional changes.
+    const updated = tx.get<{ id: string }>(
       `UPDATE work_board_items SET linked_run_id = ?, inline_active = 0,
          status = 'in_progress', pr = NULL, pr_url = NULL,
          recovery_refusal = NULL, updated_at = ?
          WHERE project_slug = ? AND id = ? AND status = ?
-           AND linked_run_id IS ? AND updated_at = ?`,
+           AND linked_run_id IS ? AND updated_at = ?
+         RETURNING id`,
       [run_id, this.timestampAfter(current.updated_at), project_slug, id, expected.status, expected.linked_run_id, expected.updated_at],
     )
-    return result.changes === 1
+    return updated?.id === id
   }
 
   /** Call only after the transaction containing attachRecoveryRunInTransaction commits. */
@@ -1495,6 +1499,17 @@ export class WorkBoardStore {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.getByRunId(project_slug, run_id)
       if (current === null) return null
+      // The host may refuse a published recovery head after a successor was
+      // admitted but before launch. Only a proven authorization row for THIS
+      // run, card and board may turn that terminal failure into a blocked card.
+      // No caller/model-provided failure string gets this authority.
+      const authorizedRefusal = outcome === 'done' ? null : tx.get<{ refusal: string }>(
+        `SELECT refusal FROM code_trident_orchestrator_recoveries
+          WHERE run_id = ? AND project_slug = ? AND item_id = ?
+            AND refusal IS NOT NULL AND length(trim(refusal)) > 0`,
+        [run_id, project_slug, current.id],
+      )?.refusal.replace(/\s+/g, ' ').trim().slice(0, 2048) ?? null
+      const resolvedOutcome: RunReconcileOutcome = authorizedRefusal === null ? outcome : 'blocked'
       await tx.run(
         `INSERT INTO work_board_terminal_attempts
            (project_slug, item_id, run_id, outcome, pr, pr_url, recorded_at)
@@ -1504,7 +1519,7 @@ export class WorkBoardStore {
            pr = COALESCE(excluded.pr, work_board_terminal_attempts.pr),
            pr_url = CASE WHEN excluded.pr IS NOT NULL THEN excluded.pr_url
                      ELSE work_board_terminal_attempts.pr_url END`,
-        [project_slug, current.id, run_id, outcome, pr_info?.pr ?? null,
+        [project_slug, current.id, run_id, resolvedOutcome, pr_info?.pr ?? null,
           pr_info?.pr != null ? pr_info.pr_url : null, this.now()],
       )
       const sets = ['inline_active = 0']
@@ -1520,7 +1535,7 @@ export class WorkBoardStore {
         params.push(pr_info.execution_strategy, pr_info.strategy_rationale ?? null,
           pr_info.strategy_plan ?? null, pr_info.strategy_source ?? null)
       }
-      if (outcome === 'done') {
+      if (resolvedOutcome === 'done') {
         // Done — keep the terminal binding so completed history can still
         // derive durable run evidence (notably a recovered integrity alert).
         sets.push("status = 'done'")
@@ -1529,7 +1544,7 @@ export class WorkBoardStore {
           sets.push('completed_at = ?')
           params.push(this.now())
         }
-      } else if (outcome === 'blocked') {
+      } else if (resolvedOutcome === 'blocked') {
         // BLOCKED — the build stopped ON PURPOSE and said why. Same shape as the
         // failed arm (keep the run link so the retry path can overwrite it, never
         // stamp `completed_at` — nothing completed), and a DIFFERENT LANE, which is
@@ -1537,6 +1552,10 @@ export class WorkBoardStore {
         // from "this broke", and leaving it in `upcoming` would put it back at the
         // top of the active lane looking startable.
         sets.push("status = 'blocked'", 'completed_at = NULL')
+        if (authorizedRefusal !== null) {
+          sets.push('recovery_refusal = ?')
+          params.push(authorizedRefusal)
+        }
       } else {
         // Failed — FAILED lane, KEEP the run link (see the header). The retry
         // path (`attachRun`) overwrites the link + flips back to in_progress.

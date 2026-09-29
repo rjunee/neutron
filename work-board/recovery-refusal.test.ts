@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { WorkBoardStore, type WorkBoardItem, type WorkBoardRecoveryRefusalTarget } from './store.ts'
 
@@ -170,4 +171,80 @@ test('a rolled back recovery transaction leaves its refusal and source untouched
     throw new Error('claim failed')
   })).rejects.toThrow('claim failed')
   expect(store.get('board', card.id)).toEqual(before)
+})
+
+test('recovery bind sees the matched card even when a real run fires strategy propagation', async () => {
+  const board = new WorkBoardStore(db)
+  const card = await board.create('board', { title: 'Real run trigger' })
+  const run = await new TridentRunStore(db).create({
+    slug: 'trigger', project_slug: 'board', repo_path: '/repo', task: 'Build', max_task_iterations: 5,
+  })
+  const before = board.get('board', card.id)!
+  await db.transaction(async tx => {
+    expect(board.attachRecoveryRunInTransaction(tx, 'board', card.id, run.id, observed(before))).toBe(true)
+    expect(board.attachRecoveryRunInTransaction(tx, 'board', card.id, 'stale', observed(before))).toBe(false)
+  })
+  expect(board.get('board', card.id)).toMatchObject({ status: 'in_progress', linked_run_id: run.id })
+})
+
+test('a host-authorized late launch refusal blocks its successor card and preserves both attempt identities', async () => {
+  const board = new WorkBoardStore(db)
+  const runs = new TridentRunStore(db)
+  const card = await board.create('board', { title: 'Late remote drift' })
+  const source = await runs.create({ slug: 'source', project_slug: 'board', repo_path: '/repo', task: 'Source' })
+  await board.attachRun('board', card.id, source.id)
+  await board.detachRun('board', source.id, 'blocked')
+  const successor = await runs.create({ slug: 'successor', project_slug: 'board', repo_path: '/repo', task: 'Recovery' })
+  await board.attachRun('board', card.id, successor.id)
+  await runs.recordStageEvent(source.id, 'review-rejected')
+  const event = db.get<{ id: number }>(
+    'SELECT id FROM code_trident_stage_events WHERE run_id = ? ORDER BY id DESC LIMIT 1', [source.id],
+  )!
+  await db.run(
+    `INSERT INTO code_trident_orchestrator_recoveries
+       (source_run_id, source_event_id, run_id, project_slug, item_id, call_id, decision, refusal, consumed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [source.id, event.id, successor.id, 'board', card.id, 'call-1', '{}', 'Recovery refused:\n published head moved.', '2026-09-29T00:00:00Z'],
+  )
+  const result = await board.detachRun('board', successor.id, 'failed')
+  expect(result).toMatchObject({
+    status: 'blocked', linked_run_id: successor.id,
+    recovery_refusal: 'Recovery refused: published head moved.', completed_at: null,
+  })
+  expect(result!.attempts!.map(a => ({ run_id: a.run_id, outcome: a.outcome }))).toEqual([
+    { run_id: source.id, outcome: 'blocked' }, { run_id: successor.id, outcome: 'blocked' },
+  ])
+  expect(board.listActive('board').map(row => row.id)).toContain(card.id)
+})
+
+test('a refusal row for another card cannot relabel a failed successor or make a completed run blocked', async () => {
+  const board = new WorkBoardStore(db)
+  const runs = new TridentRunStore(db)
+  const other = await board.create('board', { title: 'Other card' })
+  const target = await board.create('board', { title: 'Target card' })
+  const source = await runs.create({ slug: 'source-negative', project_slug: 'board', repo_path: '/repo', task: 'Source' })
+  const successor = await runs.create({ slug: 'successor-negative', project_slug: 'board', repo_path: '/repo', task: 'Successor' })
+  await runs.recordStageEvent(source.id, 'review-rejected')
+  const event = db.get<{ id: number }>(
+    'SELECT id FROM code_trident_stage_events WHERE run_id = ? ORDER BY id DESC LIMIT 1', [source.id],
+  )!
+  await db.run(
+    `INSERT INTO code_trident_orchestrator_recoveries
+       (source_run_id, source_event_id, run_id, project_slug, item_id, call_id, decision, refusal, consumed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [source.id, event.id, successor.id, 'board', other.id, 'call-2', '{}', 'Wrong-card refusal', '2026-09-29T00:00:00Z'],
+  )
+  await board.attachRun('board', target.id, successor.id)
+  expect(await board.detachRun('board', successor.id, 'failed')).toMatchObject({
+    status: 'failed', linked_run_id: successor.id, recovery_refusal: null,
+    attempts: [{ run_id: successor.id, outcome: 'failed' }],
+  })
+  await db.run(
+    'UPDATE code_trident_orchestrator_recoveries SET item_id = ? WHERE run_id = ?',
+    [target.id, successor.id],
+  )
+  expect(await board.detachRun('board', successor.id, 'done')).toMatchObject({
+    status: 'done', linked_run_id: successor.id, recovery_refusal: null,
+    attempts: [{ run_id: successor.id, outcome: 'done' }],
+  })
 })
