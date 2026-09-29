@@ -561,12 +561,14 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       if (!isDeepStrictEqual(hostContext.request, turn.request)) throw Error('Planner host context does not match the signed dispatch')
       const brief = await readFile(turn.request.brief.path, 'utf8')
       if (briefIntegrity(brief) !== turn.request.brief.integrity) throw Error('Planner brief integrity changed')
-      plannerCapability = await bindPlannerWork({ session, request: turn.request, deadline, signal, base: run.base_sha!, pr: hostContext.snapshot.pr, brief, context: hostContext,
+      plannerCapability = await bindPlannerWork({ session, request: turn.request, get deadline() { return turn.dispatchBudget?.deadline_ms ?? deadline }, signal: turn.signal, base: run.base_sha!, pr: hostContext.snapshot.pr, brief, context: hostContext,
         current: () => !session.hasChildExited() && ownsNativeChildWorkspace(admitted, session, turn.request) && nativeChildCensusKnown(admitted),
         validate: envelope => ['completed', 'blocked'].includes(decodeProjectTrailer(JSON.stringify(envelope), turn.request, trailer).kind) })
     }
     enterActor()
     return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}), ...(plannerCapability ? { plannerCapability } : {}), onDispatchSubmitted, onNativeDispatchEvidence: evidence,
+      onQueueWait: (started_at, ended_at) => accounting.recordEvent('build-stage-ended', { run_id: run.id, step_id: turn.request.step_id,
+        stage: 'repl-writer-queue', started_at, ended_at }),
       grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })({ ...turn,
         deadline_ms: deadline, timeout_ms: Math.max(1, deadline - Date.now()) })
   }

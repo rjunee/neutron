@@ -8879,7 +8879,7 @@ test('local merge mode reaches merged with no PR, no push and no gh call', async
  * WHAT THEY DO NOT COVER: a seam that hangs the event loop itself, and the real
  * herdr transport. Both are faked here by construction.
  */
-function registerSession(f: Awaited<ReturnType<typeof fixture>>, session: Record<string, unknown>) {
+function registerSession(f: Awaited<ReturnType<typeof fixture>>, session: Record<string, unknown> | ReplSession) {
   supervisedBySessionKey.set(f.key, { substrate_instance_id: 'cc-agent-e2e',
     project_id: 'e2e-project', skip_permissions: true, extra_dirs: [f.dir] } as never)
   pool.set(f.key, Promise.resolve(session as never))
@@ -8970,6 +8970,72 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     expect(f.github.prs).toEqual([])
   }, 60_000)
 }
+
+test('native queued writer execution expiry preserves exact child recovery without redispatch', async () => {
+  let releaseChild!: () => void
+  const hold = new Promise<void>(resolve => { releaseChild = resolve })
+  let children = 0
+  const f = await fixture({ nativeChild: async () => { children++; await hold } })
+  const options = await f.prepare()
+  const release = await f.session.acquireTurn()
+  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.row.id,
+    step_id: `${f.row.id}:queued-expiry`, role: 'build', needs_approval_decision: false, budget: { wall_ms: 1_000 } }
+  const signal = new AbortController().signal
+  const runner = options.substrate.inRepl!
+  const running = runner.run(request, 'in-repl', signal)
+  try {
+    for (let n = 0; n < 100 && (f.session as ReplSession).turnSlotHeld < 2; n++) await Bun.sleep(5)
+    expect((f.session as ReplSession).turnSlotHeld).toBe(2)
+    await Bun.sleep(600)
+    release()
+    expect((await running).kind).toBe('unknown')
+    expect(children).toBe(1)
+    expect(f.admission.listLeases('liveChild')).toHaveLength(1)
+    releaseChild()
+    expect((await runner.recover!(request, 'in-repl', signal)).kind).toBe('blocked')
+    expect(children).toBe(1)
+    expect(f.admission.listLeases('liveChild')).toEqual([])
+  } finally { release(); releaseChild(); await running }
+}, 10_000)
+
+test('native planner retains execution time after measured real REPL writer queue wait', async () => {
+  const f = await fixture()
+  const options = await f.prepare()
+  options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 2_000 } }
+  const session = new ReplSession(f.key, 'e2e-generation', 'e2e-session', 'e2e-channel', f.dir)
+  session.authFingerprint = f.session.authFingerprint
+  session.toolSurface = f.session.toolSurface
+  session.plannerRole = PLANNER_ROLE
+  session.attachChild({ ...f.session.child, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}) })
+  registerSession(f, session)
+  const release = await session.acquireTurn()
+  let plans = 0
+  f.world.plannerOperation = async (request, capability, payload) => {
+    plans++
+    await Bun.sleep(1_200)
+    // This uses the real closed planner grant after the original wall has
+    // elapsed, exercising its deadline as well as the runner and actor timers.
+    await dispatchPlannerWork(session, { run_id: request.run_id, step_id: request.step_id,
+      capability, operation: 'publish', payload })
+  }
+  const host = await createProjectBuildHost(options)
+  const running = host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  try {
+    for (let n = 0; n < 200 && session.turnSlotHeld < 2; n++) await Bun.sleep(5)
+    expect(session.turnSlotHeld).toBe(2)
+    await Bun.sleep(1_200)
+    release()
+    const outcome = await running
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'merged' })
+    expect(plans).toBe(1)
+    const intervals = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-stage-ended')
+      .map(event => JSON.parse(event.meta ?? '{}')).filter(event => event.stage === 'repl-writer-queue' && event.step_id === `${f.row.id}:plan:0`)
+    expect(intervals).toHaveLength(1)
+    expect(intervals[0].ended_at - intervals[0].started_at).toBeGreaterThanOrEqual(1_200)
+    expect(f.admission.listLeases('liveChild')).toEqual([])
+    expect(session.turnSlotHeld).toBe(0)
+  } finally { release(); await running }
+}, 30_000)
 
 test('a plan turn acquired within its wall dispatches once and validates its native result', async () => {
   const f = await fixture()

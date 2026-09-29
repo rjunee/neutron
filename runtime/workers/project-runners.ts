@@ -8,6 +8,7 @@ import { codexInReplRunner, type CodexResultTransport } from './codex-in-repl.ts
 import { piInReplRunner } from './pi-in-repl.ts'
 import { unknownCause } from '../refusal-cause.ts'
 import { requiresPlannerWork } from './planner-work.ts'
+import type { ClaudeDispatchBudget } from './claude-dispatch-budget.ts'
 import { createHash } from 'node:crypto'
 import { readArmedTrailerReservation } from './trailer-slot.ts'
 
@@ -30,8 +31,11 @@ export type ProjectActingTurn = ((input: {
   request: BoundedWorkRequest
   spec: AgentSpec
   timeout_ms: number
-  /** Original host deadline, including reservation and workspace preparation. */
+  /** Initial host deadline, including reservation and workspace preparation.
+   * Claude's measured writer wait may extend it through dispatchBudget. */
   deadline_ms?: number
+  /** Claude's one measured queue interval is shared by every deadline owner. */
+  dispatchBudget?: ClaudeDispatchBudget
   signal: AbortSignal
   subagent?: string
 }) => Promise<{ kind: 'turn-ended' } | { kind: 'unknown'; detail: string } | Extract<BoundedWorkOutcome, { kind: 'blocked' }> | (Extract<BoundedWorkOutcome, { kind: 'refused' }> & { detail: string })>) & {
@@ -190,11 +194,12 @@ export async function createProjectRunners(options: ProjectRunnersOptions) {
       let blocked: Extract<BoundedWorkOutcome, { kind: 'blocked' }> | undefined
       const runner = construct({
         ...common,
-        async composeActingTurn(_topic, spec, turn: { timeout_ms: number; deadline_ms?: number; signal?: AbortSignal; subagent?: string; childResultPath?: string }) {
+        async composeActingTurn(_topic, spec, turn: { timeout_ms: number; deadline_ms?: number; dispatchBudget?: ClaudeDispatchBudget; signal?: AbortSignal; subagent?: string; childResultPath?: string }) {
           const actingRequest = conversation.provider === 'openai-codex' && turn.childResultPath
             ? { ...request, result: { ...request.result, path: turn.childResultPath } } : request
           const observation = await options.actingTurn({ conversation, request: actingRequest, spec, signal: turn.signal ?? signal, timeout_ms: turn.timeout_ms,
             ...(turn.deadline_ms === undefined ? {} : { deadline_ms: turn.deadline_ms }),
+            ...(turn.dispatchBudget === undefined ? {} : { dispatchBudget: turn.dispatchBudget }),
             ...(turn.subagent === undefined ? {} : { subagent: turn.subagent }) })
           if (observation.kind === 'blocked') {
             blocked = observation
