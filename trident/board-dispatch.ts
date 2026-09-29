@@ -101,6 +101,9 @@ import { deriveClaimedPaths } from './claimed-paths.ts'
 import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 import { DEFAULT_MAX_TASK_ITERATIONS, isTaskCap, isTaskIteration } from './task-budget.ts'
+import { parseOrchestratorRecoveryRequest, rejectedRecoverySource, verifyRecoveryRemote } from './orchestrator-recovery.ts'
+import { WORK_BOARD_REPLAN_BUILD_TOOL, type OrchestratorRecoveryInvocation, type OrchestratorRecoveryDecision, type OrchestratorRecoveryRequest } from './orchestrator-recovery-contract.ts'
+import { validateProjectChatOrchestratorAuthority } from '@neutronai/tools/orchestrator-authority.ts'
 
 const log = createLogger('trident')
 
@@ -338,6 +341,12 @@ async function defaultReadBranchTip(
  * satisfies this structurally (`get` / `attachRun`).
  */
 export interface TridentBoardBinder {
+  attachRecoveryRunInTransaction?(tx: import('@neutronai/persistence/index.ts').ProjectDb,
+    project_slug: string, id: string, run_id: string,
+    expected: { linked_run_id: string | null; status: 'failed' | 'blocked' | 'upcoming'; updated_at: string }): boolean
+  notifyRecoveryBindingCommitted?(project_slug: string): void
+  recordRecoveryRefusal?(project_slug: string, id: string,
+    expected: { linked_run_id: string | null; status: 'failed' | 'blocked' | 'upcoming'; updated_at: string }, reason: string): Promise<boolean>
   get(
     project_slug: string,
     id: string,
@@ -349,6 +358,7 @@ export interface TridentBoardBinder {
     strategy_rationale?: string | null
     strategy_plan?: string | null
     strategy_source?: 'planner' | 'legacy' | null
+    recovery_refusal?: string | null
     task_iteration?: number
     max_task_iterations?: number | null
     task_total?: number | null
@@ -728,10 +738,61 @@ export async function dispatchBoardBoundBuild(
   }
 }
 
+/** Distinct orchestrator action. The caller must supply transport-authenticated authority. */
+export async function dispatchOrchestratorRecovery(
+  request: OrchestratorRecoveryRequest,
+  invocation: OrchestratorRecoveryInvocation,
+  deps: BoardBoundBuildDeps,
+): Promise<BoardBoundBuildResult> {
+  const slot: DispatchLeaseSlot = { lease: null, kept: false }
+  let card: ReturnType<TridentRunStore['recoveryCard']> = null
+  let authenticated = false
+  const assertAuthority = () => validateProjectChatOrchestratorAuthority(invocation?.authority,
+    { project_scope: deps.project_slug, project_id: invocation?.project_id, call_id: invocation?.call_id,
+      tool_name: WORK_BOARD_REPLAN_BUILD_TOOL, args: request })
+  let result: BoardBoundBuildResult
+  try {
+    const authority = assertAuthority()
+    authenticated = true
+    const parsed = parseOrchestratorRecoveryRequest(request)
+    card = deps.store.recoveryCard(deps.project_slug, parsed.board_item_id)
+    if (!deps.board.recordRecoveryRefusal || !deps.board.attachRecoveryRunInTransaction)
+      throw new Error('Recovery requires durable card refusal storage and atomic binding')
+    const source = rejectedRecoverySource(deps.store, deps.project_slug, parsed)
+    const prior = source.prior
+    const decision: OrchestratorRecoveryDecision = {
+      request: parsed, authority, current_run_id: source.card.linked_run_id,
+      card_status: source.card.status, card_updated_at: source.card.updated_at,
+      source_meta: source.meta, repo_path: prior.repo_path, repository: '', base_branch: '', branch: prior.branch!, task: prior.task,
+      max_rounds: Math.min(prior.max_rounds, deps.max_rounds ?? prior.max_rounds),
+      task_iteration: Math.max(source.card.task_iteration, prior.task_iteration),
+      max_task_iterations: Math.min(source.card.max_task_iterations ?? prior.max_task_iterations,
+        prior.max_task_iterations, deps.max_task_iterations ?? prior.max_task_iterations),
+    }
+    if (decision.max_rounds <= source.state.checkpoint.round || decision.task_iteration >= decision.max_task_iterations)
+      throw new Error('Recovery review or task budget is exhausted')
+    const { holds: _holds, ...unqueuedDeps } = deps
+    result = await dispatchUnderAdmission({ board_item_id: parsed.board_item_id, task: prior.task },
+      unqueuedDeps, slot, decision, () => { assertAuthority() })
+  } catch (error) {
+    result = { ok: false, code: 'backend_error', message: error instanceof Error ? error.message : 'Recovery evidence is unreadable' }
+  } finally {
+    if (slot.lease !== null && !slot.kept) await slot.lease.release()
+  }
+  if (!result.ok && authenticated && card && ['failed', 'blocked', 'upcoming'].includes(card.status)) {
+    const saved = await deps.board.recordRecoveryRefusal?.(deps.project_slug, card.id,
+      { linked_run_id: card.linked_run_id, status: card.status as 'failed' | 'blocked' | 'upcoming', updated_at: card.updated_at }, result.message)
+    if (!saved) result = { ...result, message: `${result.message} Card refusal was not saved because the binding changed or storage was unavailable.` }
+  }
+  return result
+}
+
 async function dispatchUnderAdmission(
   input: BoardBoundBuildInput,
   deps: BoardBoundBuildDeps,
   slot: DispatchLeaseSlot,
+  recovery?: OrchestratorRecoveryDecision,
+  assertRecoveryAuthority?: () => void,
 ): Promise<BoardBoundBuildResult> {
   // (1) REQUIRED board_item_id — no untracked dispatches.
   const board_item_id = typeof input.board_item_id === 'string' ? input.board_item_id.trim() : ''
@@ -755,6 +816,14 @@ async function dispatchUnderAdmission(
     }
   }
 
+  // A recorded recovery refusal is stronger than the card's editable lane.
+  // Moving BLOCKED back to upcoming may clear its run link, but must not turn
+  // a consumed one-use recovery into an ordinary fresh build.
+  if (!recovery && typeof item.recovery_refusal === 'string' && item.recovery_refusal.trim()) {
+    return { ok: false, code: 'card_blocked', message:
+      'This card has a durable orchestrator-recovery refusal. An ordinary dispatch cannot restart or bypass the consumed recovery; inspect the card refusal and resolve it explicitly.' }
+  }
+
   // (2a) THE CARD IS BLOCKED. Checked immediately after the item is found and
   // BEFORE every other gate, because the answer does not depend on any of them:
   // a blocked card is not startable whatever the task text says, whether or not
@@ -766,7 +835,7 @@ async function dispatchUnderAdmission(
   // re-test; this one is waiting on a JUDGEMENT, and a sweep that re-fired it
   // would relearn the same block on the orchestrator's behalf — exactly the loop
   // this card closed inside the run, reopened one level out.
-  if (item.status === 'blocked') {
+  if (item.status === 'blocked' && !recovery) {
     return {
       ok: false,
       code: 'card_blocked',
@@ -1179,7 +1248,17 @@ async function dispatchUnderAdmission(
   }
 
   const slug = slugifyTask(input.task)
-  const branch = `trident/${slug}`
+  const branch = recovery?.branch ?? `trident/${slug}`
+  if (recovery) {
+    if (repo_path !== recovery.repo_path || merge_mode !== 'pr')
+      return { ok: false, code: 'backend_error', message: 'Recovery repository no longer matches its original source.' }
+    try {
+      Object.assign(recovery, await verifyRecoveryRemote({ repo_path, branch, published_pr: recovery.request.published_pr },
+        recovery.request.expected_head, credentialedRunner ?? spawnCapture))
+    } catch (error) {
+      return { ok: false, code: 'backend_error', message: error instanceof Error ? error.message : 'Recovery remote is unreadable.' }
+    }
+  }
 
   /**
    * THE ONE `branch_live` REFUSAL, composed in one place — the tail that says
@@ -1558,7 +1637,19 @@ async function dispatchUnderAdmission(
   // operator action differs: a cleared link is a status-dot advance, an unknown id is a
   // deleted row, a live run is something to wait for, and another project's run is a
   // wiring fault.
-  if (cardsPriorRun === '') {
+  if (recovery) {
+    const source = rejectedRecoverySource(deps.store, deps.project_slug, recovery.request)
+    prior = source.prior
+    execution_strategy = prior.execution_strategy
+    strategy_rationale = prior.strategy_rationale
+    strategy_plan = prior.strategy_plan
+    strategy_source = prior.strategy_source
+    budget = { task_iteration: recovery.task_iteration, max_task_iterations: recovery.max_task_iterations }
+    seed = { checkpoint: `fix-round-${source.state.checkpoint.round + 1}`,
+      head: recovery.request.expected_head, base_sha: recovery.request.expected_base,
+      findings: JSON.stringify(source.state.checkpoint.findings) }
+    seedReason = 'resumed'
+  } else if (cardsPriorRun === '') {
     seedReason = 'card_names_no_run'
   } else if (namedPrior === null) {
     seedReason = 'card_names_an_unknown_run'
@@ -1575,6 +1666,17 @@ async function dispatchUnderAdmission(
       prior = await deps.store.reconcileTaskSpend(prior.id) ?? prior
     } catch {
       return { ok: false, code: 'backend_error', message: 'The previous run has an invalid iteration checkpoint. Nothing was dispatched.' }
+    }
+    // A one-use orchestrator recovery cannot become an ordinary retry after a
+    // pre-fire failure. The successor's projected fix-round seed is not proof
+    // that another unauthenticated re-plan may consume the rejected head.
+    try {
+      if (deps.store.orchestratorRecovery(prior.id) !== null) {
+        return { ok: false, code: 'card_blocked', message:
+          'This card already consumed its authorized orchestrator recovery. An ordinary retry cannot re-use that rejected checkpoint or start a fresh fallback build. Inspect the linked recovery run and its refusal.' }
+      }
+    } catch {
+      return { ok: false, code: 'backend_error', message: 'Recovery lineage is unreadable. Nothing was dispatched.' }
     }
     if (execution_strategy !== null && prior.execution_strategy !== null && execution_strategy !== prior.execution_strategy) {
       return { ok: false, code: 'backend_error', message: 'The card and prior run disagree about the immutable execution strategy. Nothing was dispatched.' }
@@ -1767,7 +1869,9 @@ async function dispatchUnderAdmission(
   // THE CARD SENTENCE, built from the values this row is about to be written with —
   // the same seed, budget and cap the spreads below pass — so the note and the row
   // cannot disagree. Written once, at create; nothing later restates it.
-  const resume_note = resumeNote(cardHadPrior ? seedReason : 'no_prior_terminal_run', {
+  const resume_note = recovery
+    ? `Authorized re-plan from ${recovery.request.expected_head.slice(0, 7)}; task round ${recovery.task_iteration}/${recovery.max_task_iterations} and review cap ${recovery.max_rounds} carried. Published-source drift refuses; no fresh-build fallback.`
+    : resumeNote(cardHadPrior ? seedReason : 'no_prior_terminal_run', {
     inner_checkpoint: seed?.checkpoint ?? null,
     inner_checkpoint_head: seed?.head ?? null,
     execution_strategy,
@@ -1849,14 +1953,17 @@ async function dispatchUnderAdmission(
       ...(budget === null && effectiveMaxTaskIterations !== undefined
         ? { max_task_iterations: effectiveMaxTaskIterations }
         : {}),
-      ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
+      ...(recovery ? { max_rounds: recovery.max_rounds }
+        : deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
       ...(deps.chat_id !== undefined ? { chat_id: deps.chat_id } : {}),
       ...(deps.thread_id !== undefined ? { thread_id: deps.thread_id } : {}),
       ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
     }, typedSource === null ? undefined : {
       priorRunId: typedSource.prior.id, eventId: typedSource.eventId,
       head: typedSource.state.checkpoint.head!,
-    })
+    }, recovery ? { decision: recovery, assertAuthority: assertRecoveryAuthority!, bind: (tx, run) => deps.board.attachRecoveryRunInTransaction!(tx,
+      deps.project_slug, item.id, run.id, { linked_run_id: recovery.current_run_id,
+        status: recovery.card_status as 'failed' | 'blocked' | 'upcoming', updated_at: recovery.card_updated_at }) } : undefined)
     if (!admission.ok) {
       if (admission.conflict === 'branch') {
         // THE RACE THE GATE ABOVE CANNOT WIN (Argus r7 BLOCKER). Gate (4b) read
@@ -1971,7 +2078,8 @@ async function dispatchUnderAdmission(
     }
     // BIND: light the item up (fork ⑂ + in_progress) the instant the build starts.
     // The durable loop fires + harvests by runId; terminal-reconcile clears it.
-    await deps.board.attachRun(deps.project_slug, item.id, run.id)
+    if (recovery) deps.board.notifyRecoveryBindingCommitted?.(deps.project_slug)
+    else await deps.board.attachRun(deps.project_slug, item.id, run.id)
     // A card that was previously HELD and has now finally dispatched clears its
     // queue entry (idempotent — a never-held card has no row to delete).
     await deps.holds?.deleteByItem(deps.project_slug, board_item_id)

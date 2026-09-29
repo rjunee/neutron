@@ -19,6 +19,7 @@ import { currentTopicContext, type TopicContext, withTopicContext } from './topi
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import { emitSystemEvent } from '@neutronai/persistence/index.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import type { ProjectChatOrchestratorAuthority } from '@neutronai/tools/orchestrator-authority.ts'
 
 /**
  * X1 — the capability verdict the dispatch-time gate WOULD reach under
@@ -115,6 +116,8 @@ export class McpServer {
      * own `project_id` instead.
      */
     project_id?: string | null
+    /** Opaque host transport witness, independent of model arguments. */
+    orchestratorAuthority?: ProjectChatOrchestratorAuthority
   }): Promise<unknown> {
     const reg = this.registry.get(input.tool_name)
     if (!reg) {
@@ -154,6 +157,7 @@ export class McpServer {
         topic_id: ctx.topic_id,
         call_id: ctx.call_id,
         speaker_user_id: ctx.speaker_user_id,
+        ...(input.orchestratorAuthority === undefined ? {} : { orchestratorAuthority: input.orchestratorAuthority }),
       }),
     )
   }

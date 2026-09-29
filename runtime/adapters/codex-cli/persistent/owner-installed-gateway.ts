@@ -6,9 +6,9 @@ export interface CodexOwnerToolRequest { id: string | number; method: string; pa
 /** Registered once on the durable root. Arguments select routes, never authority. */
 export const OWNER_INSTALLED_GATEWAY_TOOL = {
   name: 'neutron_owner_mcp',
-  description: 'Access approved owner MCP servers. discover returns metadata and complete discovery pages; open(server) creates a consumer. request(handle, method, params) returns the original MCP result and remains pending until complete. receive(handle) concurrently receives original notification/progress envelopes (including the original progressToken), waiting up to 20 seconds. close(handle) retires that consumer. Handles persist across owner turns; notifications do not replay across turns.',
+  description: 'Access approved owner MCP servers. discover returns metadata and complete discovery pages; open(server) creates a consumer. request(handle, method, params) returns the original MCP result and remains pending until complete. receive(handle) concurrently receives original notification/progress envelopes (including the original progressToken), waiting up to 20 seconds. close(handle) retires that consumer. Handles persist across owner turns; notifications do not replay across turns. replan_build(params) requests one project-chat recovery from a rejected build: params must contain board_item_id, source_run_id, source_event_id, expected_head, expected_base, published_pr and a nonempty direction. Available only to the active project-chat owner turn; ordinary retry does not authorize recovery.',
   inputSchema: { type: 'object', properties: {
-    action: { type: 'string', enum: ['discover', 'open', 'request', 'receive', 'close'] },
+    action: { type: 'string', enum: ['discover', 'open', 'request', 'receive', 'close', 'replan_build'] },
     server: { type: 'string' }, handle: { type: 'string' }, method: { type: 'string' },
     params: { type: 'object', additionalProperties: true },
   }, required: ['action'], additionalProperties: false },

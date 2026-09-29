@@ -6,6 +6,8 @@ import { gitRangeArgv } from './git-range.ts'
 import { redactPushError } from './publish-failure.ts'
 import { readBuildModeState } from './build-mode-state.ts'
 import type { HostCommandResult } from './git-mode.ts'
+import { ORCHESTRATOR_RECOVERY_STAGE } from './orchestrator-recovery-contract.ts'
+import { prepareRecoveryBranch, verifyRecoveryRemote } from './orchestrator-recovery.ts'
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -32,7 +34,7 @@ export interface LaunchPreparationDeps {
 
 export async function prepareLaunch(
   run: TridentRun,
-  opts: Pick<BuildTridentOrchestratorOptions, 'run_host' | 'sleep' | 'list_stage_events'>,
+  opts: Pick<BuildTridentOrchestratorOptions, 'run_host' | 'sleep' | 'list_stage_events' | 'read_orchestrator_recovery' | 'record_recovery_refusal'>,
   deps: LaunchPreparationDeps,
 ): Promise<AdvanceOutcome | PreparedLaunch> {
   const {
@@ -44,16 +46,41 @@ export async function prepareLaunch(
     resolveResumeLiveHead,
     resumeHeadDecides,
   } = deps
+  let recoveryEvent: ReturnType<NonNullable<typeof opts.list_stage_events>>[number] | undefined
   let modeState: ReturnType<typeof readBuildModeState>
   try {
-    modeState = readBuildModeState(opts.list_stage_events?.(run.id) ?? [], run)
+    const stageEvents = opts.list_stage_events?.(run.id) ?? []
+    recoveryEvent = stageEvents.find(e => e.stage === ORCHESTRATOR_RECOVERY_STAGE)
+    modeState = readBuildModeState(stageEvents, run)
   } catch {
+    if (recoveryEvent) {
+      const reason = 'Orchestrator recovery refused: canonical checkpoint is unreadable or invalid; no fresh build was started'
+      await opts.record_recovery_refusal?.(run.id, reason)
+      return { run: failedRun(run, reason, true), changed: true, waiting: false,
+        note: `${run.phase} → failed (invalid recovery checkpoint)` }
+    }
     return {
       run: failedRun(run, 'Project driver canonical checkpoint is unreadable or has invalid identity or state', false),
       changed: true, waiting: false, note: `${run.phase} → failed (invalid project driver checkpoint)`,
     }
   }
   const base = await resolveBase(run)
+  if (recoveryEvent || modeState?.checkpoint.orchestratorReplan) {
+    try {
+      const decision = opts.read_orchestrator_recovery?.(run)
+      if (!decision || !opts.record_recovery_refusal) throw new Error('Recovery launch lacks durable authorization storage')
+      if (modeState === null && (run.inner_checkpoint === null || run.inner_checkpoint_head !== decision.request.expected_head
+        || run.base_sha !== decision.request.expected_base)) throw new Error('Recovery launch seed lost its exact pins')
+      if (modeState === null) await prepareRecoveryBranch(run, decision.request.expected_head, opts.run_host, decision)
+      else if (modeState.checkpoint.orchestratorReplan)
+        await verifyRecoveryRemote(run, decision.request.expected_head, opts.run_host, decision)
+    } catch {
+      const reason = 'Orchestrator recovery refused: published source changed or is unreadable; no fresh build was started'
+      await opts.record_recovery_refusal?.(run.id, reason)
+      return { run: failedRun(run, reason, true),
+        changed: true, waiting: false, note: `${run.phase} → failed (recovery source refused)` }
+    }
+  }
   let resume_checkpoint = modeState?.checkpoint.stage ?? run.inner_checkpoint
   // MID-LOOP RESUME — the checkpoint travels WITH the commit it was recorded
   // against (and, for a REQUEST_CHANGES checkpoint, the findings recorded with
@@ -153,6 +180,15 @@ export async function prepareLaunch(
   // the seed existed: base re-pinned, leftover-branch guard armed, no resume arg
   // threaded to the workflow. Not a failure — there is nothing wrong with the
   // card, only with the shortcut.
+  // An ordinary retry seed is an optimization and may be falsified below. An
+  // explicitly authorized recovery is not: ANY second-probe mismatch, absence
+  // or unreadability must preserve its source/budget and refuse before that arm.
+  if (recoveryEvent && modeState === null && resume_live_head !== recorded) {
+    const reason = 'Orchestrator recovery refused: published source changed or became unreadable during launch; no fresh build was started'
+    await opts.record_recovery_refusal!(run.id, reason)
+    return { run: failedRun(run, reason, true), changed: true, waiting: false,
+      note: `${run.phase} → failed (recovery source refused)` }
+  }
   const never_recovered = (run.crash_recoveries ?? 0) === 0 && (run.infra_retries ?? 0) === 0
   const seeded_resume =
     modeState === null && run.inner_checkpoint !== null && run.workflow_run_id === null && never_recovered

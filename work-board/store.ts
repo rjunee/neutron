@@ -66,6 +66,8 @@ export type WorkBoardTaskType = 'build' | 'research'
 
 /** Public, fully-typed board item. */
 export interface WorkBoardItem {
+  /** Durable recovery admission refusal, independent of any replacement run. */
+  recovery_refusal?: string | null
   /** Terminal observations survive replacement of the current run binding. */
   attempts?: WorkBoardTerminalAttempt[]
   execution_strategy?: 'single' | 'task_sequence' | null
@@ -160,6 +162,13 @@ export interface WorkBoardTerminalAttempt {
   pr: number | null
   pr_url: string | null
   recorded_at: string
+}
+
+/** Identity observed before checking recovery evidence. Never a replacement source. */
+export interface WorkBoardRecoveryRefusalTarget {
+  linked_run_id: string | null
+  status: 'failed' | 'blocked' | 'upcoming'
+  updated_at: string
 }
 
 /**
@@ -306,7 +315,7 @@ const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
   'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
   'blocked_by, declared_surfaces, ' +
-  'pr, pr_url, task_iteration, max_task_iterations, repo_name, task_total, execution_strategy, strategy_rationale, strategy_plan, strategy_source'
+  'pr, pr_url, task_iteration, max_task_iterations, repo_name, task_total, execution_strategy, strategy_rationale, strategy_plan, strategy_source, recovery_refusal'
 
 /** One `?` per column in {@link COLS}, DERIVED — a hand-counted placeholder list is how
  *  the rebase produced `SQLite query expected 14 values, received 16`. */
@@ -315,6 +324,7 @@ const COL_PLACEHOLDERS = COLS.split(',')
   .join(', ')
 
 interface WorkBoardItemDbRow {
+  recovery_refusal: string | null
   execution_strategy: 'single' | 'task_sequence' | null
   strategy_rationale: string | null
   strategy_plan: string | null
@@ -563,6 +573,7 @@ function defaultUlid(): string {
 
 function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
   return {
+    recovery_refusal: row.recovery_refusal,
     repo_name: row.repo_name,
     id: row.id,
     project_slug: row.project_slug,
@@ -712,6 +723,17 @@ export class WorkBoardStore {
     }
   }
 
+  /** A card CAS needs a new version even when two writes share a wall-clock ms. */
+  private timestampAfter(previous: string): string {
+    const wall = this.now()
+    const oldMillis = Date.parse(previous)
+    const wallMillis = Date.parse(wall)
+    if (Number.isFinite(oldMillis) && Number.isFinite(wallMillis) && wallMillis <= oldMillis) {
+      return new Date(oldMillis + 1).toISOString()
+    }
+    return wall
+  }
+
   /** Restore a completed card to its stored active-lane ordinal. Active siblings
    * keep their relative order; only their integer ranks are compacted around the
    * insertion. A non-positive/non-integer legacy value has no trustworthy prior
@@ -764,6 +786,7 @@ export class WorkBoardStore {
     const declared_surfaces = validateDeclaredSurfaces(input.declared_surfaces ?? [])
 
     const item: WorkBoardItem = {
+      recovery_refusal: null,
       repo_name: input.repo_name ?? null,
       id,
       project_slug,
@@ -833,6 +856,7 @@ export class WorkBoardStore {
           item.strategy_rationale ?? null,
           item.strategy_plan ?? null,
           item.strategy_source ?? null,
+          item.recovery_refusal ?? null,
         ],
       )
     })
@@ -1293,6 +1317,76 @@ export class WorkBoardStore {
     this.emitChange(project_slug)
   }
 
+  /** Record a recovery refusal only against the card identity that was checked.
+   * A refused admission creates no run, so its reason belongs to the card. The
+   * current binding (possibly newer than a historical recovery source) stays
+   * intact. Ordinary create/patch input cannot write this protected field. */
+  async recordRecoveryRefusal(
+    project_slug: string,
+    id: string,
+    expected: WorkBoardRecoveryRefusalTarget,
+    reason: string,
+  ): Promise<boolean> {
+    const text = reason.replace(/\s+/g, ' ').trim().slice(0, 2048)
+    if (!text) throw new WorkBoardValidationError('invalid_recovery_refusal', 'Recovery refusal must have a reason')
+    const recorded = await this.db.transaction(async (tx): Promise<boolean> => {
+      const current = this.get(project_slug, id)
+      if (current === null || !['failed', 'blocked', 'upcoming'].includes(expected.status) ||
+          current.status !== expected.status || current.linked_run_id !== expected.linked_run_id ||
+          current.updated_at !== expected.updated_at || current.inline_active ||
+          (current.linked_run_id !== null && this.isRunLive?.(current.linked_run_id))) return false
+      const result = tx.runSync(
+        `UPDATE work_board_items SET status = 'blocked', inline_active = 0,
+           recovery_refusal = ?, updated_at = ?
+           WHERE project_slug = ? AND id = ? AND status = ?
+             AND linked_run_id IS ? AND updated_at = ?`,
+        [text, this.timestampAfter(current.updated_at), project_slug, id, expected.status, expected.linked_run_id, expected.updated_at],
+      )
+      return result.changes === 1
+    })
+    if (recorded) this.emitChange(project_slug)
+    return recorded
+  }
+
+  /** Bind a recovered run inside the caller's claim/create transaction. The
+   * caller must notify only after commit. This synchronous CAS prevents a
+   * source claim from committing while a newer card binding wins the race. */
+  attachRecoveryRunInTransaction(
+    tx: ProjectDb,
+    project_slug: string,
+    id: string,
+    run_id: string,
+    expected: WorkBoardRecoveryRefusalTarget,
+  ): boolean {
+    const current = tx.get<WorkBoardItemDbRow>(
+      `SELECT ${COLS} FROM work_board_items WHERE project_slug = ? AND id = ?`,
+      [project_slug, id],
+    )
+    if (current === null || !['failed', 'blocked', 'upcoming'].includes(expected.status) ||
+        current.status !== expected.status || current.linked_run_id !== expected.linked_run_id ||
+        current.updated_at !== expected.updated_at || current.inline_active === 1 ||
+        current.linked_run_id === run_id ||
+        (current.linked_run_id !== null && this.isRunLive?.(current.linked_run_id))) return false
+    // SQLite's `changes` can include AFTER-trigger updates from a real run's
+    // strategy/counter propagation. RETURNING identifies the matched card row
+    // itself, independent of those additional changes.
+    const updated = tx.get<{ id: string }>(
+      `UPDATE work_board_items SET linked_run_id = ?, inline_active = 0,
+         status = 'in_progress', pr = NULL, pr_url = NULL,
+         recovery_refusal = NULL, updated_at = ?
+         WHERE project_slug = ? AND id = ? AND status = ?
+           AND linked_run_id IS ? AND updated_at = ?
+         RETURNING id`,
+      [run_id, this.timestampAfter(current.updated_at), project_slug, id, expected.status, expected.linked_run_id, expected.updated_at],
+    )
+    return updated?.id === id
+  }
+
+  /** Call only after the transaction containing attachRecoveryRunInTransaction commits. */
+  notifyRecoveryBindingCommitted(project_slug: string): void {
+    this.emitChange(project_slug)
+  }
+
   /** Clear a bound trident run — but ONLY if `run_id` is still the run bound to
    *  this item. Two concurrent dispatches can bind the same item in turn (the
    *  later `attachRun` supersedes the earlier `linked_run_id`); when the earlier
@@ -1352,6 +1446,9 @@ export class WorkBoardStore {
         'pr_url = NULL',
       ]
       const params: (string | number | null)[] = [run_id]
+      // Only a genuinely new admitted binding supersedes its refusal. Repeating
+      // attachment of the same run cannot erase the reason for refusing recovery.
+      if (current.linked_run_id !== run_id) sets.push('recovery_refusal = NULL')
       if (current.status === 'done') {
         // Re-open OFF done: clear the datestamp + restore the prior ordinal.
         sets.push('completed_at = NULL')
@@ -1402,6 +1499,27 @@ export class WorkBoardStore {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.getByRunId(project_slug, run_id)
       if (current === null) return null
+      // ANY failed authorized recovery successor must stay blocked. A pre-fire
+      // infrastructure failure can occur before launch records a specific
+      // refusal; treating that as an ordinary failed build would let a later
+      // dispatch re-seed the one-use rejected checkpoint without authority.
+      // Only the durable row for THIS run, board and card has this effect.
+      const recovery = outcome === 'done' ? null : tx.get<{ refusal: string | null; failure_reason: string | null }>(
+        `SELECT recovery.refusal, run.failure_reason
+           FROM code_trident_orchestrator_recoveries AS recovery
+           JOIN code_trident_runs AS run ON run.id = recovery.run_id
+          WHERE recovery.run_id = ? AND recovery.project_slug = ? AND recovery.item_id = ?`,
+        [run_id, project_slug, current.id],
+      ) ?? null
+      const authorizedRefusal = recovery === null ? null : (
+        recovery.refusal?.trim() ||
+        `Orchestrator recovery stopped before completion: ${recovery.failure_reason?.trim() || 'the run failed before a specific refusal was recorded'}`
+      ).replace(/\s+/g, ' ').trim().slice(0, 2048)
+      if (recovery !== null && !recovery.refusal?.trim()) {
+        await tx.run('UPDATE code_trident_orchestrator_recoveries SET refusal = ? WHERE run_id = ?',
+          [authorizedRefusal, run_id])
+      }
+      const resolvedOutcome: RunReconcileOutcome = authorizedRefusal === null ? outcome : 'blocked'
       await tx.run(
         `INSERT INTO work_board_terminal_attempts
            (project_slug, item_id, run_id, outcome, pr, pr_url, recorded_at)
@@ -1411,7 +1529,7 @@ export class WorkBoardStore {
            pr = COALESCE(excluded.pr, work_board_terminal_attempts.pr),
            pr_url = CASE WHEN excluded.pr IS NOT NULL THEN excluded.pr_url
                      ELSE work_board_terminal_attempts.pr_url END`,
-        [project_slug, current.id, run_id, outcome, pr_info?.pr ?? null,
+        [project_slug, current.id, run_id, resolvedOutcome, pr_info?.pr ?? null,
           pr_info?.pr != null ? pr_info.pr_url : null, this.now()],
       )
       const sets = ['inline_active = 0']
@@ -1427,7 +1545,7 @@ export class WorkBoardStore {
         params.push(pr_info.execution_strategy, pr_info.strategy_rationale ?? null,
           pr_info.strategy_plan ?? null, pr_info.strategy_source ?? null)
       }
-      if (outcome === 'done') {
+      if (resolvedOutcome === 'done') {
         // Done — keep the terminal binding so completed history can still
         // derive durable run evidence (notably a recovered integrity alert).
         sets.push("status = 'done'")
@@ -1436,7 +1554,7 @@ export class WorkBoardStore {
           sets.push('completed_at = ?')
           params.push(this.now())
         }
-      } else if (outcome === 'blocked') {
+      } else if (resolvedOutcome === 'blocked') {
         // BLOCKED — the build stopped ON PURPOSE and said why. Same shape as the
         // failed arm (keep the run link so the retry path can overwrite it, never
         // stamp `completed_at` — nothing completed), and a DIFFERENT LANE, which is
@@ -1444,6 +1562,10 @@ export class WorkBoardStore {
         // from "this broke", and leaving it in `upcoming` would put it back at the
         // top of the active lane looking startable.
         sets.push("status = 'blocked'", 'completed_at = NULL')
+        if (authorizedRefusal !== null) {
+          sets.push('recovery_refusal = ?')
+          params.push(authorizedRefusal)
+        }
       } else {
         // Failed — FAILED lane, KEEP the run link (see the header). The retry
         // path (`attachRun`) overwrites the link + flips back to in_progress.

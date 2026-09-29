@@ -1,4 +1,5 @@
 import { projectBuildDriverReservation, projectBuildMeasuredUnknown, projectBuildPending } from './project-launcher.ts'
+import { ORCHESTRATOR_RECOVERY_STAGE } from './orchestrator-recovery-contract.ts'
 import {
   DEFAULT_MAX_INFRA_RETRIES,
   INFRA_RETRY_BACKOFF_MS,
@@ -203,6 +204,11 @@ export interface BuildTridentOrchestratorOptions {
    *  Omitted → only the late settle can confirm an unconfirmed fire, and an
    *  abandoned project-driver reservation cannot establish continuation. */
   list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string; meta?: string | null }>
+  /** Host-owned one-use table reader; a stage event alone never authorizes recovery. */
+  read_orchestrator_recovery?: (run: TridentRun) => import('./orchestrator-recovery-contract.ts').OrchestratorRecoveryDecision | null
+  record_recovery_refusal?: (run_id: string, reason: string) => Promise<void>
+  /** Durable recovery lineage cannot authorize ordinary stranded publication. */
+  recovery_salvage_protected?: (run_id: string) => boolean
   /** Review-only executor seam. Production uses `executeBoundReview`; tests may
    *  inject a recording executor without running a live review panel. */
   execute_bound_review?: typeof executeBoundReview
@@ -753,7 +759,7 @@ export interface StrandedReconcileOptions {
 }
 
 export interface StrandedFailureSweepDeps {
-  store: Pick<TridentRunStore, 'listFailedPrRuns' | 'listNonTerminal' | 'update'>
+  store: Pick<TridentRunStore, 'listFailedPrRuns' | 'listNonTerminal' | 'update' | 'isOrchestratorRecoverySalvageProtected'>
   reconcile: (
     run: TridentRun,
     options?: StrandedReconcileOptions,
@@ -786,6 +792,9 @@ export async function sweepStrandedFailures({
   }
   for (const row of rows) {
     try {
+      // The one-use recovery claim reserves publication for the governed
+      // recovery loop. Neither its source nor successor may use boot salvage.
+      if (store.isOrchestratorRecoverySalvageProtected(row.id)) continue
       const salvaged = await reconcile(row, {
         inspect_worktree:
           liveWorktreeScopes !== null && !liveWorktreeScopes.has(strandedWorktreeScope(row)),
@@ -1510,7 +1519,13 @@ export function buildTridentOrchestrator(
     options: StrandedReconcileOptions = {},
   ): Promise<TridentRun | null> {
     try {
-      if (run.merge_mode !== 'pr') return null
+      // Immediate failure and direct reconciliation use the same durable
+      // predicate as startup. Failure prose is not publication authority.
+      if (run.merge_mode !== 'pr' || opts.recovery_salvage_protected?.(run.id)) return null
+      // An older composition with recovery evidence but no durable predicate
+      // cannot prove that the ordinary publisher owns this branch either.
+      if (!opts.recovery_salvage_protected && opts.list_stage_events?.(run.id)
+        .some(event => event.stage === ORCHESTRATOR_RECOVERY_STAGE)) return null
       const branch = run.branch ?? `trident/${run.slug}`
 
       const local = await opts.run_host(

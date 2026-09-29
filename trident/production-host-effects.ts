@@ -19,6 +19,7 @@ import { BUILDER_COMMIT_RECOVERY, recoverBuilderCommit } from './recover-builder
 import { readBuildModeState, readBuildRetrySource, type BuildModeState } from './build-mode-state.ts'
 import { isPlainBranchName } from './mutation-prover.ts'
 import { readPublicationResponse, recordPublicationResponse } from './project-publication-receipt.ts'
+import { readOrchestratorRecovery, verifyRecoveryRemote } from './orchestrator-recovery.ts'
 
 const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 /**
@@ -315,8 +316,17 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
     },
     async loadResume() {
       modeState = readModeState()
+      const orchestrated = readOrchestratorRecovery(store, row())
+      if (modeState?.checkpoint.orchestratorReplan && !orchestrated)
+        throw new Error('Orchestrator replan checkpoint has no consumed authorization')
+      if (modeState && orchestrated && (modeState.checkpoint.replansUsed !== 1
+        || modeState.checkpoint.round < orchestrated.checkpoint.round
+        || modeState.checkpoint.reviewBaseline !== 'required'
+        || (modeState.checkpoint.orchestratorReplan
+          && modeState.checkpoint.orchestratorReplan.direction !== orchestrated.checkpoint.orchestratorReplan!.direction)))
+        throw new Error('Orchestrator recovery checkpoint refunded its budget or changed its decision')
       if (!modeState) {
-        const source = readBuildRetrySource(store, row())
+        const source = orchestrated ? { state: orchestrated } : readBuildRetrySource(store, row())
         if (source) {
           // Mint this run's own state through the normal compare-and-append.
           // Only completed checkpoint data crosses runs; no worker reservation,
@@ -677,6 +687,20 @@ export function createProductionHostEffects(options: ProductionHostOptions) {
         record: meta => store.recordStageEvent(runId, BUILDER_COMMIT_RECOVERY, meta) })
     },
     async prepareWork(request, context) {
+      if (modeState?.checkpoint.orchestratorReplan) {
+        // Launch setup contains awaits (including worktree setup). Revalidate at
+        // the actual new-worker boundary, not only before those awaits.
+        try {
+          readOrchestratorRecovery(store, row())
+          const decision = store.orchestratorRecovery(runId)
+          if (!decision) throw new Error('Recovery authorization disappeared')
+          await verifyRecoveryRemote(row(), decision.request.expected_head, runHost, decision)
+        } catch {
+          const reason = 'Orchestrator recovery refused: published source changed before worker dispatch'
+          await store.recordOrchestratorRecoveryRefusal(runId, reason)
+          throw new Error(reason)
+        }
+      }
       row()
       if (request.run_id !== runId || request.cwd !== worktree) throw new Error('Worker request does not belong to this build')
       const brief = await readFile(request.brief.path, 'utf8')

@@ -29,6 +29,7 @@ import type { DispatchHoldStore } from './dispatch-holds.ts'
 import type { DispatchAdmission } from './dispatch-admission.ts'
 import {
   dispatchBoardBoundBuild,
+  dispatchOrchestratorRecovery,
   type BoardBoundBuildDeps,
   type DispatchLandedProbe,
   type TridentBoardBinder,
@@ -39,6 +40,7 @@ import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import type { WorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
 import type { TridentRunStore } from './store.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { WORK_BOARD_REPLAN_BUILD_TOOL, type OrchestratorRecoveryRequest } from './orchestrator-recovery-contract.ts'
 
 export const WORK_BOARD_DISPATCH_BUILD_TOOL = 'work_board_dispatch_build'
 export const WORK_BOARD_START_TOOL = 'work_board_start'
@@ -223,6 +225,41 @@ export function registerTridentBuildToolSurface(
   registry: ToolRegistry,
   deps: TridentBuildToolDeps,
 ): string {
+  registry.register({
+    name: WORK_BOARD_REPLAN_BUILD_TOOL,
+    description: 'Authorize one bounded full re-plan of this card\'s published, arithmetic-rejected checkpoint. '
+      + 'Requires the exact source run/event/head/base/PR and revised planning direction. Preserves spent budgets and prior findings; '
+      + 'obtains fresh build, review and release evidence. Available only to an authenticated native project-chat owner turn.',
+    input_schema: { type: 'object', additionalProperties: false,
+      properties: { board_item_id: { type: 'string' }, source_run_id: { type: 'string' },
+        source_event_id: { type: 'integer', minimum: 1 }, expected_head: { type: 'string' },
+        expected_base: { type: 'string' }, published_pr: { type: 'integer', minimum: 1 },
+        direction: { type: 'string', minLength: 1, maxLength: 16384 } },
+      required: ['board_item_id', 'source_run_id', 'source_event_id', 'expected_head', 'expected_base', 'published_pr', 'direction'] },
+    output_schema: outputSchema, capability_required: 'agent:dispatch_subagent', approval_policy: 'prompt-user',
+    handler: async (args, ctx) => {
+      if (!ctx.orchestratorAuthority || !ctx.project_id)
+        return { ok: false, error: 'Authenticated project-chat orchestrator invocation required' }
+      const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
+      const delivery = deps.resolve_delivery?.(ctx.project_id)
+      const result = await dispatchOrchestratorRecovery(args as OrchestratorRecoveryRequest,
+        { authority: ctx.orchestratorAuthority, project_id: ctx.project_id, call_id: ctx.call_id }, {
+          store: deps.store, board: deps.work_board, project_slug: scope, repo_path: deps.repo_path,
+          projectAdmission: deps.project_admission(scope),
+          resolveMergeMode: path => detectMergeMode(path, deps.merge_mode_probe),
+          ...(deps.resolveBuildRepo ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
+          ...(deps.landed_probe ? { landedProbe: deps.landed_probe } : {}),
+          ...(deps.host_runner ? { hostRunner: deps.host_runner } : {}),
+          ...(deps.preflight ? { preflight: deps.preflight } : {}),
+          ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
+          ...(deps.max_task_iterations !== undefined ? { max_task_iterations: deps.max_task_iterations } : {}),
+          ...(deps.channel_kind ? { channel_kind: deps.channel_kind } : {}),
+          ...(delivery ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
+        })
+      return result.ok ? { ok: true, run_id: result.run.id, board_item_id: (args as OrchestratorRecoveryRequest).board_item_id,
+        status: 'dispatched' } : { ok: false, error: result.message }
+    },
+  })
   registry.register({
     name: WORK_BOARD_DISPATCH_BUILD_TOOL,
     description:

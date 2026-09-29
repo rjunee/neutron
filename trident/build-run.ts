@@ -103,6 +103,8 @@ export interface ResumeCheckpoint {
   reviewBaseline?: 'none' | 'required'
   /** A durable arithmetic veto must survive process death before terminal delivery. */
   reviewStop?: HostReviewStop | undefined
+  /** Host-imported one-use orchestrator decision; never worker result authority. */
+  orchestratorReplan?: { direction: string } | undefined
   /** Re-present only the original request to its idempotent runner. Legacy pending
    * rows without the host continuation remain unknown. */
   pending?: { phase: WorkPhase; step_id: string; recovery?: PendingRecovery } | undefined
@@ -128,7 +130,7 @@ function validReviewBaseline(marker: unknown, progress: unknown): boolean {
   return marker === 'none' ? progress === null : marker === 'required' && validReviewProgress(progress)
 }
 
-function validReviewProgress(value: unknown): value is ReviewProgress {
+export function validReviewProgress(value: unknown): value is ReviewProgress {
   if (!value || typeof value !== 'object') return false
   const progress = value as ReviewProgress
   return Array.isArray(progress.findings) && progress.findings.every(f => typeof f === 'string' && f.trim().length > 0)
@@ -499,6 +501,10 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
 
     let replansUsed = resume?.replansUsed ?? 0
     if (replansUsed !== 0 && replansUsed !== 1) return blocked('Invalid recorded re-plan count')
+    const orchestratorReplan = resume?.orchestratorReplan
+    if (orchestratorReplan && (replansUsed !== 1 || resume?.stage !== 'built'
+      || typeof orchestratorReplan.direction !== 'string' || !orchestratorReplan.direction.trim()
+      || resume.round < 2 || resume.round > maxRounds)) return unknown('Invalid orchestrator re-plan checkpoint')
     let skipBuild = false
     let discardHandoff = false
     let resumeTaskHandoff: ExecutionPlan | null = null
@@ -549,6 +555,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         return failed('Required resume head is unreadable', 'resume-head-unreadable')
       }
       headMoved = fullOid(resume.head) && fullOid(snapshot.head) && resume.head !== snapshot.head
+      if (orchestratorReplan && (headMoved || snapshot.head !== resume.head)) return blocked('Authorized recovery head changed before replanning')
       if (resume.handoff) {
         const intent = resume.handoff
         if (strategy !== 'task_sequence' || resume.stage !== 'built' || !acceptedPlan
@@ -572,7 +579,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       }
       // G038: arbitrary movement rebuilds. Only an exact full OID (including
       // the ledger child independently authenticated above) opens a fast path.
-      if (fullOid(resume.head) && resume.head === snapshot.head
+      if (!orchestratorReplan && fullOid(resume.head) && resume.head === snapshot.head
           && input.mode !== 'wave' && !resume.stage.startsWith('task-built')) {
         const regenerated = await modes!.regenerateDiff(resume.head)
         if (regenerated.kind === 'unknown') return unknown(regenerated.detail)
@@ -646,7 +653,8 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
       await checkpoint({ head: snapshot.head })
     }
     let previousPayload: unknown = acceptedPlan
-    let findings: readonly string[] = []
+    let findings: readonly string[] = orchestratorReplan
+      ? [orchestratorReplan.direction, ...resume!.previousFindings] : []
     if (recovery) {
       snapshot = structuredClone(recovery.snapshot)
       previousPayload = recovery.previous
@@ -822,7 +830,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
           ...(role === 'fix' && durable.baseDrift && measured.pr ? {
             baseIntegration: { ...durable.baseDrift, integratedHead: measured.head, pr: measured.pr.number },
           } : {}),
-          ...(role === 'build' ? { remainingTasks: strategy === 'task_sequence' ? plan!.remainingTasks : 0,
+          ...(role === 'build' ? { orchestratorReplan: undefined, remainingTasks: strategy === 'task_sequence' ? plan!.remainingTasks : 0,
             handoff: strategy === 'task_sequence' && plan!.remainingTasks > 0
               ? { iteration: taskIteration, builtHead: measured.head, body: tickTopTask(plan!.implementationPlan) } : undefined } : {}) })
       }
@@ -978,7 +986,7 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
     if (!skipBuild) {
       // A rebuild after the head MOVED must not reuse the round-0 result identities
       // (see `headMoved`). Every other rebuild keeps them.
-      const stop = await planAndBuild(recovery?.round ?? (headMoved ? firstRound : 0))
+      const stop = await planAndBuild(recovery?.round ?? (orchestratorReplan ? firstRound - 1 : headMoved ? firstRound : 0))
       if (stop) return stop
     }
     if (resumeFix) {

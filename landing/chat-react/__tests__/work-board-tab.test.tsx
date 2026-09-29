@@ -154,6 +154,60 @@ function listOf(rows: WorkBoardItem[]): Handler {
 }
 
 describe('WorkBoardTab (happy-dom)', () => {
+  it('renders a durable blocked recovery refusal without new run progress and over old source notices', async () => {
+    const reason = 'Recovery refused: published head moved.'
+    const terminal: RunProgress = {
+      run_id: 'source', phase_label: 'failed', step_label: 'failed', round: 3,
+      started_at: '2026-09-29T00:00:00Z', last_advanced_at: '2026-09-29T00:01:00Z', elapsed_ms: 60000,
+      stalled: false, stalled_ms: null, pr: null, pr_url: null, verdict: 'REQUEST_CHANGES', failure_reason: 'Old plan escalation',
+      brief_alert: 'Old integrity alert', resume_note: 'Not resumed: old source',
+    }
+    for (const run_progress of [undefined, terminal]) {
+      const { container, root, act } = await mount(listOf([item({ status: 'blocked', linked_run_id: 'source', recovery_refusal: reason, ...(run_progress === undefined ? {} : { run_progress }) })]))
+      expect(container.querySelector('.cwb-blocked-reason')?.textContent).toBe(reason)
+      expect(container.querySelector('.cwb-blocked-reason')?.getAttribute('title')).toBe(reason)
+      expect(container.textContent).toContain('Blocked')
+      expect(container.textContent).not.toContain('Old plan escalation')
+      expect(container.querySelector('.cwb-fail-reason')).toBeNull()
+      expect(container.querySelector('[aria-label="Retry build"]')).toBeNull()
+      await act(async () => root.unmount())
+    }
+  })
+
+  it('keeps terminal failure and integrity alert precedence outside the blocked lane', async () => {
+    const progress: RunProgress = {
+      run_id: 'source', phase_label: 'building', step_label: 'building', round: 1,
+      started_at: '2026-09-29T00:00:00Z', last_advanced_at: '2026-09-29T00:01:00Z', elapsed_ms: 60000,
+      stalled: false, stalled_ms: null, pr: null, pr_url: null, verdict: null, failure_reason: null, brief_alert: 'Recovered integrity alert',
+    }
+    for (const [status, run_progress, selector, reason] of [
+      ['failed', { ...progress, phase_label: 'failed', step_label: 'failed', failure_reason: 'Publish failed' }, '.cwb-fail-reason', 'Publish failed'],
+      ['in_progress', progress, '.cwb-brief-alert', 'Recovered integrity alert'],
+    ] as const) {
+      const { container, root, act } = await mount(listOf([item({ status, run_progress, recovery_refusal: 'Older recovery refusal' })]))
+      expect(container.querySelector(selector)?.textContent).toBe(reason)
+      expect(container.textContent).not.toContain('Older recovery refusal')
+      await act(async () => root.unmount())
+    }
+  })
+
+  it('keeps a refusal visible after a manual lane change and retains legacy blocked reasons', async () => {
+    const reason = 'Recovery refused: source unavailable.'
+    const terminal: RunProgress = {
+      run_id: 'source', phase_label: 'failed', step_label: 'failed', round: 1,
+      started_at: '2026-09-29T00:00:00Z', last_advanced_at: '2026-09-29T00:01:00Z', elapsed_ms: 60000,
+      stalled: false, stalled_ms: null, pr: null, pr_url: null, verdict: null, failure_reason: 'Original escalation',
+    }
+    for (const [row, selector, expected] of [
+      [item({ status: 'upcoming', recovery_refusal: reason }), '.cwb-brief-alert', reason],
+      [item({ status: 'blocked', recovery_refusal: ' ', run_progress: terminal }), '.cwb-blocked-reason', 'Original escalation'],
+    ] as const) {
+      const { container, root, act } = await mount(listOf([row]))
+      expect(container.querySelector(selector)?.textContent).toBe(expected)
+      await act(async () => root.unmount())
+    }
+  })
+
   it('keeps past attempts collapsed until the shelf is opened and renders only resolved PR links', async () => {
     const { container, root, act } = await mount(listOf([item({ status: 'archived', attempts: [
       { run_id: 'failed-run', outcome: 'failed', pr: 12, pr_url: 'https://example.test/pull/12', recorded_at: '2026-09-20' },

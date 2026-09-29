@@ -20,6 +20,13 @@ import {
 const BASE = 'https://sam.neutron.test'
 const TOKEN = 'dev:sam'
 
+it('parses the durable recovery refusal while accepting absent and malformed older fields', () => {
+  const refusal = 'Recovery refused: published head moved.'
+  expect(parseWorkBoardItems([row({ recovery_refusal: refusal })])[0]?.recovery_refusal).toBe(refusal)
+  expect(parseWorkBoardItems([row()])[0]?.recovery_refusal).toBeNull()
+  expect(parseWorkBoardItems([{ ...row(), recovery_refusal: { reason: refusal } }])[0]?.recovery_refusal).toBeNull()
+})
+
 function row(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
   return {
     id: 'w1',
@@ -234,6 +241,7 @@ describe('parseWorkBoardItems', () => {
   it('coerces missing optional fields to safe defaults', () => {
     const out = parseWorkBoardItems([{ id: 'a', title: 'T', status: 'in_progress' }])
     expect(out[0]).toEqual({
+      recovery_refusal: null,
       id: 'a',
       title: 'T',
       status: 'in_progress',

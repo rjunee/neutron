@@ -19,12 +19,107 @@ import type { ReplModelState } from '@neutronai/runtime/repl-model.ts'
 import type { NativeOwnerControlState } from '../wiring/codex-owner-controls.ts'
 import { recoverDurableOwnerRetirement } from '../wiring/codex-durable-owner.ts'
 import { helperIdentity } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
+import { validateProjectChatOrchestratorAuthority } from '@neutronai/tools/orchestrator-authority.ts'
 
 const dirs: string[] = []
 afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 const spec = (prompt: string): AgentSpec => ({ prompt, tools: [], model_preference: [] })
 async function collect(handle: SessionHandle) { const events = []; for await (const event of handle.events) events.push(event); return events }
 const line = (type: string, payload: unknown) => JSON.stringify({ type, payload }) + '\n'
+
+test.each(['owner', 'child-thread', 'foreign-turn', 'General', 'revoked-project', 'stale-generation'] as const)(
+  'recovery authority follows the real native owner binding: %s', async mode => {
+    const f = fixture(false, true)
+    const projectId = mode === 'General' ? null : 'project-one'
+    let dispatches = 0
+    let validate!: () => unknown
+    f.bindings.orchestratorRecovery = {
+      projectScopeFor: id => `scope/${id}`,
+      async dispatch(input) {
+        validate = () => validateProjectChatOrchestratorAuthority(input.orchestratorAuthority, {
+          project_scope: `scope/${input.project_id}`, project_id: input.project_id,
+          call_id: input.call_id, tool_name: input.tool_name, args: input.args,
+        })
+        expect(validate()).toMatchObject({ project_id: projectId, thread_id: `native-${projectId}` })
+        dispatches++
+        return { accepted: true }
+      },
+    }
+    f.hold(true)
+    const draining = collect(f.bindings.start(projectId ?? undefined, spec('held owner')))
+    for (let attempt = 0; !f.calls.length && attempt < 100; attempt++) await Bun.sleep(1)
+    expect(f.calls).toHaveLength(1)
+    if (mode === 'revoked-project') f.authorize(false)
+    if (mode === 'stale-generation') f.replaceGeneration(projectId)
+    f.question('item/tool/call', { tool: 'neutron_owner_mcp', callId: 'recovery-call',
+      ...(mode === 'child-thread' ? { threadId: 'native-child' } : {}),
+      ...(mode === 'foreign-turn' ? { turnId: 'foreign' } : {}),
+      arguments: { action: 'replan_build', params: { source_run_id: 'rejected', source_event_id: 12, direction: 'Revise' } },
+    }, projectId)
+    for (let attempt = 0; !f.replies.length && attempt < 30; attempt++) await Bun.sleep(1)
+    expect(dispatches).toBe(mode === 'owner' ? 1 : 0)
+    if (mode === 'owner') {
+      expect(f.replies[0]?.result).toMatchObject({ success: true })
+      expect(() => validate()).toThrow('ended')
+    }
+    f.finish(projectId)
+    await draining
+    await f.bindings.close()
+  },
+)
+
+test('recovery authority cannot survive host close or native generation replacement during evidence reads', async () => {
+  for (const change of ['close', 'generation'] as const) {
+    const f = fixture()
+    let claims = 0
+    let inspected = false
+    f.bindings.orchestratorRecovery = {
+      projectScopeFor: id => `scope/${id}`,
+      async dispatch(input) {
+        const validate = () => validateProjectChatOrchestratorAuthority(input.orchestratorAuthority, {
+          project_scope: `scope/${input.project_id}`, project_id: input.project_id,
+          call_id: input.call_id, tool_name: input.tool_name, args: input.args,
+        })
+        expect(validate()).toMatchObject({ project_id: 'project-one' })
+        if (change === 'close') await f.bindings.close()
+        else f.replaceGeneration('project-one')
+        inspected = true
+        validate()
+        claims++
+      },
+    }
+    f.hold(true)
+    const draining = collect(f.bindings.start('project-one', spec('held owner')))
+    for (let attempt = 0; !f.calls.length && attempt < 100; attempt++) await Bun.sleep(1)
+    f.question('item/tool/call', { tool: 'neutron_owner_mcp', callId: 'recovery-call',
+      arguments: { action: 'replan_build', params: { source_run_id: 'rejected' } } })
+    for (let attempt = 0; !inspected && attempt < 100; attempt++) await Bun.sleep(1)
+    expect(inspected).toBe(true)
+    expect(claims).toBe(0)
+    f.finish(); await draining
+    await f.bindings.close()
+  }
+})
+
+test('build execution on the shared native parent cannot mint recovery authority', async () => {
+  const f = fixture()
+  let dispatches = 0
+  f.bindings.orchestratorRecovery = { projectScopeFor: id => `scope/${id}`, async dispatch() { dispatches++; return {} } }
+  const { request, worker } = await consumingBuild(f, { wall: 2000 })
+  f.hold(true)
+  const running = worker.run(request, 'in-repl', new AbortController().signal)
+  for (let attempt = 0; !f.calls.length && attempt < 100; attempt++) await Bun.sleep(1)
+  expect(f.calls).toHaveLength(1)
+  f.question('item/tool/call', { tool: 'neutron_owner_mcp', callId: 'recovery-call',
+    arguments: { action: 'replan_build', params: { source_run_id: 'rejected' } } })
+  for (let attempt = 0; !f.replies.length && attempt < 100; attempt++) await Bun.sleep(1)
+  expect(f.replies[0]?.result).toMatchObject({ success: false })
+  expect(dispatches).toBe(0)
+  writeFileSync(request.result.path, JSON.stringify({ schema: 'fixture', run_id: request.run_id,
+    step_id: request.step_id, kind: 'completed', result: { answer: 'done' } }))
+  f.finish(); await running
+  await f.bindings.close()
+})
 
 test('General owner dispatch, native controls and MCP approval scope remain distinct from project general', async () => {
   const f = fixture(false, true)
@@ -222,6 +317,10 @@ function fixture(remote = false, general = false) {
   return { dir, calls, launched, homes, bindings, chat,
     owner: (projectId: string | null) => owners.get(homes.get(projectId)!)!,
     factsFor: (projectId: string | null) => facts.get(owners.get(homes.get(projectId)!)!.binding)!,
+    replaceGeneration: (projectId: string | null) => {
+      const binding = owners.get(homes.get(projectId)!)!.binding
+      facts.set(binding, { ...facts.get(binding)!, bindingRevision: 'replacement-generation' })
+    },
     nativeTurn: async (projectId = 'project-one') => {
       const owner = owners.get(homes.get(projectId)!)!, identity = facts.get(owner.binding)!
       return owner.broker.gateway('terminal-native').request('turn/start', { threadId: identity.threadId, input: [{ text: 'terminal input' }] }, owner.broker.state().epoch)
@@ -235,8 +334,8 @@ function fixture(remote = false, general = false) {
     historyFault: (fault: typeof historyFault) => { historyFault = fault },
     restart: () => new CodexOwnerBindings(async projectId => ({ cwd: join(dir, projectId), codexHome: homes.get(projectId)!, credentialIdentity, env: {} }),
       async options => owners.get(options.codexHome)!, binding => facts.get(binding)!),
-    rpc, replies, hold: (value: boolean) => { held = value }, finish: (project = 'project-one') => finishers.get(project)!(),
-    question: (method: string, params: Record<string, unknown>, project = 'project-one') => emitters.get(project)!(method, params),
+    rpc, replies, hold: (value: boolean) => { held = value }, finish: (project: string | null = 'project-one') => finishers.get(project)!(),
+    question: (method: string, params: Record<string, unknown>, project: string | null = 'project-one') => emitters.get(project)!(method, params),
     wrongModel: () => { wrongModel = true },
     failReply: () => { failReply = true },
     interruptFault: (value: typeof interruptFault) => { interruptFault = value },

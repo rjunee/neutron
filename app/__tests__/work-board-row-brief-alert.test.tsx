@@ -75,6 +75,55 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 describe('WorkBoardRow brief alerts (mobile)', () => {
+  it('renders a blocked recovery refusal without replacement progress and gives it precedence over source notices', async () => {
+    const reason = 'Recovery refused: published head moved.';
+    for (const run_progress of [undefined, {
+      ...item().run_progress!, phase_label: 'failed' as const, step_label: 'failed' as const,
+      failure_reason: 'Old plan escalation', resume_note: 'Not resumed: old source',
+    }]) {
+      const screen = await mountScreen(createElement(WorkBoardRow, {
+        item: item({ status: 'blocked', recovery_refusal: reason, run_progress }), busy: false, index: 0, laneCount: 1,
+        onAdvance: () => {}, onRename: () => {}, onReorderTo: () => {}, onDelete: () => {}, onPlay: () => {},
+      }));
+      expect(screen.byTestId('work-board-run-notice-blocked')?.textContent).toBe(reason);
+      expect(screen.text()).toContain('Blocked');
+      expect(screen.text()).not.toContain('Old plan escalation');
+      expect(screen.byTestId('work-board-run-notice-failure')).toBeNull();
+      expect(screen.host.querySelector('[aria-label="Retry build"]')).toBeNull();
+      screen.unmount();
+    }
+  });
+
+  it('keeps terminal failure and recovered integrity alert precedence outside the blocked lane', async () => {
+    for (const [status, run_progress, tone, reason] of [
+      ['failed', { ...item().run_progress!, phase_label: 'failed', step_label: 'failed', failure_reason: 'Publish failed' }, 'failure', 'Publish failed'],
+      ['in_progress', item().run_progress!, 'alert', ALERT],
+    ] as const) {
+      const screen = await mountScreen(createElement(WorkBoardRow, {
+        item: item({ status, run_progress, recovery_refusal: 'Older recovery refusal' }), busy: false, index: 0, laneCount: 1,
+        onAdvance: () => {}, onRename: () => {}, onReorderTo: () => {}, onDelete: () => {},
+      }));
+      expect(screen.byTestId(`work-board-run-notice-${tone}`)?.textContent).toBe(reason);
+      expect(screen.text()).not.toContain('Older recovery refusal');
+      screen.unmount();
+    }
+  });
+
+  it('keeps a refusal visible after a manual lane change and leaves legacy blocked reasons intact', async () => {
+    const reason = 'Recovery refused: source unavailable.';
+    for (const [row, tone, expected] of [
+      [item({ status: 'upcoming', run_progress: undefined, recovery_refusal: reason }), 'alert', reason],
+      [item({ status: 'blocked', recovery_refusal: ' ', run_progress: { ...item().run_progress!, phase_label: 'failed', step_label: 'failed', failure_reason: 'Original escalation' } }), 'blocked', 'Original escalation'],
+    ] as const) {
+      const screen = await mountScreen(createElement(WorkBoardRow, {
+        item: row, busy: false, index: 0, laneCount: 1,
+        onAdvance: () => {}, onRename: () => {}, onReorderTo: () => {}, onDelete: () => {},
+      }));
+      expect(screen.byTestId(`work-board-run-notice-${tone}`)?.textContent).toBe(expected);
+      screen.unmount();
+    }
+  });
+
   it('keeps terminal attempts hidden until the phone shelf is expanded', async () => {
     const { FakeChatSocket } = await import('./support/mount');
     const { installRouting, resetRouting } = await import('./support/stubs/expo-router');

@@ -1141,6 +1141,14 @@ export function buildOpenGraphComposer(
       generalAuthorityPath: joinPath(owner_home, '.neutron-general-codex-owner.json'),
       ...codexCredentialService.resolveGeneralOwnerCredential(asOwnerHandle(owner_handle), retainedHome), env,
       projectWorkspace: codexWorkspaceFor(null) }))
+    codexOwnerBindings.orchestratorRecovery = {
+      projectScopeFor: projectId => workBoardScopeKey(project_slug, projectId),
+      dispatch: input => {
+        const bridge = replToolBridgeRef.current
+        if (!bridge) throw new Error('Project-chat recovery tool bridge is unavailable')
+        return bridge.dispatch(input)
+      },
+    }
     // O6 — NOTICE-FAMILY + RECOVERED-REPLY sinks for the owner's WARM conversational
     // substrate (`cc-agent-*`). The persistent REPL fires four DI seams on the
     // rising edge of otherwise-invisible states — a mid-turn API 5xx dead turn, a

@@ -3999,6 +3999,7 @@ describe('sweepStrandedFailures', () => {
         throw new Error('database unavailable')
       },
       listNonTerminal: (): TridentRun[] => [],
+      isOrchestratorRecoverySalvageProtected: (): boolean => false,
       update: async () => null,
     }
 
