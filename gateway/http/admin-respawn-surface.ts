@@ -29,6 +29,10 @@ export interface AdminRespawnSurfaceInput {
   gatewayToken: string
   /** Force-recover actuation. Boot wires `respawnSupervisedSession(path, key)`. */
   respawn: (sessionKey: string) => RespawnOutcome
+  /** Explicit operator cap release; ordinary recovery remains a separate actor. */
+  rearmCap?: (authorization: unknown) => Promise<boolean>
+  /** Independent signature verification, before consuming any operator rate budget. */
+  authorizeCapRearm?: (authorization: unknown) => boolean
   /** Override the default 5-req/60s rate limit. */
   rateLimit?: AdminRespawnRateLimitConfig
   /** DI clock (tests). */
@@ -47,6 +51,22 @@ export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): Admi
   return {
     handler: async (req: Request): Promise<Response | null> => {
       const url = new URL(req.url)
+      if (url.pathname === '/admin/rearm-session-cap' && req.method === 'POST') {
+        // Browser/owner credentials confer NO cap-release authority. The callback
+        // must authenticate the independent operator signature before acting.
+        let request: unknown
+        try { request = await req.json() } catch { return Response.json({ ok: false }, { status: 403 }) }
+        if (input.authorizeCapRearm?.(request) !== true) return Response.json({ ok: false }, { status: 403 })
+        const now = (input.now ?? Date.now)()
+        const limit = input.rateLimit ?? { windowMs: 60_000, maxRequests: 5 }
+        rateState.hits = rateState.hits.filter(t => now - t < limit.windowMs)
+        if (rateState.hits.length >= limit.maxRequests) return Response.json({ ok: false }, { status: 429 })
+        rateState.hits.push(now)
+        try {
+          const rearmed = await input.rearmCap?.(request) === true
+          return Response.json({ ok: rearmed, status: rearmed ? 'rearmed' : 'refused' }, { status: rearmed ? 200 : 409 })
+        } catch { return Response.json({ ok: false, status: 'refused' }, { status: 409 }) }
+      }
       if (url.pathname !== '/admin/respawn-session') return null
       if (req.method !== 'POST') return null
       return handleAdminRespawnSessionRequest(req, {

@@ -468,6 +468,7 @@ import { createHostDeployDispatch, createHostDeployRemoteGit } from './host-depl
 import { createDeployMigrationPreflight } from './deploy-migration-preflight.ts'
 import { buildHostDeployPromptRetirer } from './wiring/host-deploy-prompt-retirer.ts'
 import { startProjectChatRecovery } from './wiring/project-chat-recovery.ts'
+import { verifyCapRearmAuthorization } from './operator-cap-rearm-authorization.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
 import { createAppRemindersSurface } from '@neutronai/gateway/http/app-reminders-surface.ts'
 import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-surface.ts'
@@ -1379,6 +1380,7 @@ export function buildOpenGraphComposer(
       ephemeralSubstrateAvailable,
       makeProjectLiveAgentSubstrate,
       adoptLiveAgentRepls,
+      rearmLiveAgentCap,
       recoverLiveAgentRepls,
       makeComposeSubstrate,
       reminderComposeSubstrate,
@@ -4429,6 +4431,21 @@ export function buildOpenGraphComposer(
     const adminRespawnSurface = createAdminRespawnSurface({
       gatewayToken: appWsToken,
       respawn: (sessionKey) => respawnSupervisedSession(replRegistryPath, sessionKey),
+      authorizeCapRearm: authorization => verifyCapRearmAuthorization(authorization, options.nativeHostRecoveryAuthority) !== undefined,
+      rearmCap: async authorization => {
+        const request = verifyCapRearmAuthorization(authorization, options.nativeHostRecoveryAuthority)
+        if (!request) return false
+        return rearmLiveAgentCap(request, () => {
+          if (!verifyCapRearmAuthorization(authorization, options.nativeHostRecoveryAuthority)) return false
+          // Resolve canonical scope again at the locked mutation, after asynchronous
+          // credential resolution. A cap release never releases workflow ownership.
+          if (request.projectId !== null && !listProjectIds().includes(request.projectId)) return false
+          const scope = projectAdmission.scopeFor(request.projectId)
+          return projectAdmission.maintenance.inspect(scope)?.phase === 'open'
+            && !projectAdmission.maintenance.hasPreparedHostTermination(scope)
+            && !projectAdmission.listLeases().some(lease => lease.scope.projectId === request.projectId)
+        })
+      },
     })
 
     // P1b — app-ws CHAT surface (`/ws/app/chat` + `/api/app/chat/send`), the

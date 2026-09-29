@@ -47,6 +47,7 @@ import {
   hasRecoverableClaudeRepl,
   reconcileExistingClaudeRepl,
   recoverExistingClaudeRepl,
+  rearmExistingClaudeReplCap,
   type ChildCrashInfo,
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
@@ -1023,6 +1024,8 @@ function placeConversation(opts: ClaudeCodeSubstrateOptions, input: BuildLlmCall
 }
 
 export interface LlmCallSubstrate extends Substrate {
+  rearmCap(request: import('@neutronai/runtime/adapters/claude-code/persistent/operator-cap-rearm.ts').CapRearmRequest,
+    authorized: () => boolean): Promise<boolean>
   /** Retire already-owned exact helper keys; preserve registry-only survivors. */
   retireExistingHelpers(projectIds?: readonly (string | undefined)[]): Promise<ReadonlyArray<{ sessionKey: string; outcome: HelperRetirement }>>
   /** Stop admission and retire only the Claude keys this instance actually served. */
@@ -1116,6 +1119,13 @@ export function buildLlmCallSubstrate(
     }
   }
   return {
+    async rearmCap(request, authorized) {
+      let rearmed = false
+      await reconcileAuthorized([request.projectId], async options => {
+        if (rearmExistingClaudeReplCap(options, request, authorized)) rearmed = true
+      })
+      return rearmed
+    },
     async retireExistingHelpers(projectIds = [undefined]) {
       const outcomes: Array<{ sessionKey: string; outcome: HelperRetirement }> = []
       const credentialPool = input.pool ?? await input.resolvePool?.()
