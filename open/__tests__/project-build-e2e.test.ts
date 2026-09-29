@@ -74,11 +74,14 @@ import { summarizeUsageCoverage } from '../../tests/fixtures/trident-usage-cover
 import { decodeLedger } from '../../tests/fixtures/trident-ledger-delta/decode.ts'
 // eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
 import { compareLedgerDelta } from '../../tests/fixtures/trident-ledger-delta/compare.ts'
-import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import { reconcileClaudeNativeUsage } from '../wiring/claude-native-usage-reconcile.ts'
 import { retryModeSource, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
-import { dispatchBoardBoundBuild, type BoardBoundBuildDeps } from '@neutronai/trident/board-dispatch.ts'
+import { dispatchBoardBoundBuild, dispatchOrchestratorRecovery, type BoardBoundBuildDeps } from '@neutronai/trident/board-dispatch.ts'
+import { mintProjectChatOrchestratorAuthority } from '@neutronai/tools/orchestrator-authority.ts'
+import { WORK_BOARD_REPLAN_BUILD_TOOL, type OrchestratorRecoveryRequest } from '@neutronai/trident/orchestrator-recovery-contract.ts'
+import { prepareRecoveryBranch, readOrchestratorRecovery } from '@neutronai/trident/orchestrator-recovery.ts'
 import { DispatchHoldStore } from '@neutronai/trident/dispatch-holds.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { reconcileBuildLeases } from '@neutronai/gateway/project-admission-reconcile.ts'
@@ -1578,6 +1581,314 @@ test.each(['run', 'recover'] as const)('native child %s refuses changed request 
   expect((await worker.runner[method]!(request, 'in-repl', signal)).kind).toBe('blocked')
   expect(f.admission.listLeases('liveChild')).toEqual([])
 }, 120_000)
+
+/** A real published review STOP, terminal card history and the same project's
+ * migrated database. The only simulated boundary is GitHub's JSON API, whose
+ * head/base OIDs are read from the real bare remote by fakeGithub. */
+async function rejectedHeadForOrchestratorRecovery(options: { laterAttempt?: boolean } = {}) {
+  const task = 'Implement the note marker and verify the published review outcome'
+  const f = await fixture({ dispatchTask: task, blockersByRound: [0, 2, 2],
+    repeatFirstFinding: true, maxRounds: 4 })
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create(f.row.project_slug, { title: task })
+  await board.attachRun(f.row.project_slug, card.id, f.row.id)
+  const stopped = await drive(f)
+  expect(stopped, why(f, stopped)).toMatchObject({ kind: 'blocked', phase: 'review',
+    reviewStop: { trigger: 'repeat-finding', round: 2 } })
+  const prior = f.store.get(f.row.id)!
+  expect(prior).toMatchObject({ execution_strategy: 'single', published_pr: 1, base_sha: f.baseSha })
+  expect(f.github.prs).toMatchObject([{ number: 1, state: 'OPEN',
+    headRefName: prior.branch, baseRefName: 'main' }])
+  const sourceEvent = f.store.stageEvents(prior.id).filter(event => event.stage === 'build-mode-state').at(-1)!
+  const checkpoint = JSON.parse(sourceEvent.meta!).checkpoint
+  expect(checkpoint).toMatchObject({ stage: 'rejected', round: 2,
+    reviewStop: { trigger: 'repeat-finding' } })
+  const head = String(checkpoint.head)
+  expect(await gitOut(f.context.runHost, f.origin, ['rev-parse', `refs/heads/${prior.branch}`])).toBe(head)
+  expect(await gitOut(f.context.runHost, f.origin, ['rev-parse', 'refs/heads/main'])).toBe(f.baseSha)
+  // The GitHub API is the fixture's fake boundary. Give its repository a
+  // canonical public identity while every Git object/ref operation still runs
+  // against the local bare origin created above.
+  const originalHost = f.context.runHost
+  f.context.runHost = Object.assign(async (...args: Parameters<typeof originalHost>) => {
+    const argv = args[0]
+    if (argv[0] === 'git' && argv.includes('remote') && argv.includes('get-url') && argv.includes('origin')) {
+      return { ok: true, exit_code: 0, stdout: 'https://github.com/fixture/project.git\n', stderr: '' }
+    }
+    return originalHost(...args)
+  }, { writesDiffOutput: true as const })
+  // The real terminal board writer records source ownership; recovery reads
+  // this attempt history, not a title or an arbitrary run with the same slug.
+  await f.store.update(prior.id, { phase: 'failed', task_iteration: 1 })
+  await board.detachRun(prior.project_slug, prior.id, 'blocked', { pr: 1, pr_url: null,
+    execution_strategy: prior.execution_strategy, strategy_rationale: prior.strategy_rationale,
+    strategy_plan: prior.strategy_plan, strategy_source: prior.strategy_source,
+    task_iteration: 1, max_task_iterations: 4 })
+  expect(board.get(prior.project_slug, card.id)).toMatchObject({ status: 'blocked',
+    linked_run_id: prior.id, task_iteration: 1, max_task_iterations: 4 })
+  let currentRunId = prior.id
+  if (options.laterAttempt) {
+    const later = await f.store.create({ slug: 'later-planning-attempt', project_slug: prior.project_slug,
+      repo_path: f.repo, task, execution_strategy: prior.execution_strategy,
+      strategy_rationale: prior.strategy_rationale, strategy_plan: prior.strategy_plan,
+      strategy_source: prior.strategy_source })
+    await f.store.update(later.id, { phase: 'failed' })
+    await board.attachRun(prior.project_slug, card.id, later.id)
+    await board.detachRun(prior.project_slug, later.id, 'failed')
+    currentRunId = later.id
+    expect(board.get(prior.project_slug, card.id)).toMatchObject({ status: 'failed', linked_run_id: later.id })
+  }
+  const request: OrchestratorRecoveryRequest = { board_item_id: card.id,
+    source_run_id: prior.id, source_event_id: sourceEvent.id,
+    expected_head: head, expected_base: f.baseSha, published_pr: 1,
+    direction: 'Re-plan the marker placement from the retained review findings.' }
+  const deps: BoardBoundBuildDeps = { store: f.store, board,
+    projectAdmission: fixtureDispatchAdmission(f.db), project_slug: prior.project_slug,
+    repo_path: f.repo, resolveBuildRepo: async () => f.repo,
+    resolveMergeMode: async () => 'pr', hostRunner: f.context.runHost, max_rounds: 4 }
+  const dispatch = (candidate: OrchestratorRecoveryRequest = request, callId = crypto.randomUUID()) => {
+    const projectId = f.context.projectId
+    const authority = mintProjectChatOrchestratorAuthority({
+      facts: { project_scope: prior.project_slug, project_id: projectId,
+        chat_id: 'fixture-project-chat', call_id: callId,
+        session_id: 'fixture-session', thread_id: 'fixture-thread',
+        generation: 'fixture-generation', lease_id: 'fixture-lease' },
+      toolName: WORK_BOARD_REPLAN_BUILD_TOOL, args: candidate, assertCurrent: () => {},
+    })
+    return dispatchOrchestratorRecovery(candidate, { authority, project_id: projectId, call_id: callId }, deps)
+  }
+  return { f, board, card, prior: f.store.get(prior.id)!, currentRunId, sourceEvent,
+    checkpoint, request, deps, dispatch }
+}
+
+async function launchAuthorizedRecovery(
+  s: Awaited<ReturnType<typeof rejectedHeadForOrchestratorRecovery>>, run: TridentRun,
+): Promise<ProjectBuildOutcome> {
+  let settled!: () => void
+  const completion = new Promise<void>(resolve => { settled = resolve })
+  const record = s.f.store.recordStageEvent.bind(s.f.store)
+  const recording = spyOn(s.f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    if (args[1] === 'build-driver-settled') settled()
+  })
+  cleanups.push(() => recording.mockRestore())
+  const errors: unknown[] = []
+  const launcher = createProjectLauncher({ store: s.f.store, onError: error => errors.push(error),
+    prepare: async input => { s.f.input.run = input.run; return s.f.prepare() } })
+  const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: s.f.input.db_path,
+    base_branch: 'main', run_host: Object.assign(s.f.context.runHost, { writesDiffOutput: true as const }),
+    read_run: id => s.f.store.get(id),
+    list_stage_events: id => s.f.store.stageEvents(id),
+    read_orchestrator_recovery: observed => {
+      readOrchestratorRecovery(s.f.store, observed)
+      return s.f.store.orchestratorRecovery(observed.id)
+    },
+    record_recovery_refusal: (id, reason) => s.f.store.recordOrchestratorRecoveryRefusal(id, reason),
+    sleep: async () => {} })
+  const fired = await orch.step(run)
+  expect(await s.f.store.saveIfActive(fired.run)).toBe(true)
+  await completion
+  expect(errors).toEqual([])
+  return JSON.parse(s.f.store.get(run.id)!.inner_result!).projectBuild as ProjectBuildOutcome
+}
+
+test('authenticated recovery consumes a same-card predecessor STOP once and rebuilds from its exact published head', async () => {
+  const s = await rejectedHeadForOrchestratorRecovery({ laterAttempt: true })
+  const before = { plan: s.f.world.dispatches.filter(call => call.role === 'plan').length,
+    build: s.f.world.dispatches.filter(call => call.role === 'build').length,
+    fix: s.f.world.dispatches.filter(call => call.role === 'fix').length,
+    review: s.f.world.dispatches.filter(call => call.role === 'review').length }
+  const sourceEvents = s.f.store.stageEvents(s.prior.id)
+  const originalBase = await gitOut(s.f.context.runHost, s.f.origin, ['rev-parse', 'refs/heads/main'])
+  const admitted = await s.dispatch()
+  expect(admitted.ok, JSON.stringify(admitted)).toBe(true)
+  if (!admitted.ok) return
+  expect(admitted.run).toMatchObject({ base_sha: s.request.expected_base,
+    inner_checkpoint_head: s.request.expected_head, published_pr: s.request.published_pr,
+    task_iteration: 1, max_task_iterations: 4, max_rounds: 4,
+    execution_strategy: s.prior.execution_strategy })
+  expect(s.board.get(s.prior.project_slug, s.card.id)).toMatchObject({ status: 'in_progress',
+    linked_run_id: admitted.run.id, task_iteration: 1, max_task_iterations: 4 })
+  expect(s.f.store.orchestratorRecovery(admitted.run.id)?.request).toEqual(s.request)
+  expect(s.f.store.stageEvents(s.prior.id)).toEqual(sourceEvents)
+  expect(s.f.store.get(s.prior.id)).toEqual(s.prior)
+  expect(s.f.store.get(s.currentRunId)?.phase).toBe('failed')
+  const replay = await s.dispatch()
+  expect(replay.ok).toBe(false)
+  expect(s.f.store.orchestratorRecovery(admitted.run.id)?.request).toEqual(s.request)
+
+  // The old process removed its worktree and branch. The launch must fetch and
+  // reconstruct exactly the owned published commit before a planner can run.
+  const local = await s.f.context.runHost(['git', '-C', s.f.repo, 'show-ref', '--verify', '--quiet',
+    `refs/heads/${s.prior.branch}`], s.f.repo)
+  expect(local.ok).toBe(false)
+  const runHost = s.f.context.runHost
+  s.f.context.runHost = Object.assign(async (...args: Parameters<typeof runHost>) => {
+    if (args[0][0] === 'gh' && args[0].includes('merge')) {
+      expect(s.f.world.dispatches.filter(call => call.role === 'review').length).toBeGreaterThan(before.review)
+    }
+    return runHost(...args)
+  }, { writesDiffOutput: true as const })
+  const outcome = await launchAuthorizedRecovery(s, admitted.run)
+  expect(outcome.kind, why(s.f, outcome)).toBe('merged')
+  expect(s.f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(before.plan + 1)
+  expect(s.f.world.dispatches.filter(call => call.role === 'build')).toHaveLength(before.build + 1)
+  expect(s.f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(before.fix)
+  expect(s.f.world.dispatches.filter(call => call.role === 'review').length).toBeGreaterThan(before.review)
+  expect(s.f.github.prs[0]).toMatchObject({ number: 1, state: 'MERGED' })
+  expect(await gitOut(s.f.context.runHost, s.f.origin, ['merge-base', '--is-ancestor',
+    s.request.expected_base, s.request.expected_head])).toBe('')
+  expect(await gitOut(s.f.context.runHost, s.f.origin, ['rev-parse', 'refs/heads/main'])).not.toBe(originalBase)
+}, 300_000)
+
+for (const fault of ['moved-remote-head', 'wrong-pr', 'wrong-source-event', 'wrong-base-name', 'unreadable-pr'] as const)
+test(`authenticated rejected-head recovery refuses ${fault} at admission and leaves its source and budget intact`, async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const source = s.f.store.get(s.prior.id)!
+  const beforeEvents = s.f.store.stageEvents(source.id)
+  const count = () => s.f.db.prepare<{ n: number }, [string]>(
+    'SELECT COUNT(*) AS n FROM code_trident_runs WHERE project_slug = ?').get(source.project_slug)!.n
+  const beforeRows = count()
+  let request = s.request
+  if (fault === 'moved-remote-head') {
+    await gitOut(s.f.context.runHost, s.f.repo, ['push', '--force', 'origin',
+      `${s.f.baseSha}:refs/heads/${source.branch}`])
+  } else if (fault === 'wrong-pr') request = { ...request, published_pr: 2 }
+  else if (fault === 'wrong-source-event') request = { ...request, source_event_id: request.source_event_id + 1 }
+  else if (fault === 'wrong-base-name') s.f.github.prs[0]!.baseRefName = 'different-base'
+  else s.f.github.refuse.add('view')
+  const refused = await s.dispatch(request)
+  expect(refused.ok).toBe(false)
+  expect(count()).toBe(beforeRows)
+  expect(s.f.world.dispatches.filter(call => call.step_id.startsWith('recovery-'))).toEqual([])
+  expect(s.f.store.get(source.id)).toEqual(source)
+  expect(s.f.store.stageEvents(source.id)).toEqual(beforeEvents)
+  expect(s.board.get(source.project_slug, s.card.id)).toMatchObject({ status: 'blocked',
+    linked_run_id: source.id, task_iteration: 1, max_task_iterations: 4,
+    recovery_refusal: expect.stringContaining('recovery') })
+  expect(s.f.github.prs[0]!.state).toBe('OPEN')
+  expect(await gitOut(s.f.context.runHost, s.f.origin, ['rev-parse', 'refs/heads/main'])).toBe(s.f.baseSha)
+}, 300_000)
+
+test('an ordinary dispatch cannot turn the same rejected checkpoint into an authorized re-plan', async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  await s.board.detachRun(s.prior.project_slug, s.prior.id, 'failed')
+  const ordinary = await dispatchBoardBoundBuild({ task: s.prior.task, board_item_id: s.card.id }, s.deps)
+  expect(ordinary.ok, JSON.stringify(ordinary)).toBe(true)
+  if (!ordinary.ok) return
+  expect(ordinary.run).toMatchObject({ inner_checkpoint: null, inner_checkpoint_head: null,
+    task_iteration: 1, max_task_iterations: 4 })
+  expect(s.f.store.orchestratorRecovery(ordinary.run.id)).toBeNull()
+  expect(s.f.store.get(s.prior.id)).toEqual(s.prior)
+}, 300_000)
+
+test('only a live project-chat authority can race for the one-use rejected-head claim', async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const forged = await dispatchOrchestratorRecovery(s.request,
+    { authority: {} as never, project_id: s.f.context.projectId, call_id: 'forged' }, s.deps)
+  expect(forged.ok).toBe(false)
+  expect(s.board.get(s.prior.project_slug, s.card.id)?.recovery_refusal).toBeNull()
+  const [first, second] = await Promise.all([s.dispatch(), s.dispatch()])
+  const admitted = [first, second].filter(result => result.ok)
+  expect(admitted).toHaveLength(1)
+  const run = admitted[0]
+  if (!run?.ok) return
+  expect(s.f.store.orchestratorRecovery(run.run.id)?.request).toEqual(s.request)
+  expect(s.f.db.prepare<{ n: number }, [string]>(
+    'SELECT COUNT(*) AS n FROM code_trident_orchestrator_recoveries WHERE source_run_id = ?')
+    .get(s.prior.id)!.n).toBe(1)
+  expect(s.board.get(s.prior.project_slug, s.card.id)).toMatchObject({ status: 'in_progress',
+    linked_run_id: run.run.id, task_iteration: 1, max_task_iterations: 4 })
+  expect(s.f.store.get(s.prior.id)).toEqual(s.prior)
+}, 300_000)
+
+for (const progress of ['repeated', 'worse', 'distinct-decreasing'] as const)
+test(`authorized re-plan keeps its prior review baseline: ${progress}`, async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const admitted = await s.dispatch()
+  expect(admitted.ok, JSON.stringify(admitted)).toBe(true)
+  if (!admitted.ok) return
+  const oldPlan = s.f.world.dispatches.filter(call => call.role === 'plan').length
+  const oldBuild = s.f.world.dispatches.filter(call => call.role === 'build').length
+  const oldFix = s.f.world.dispatches.filter(call => call.role === 'fix').length
+  s.f.world.blockersByRound = progress === 'worse' ? [0, 2, 2, 3] : [0, 2, 2, 1]
+  s.f.world.repeatFirstFinding = progress === 'repeated'
+  const outcome = await launchAuthorizedRecovery(s, admitted.run)
+  expect(s.f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(oldPlan + 1)
+  expect(s.f.world.dispatches.filter(call => call.role === 'build')).toHaveLength(oldBuild + 1)
+  expect(s.f.store.get(admitted.run.id)).toMatchObject({ base_sha: s.request.expected_base,
+    task_iteration: 1, max_task_iterations: 4, max_rounds: 4 })
+  const firstState = s.f.store.stageEvents(admitted.run.id)
+    .find(event => event.stage === 'build-mode-state')!
+  expect(JSON.parse(firstState.meta!).checkpoint).toMatchObject({ stage: 'built', round: 3,
+    replansUsed: 1, reviewBaseline: 'required',
+    previousReview: s.checkpoint.reviewStop.current,
+    orchestratorReplan: { direction: s.request.direction } })
+  if (progress === 'distinct-decreasing') {
+    expect(outcome.kind, why(s.f, outcome)).toBe('merged')
+    expect(s.f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(oldFix + 1)
+    expect(s.f.github.prs[0]!.state).toBe('MERGED')
+    expect(await gitOut(s.f.context.runHost, s.f.origin, ['rev-parse', 'refs/heads/main'])).not.toBe(s.f.baseSha)
+  } else {
+    expect(outcome, why(s.f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review',
+      reviewStop: { trigger: progress === 'repeated' ? 'repeat-finding' : 'no-progress' } })
+    expect(s.f.world.dispatches.filter(call => call.role === 'fix')).toHaveLength(oldFix)
+    expect(s.f.github.prs[0]!.state).toBe('OPEN')
+    expect(await gitOut(s.f.context.runHost, s.f.origin, ['rev-parse', 'refs/heads/main'])).toBe(s.f.baseSha)
+  }
+}, 300_000)
+
+for (const fault of ['moved-head', 'moved-base-name', 'wrong-repository'] as const)
+test(`a ${fault} after admission refuses at launch without workers and keeps the card BLOCKED`, async () => {
+  const s = await rejectedHeadForOrchestratorRecovery()
+  const admitted = await s.dispatch()
+  expect(admitted.ok, JSON.stringify(admitted)).toBe(true)
+  if (!admitted.ok) return
+  const before = s.f.world.dispatches.length
+  const sourceEvents = s.f.store.stageEvents(s.prior.id)
+  if (fault === 'moved-head') {
+    await gitOut(s.f.context.runHost, s.f.repo, ['push', '--force', 'origin',
+      `${s.f.baseSha}:refs/heads/${s.prior.branch}`])
+  } else if (fault === 'moved-base-name') {
+    s.f.github.prs[0]!.baseRefName = 'different-base'
+  } else {
+    const host = s.f.context.runHost
+    s.f.context.runHost = Object.assign(async (...args: Parameters<typeof host>) => {
+      const result = await host(...args)
+      if (args[0][0] === 'gh' && args[0].includes('view') && result.ok) {
+        return { ...result, stdout: JSON.stringify({ ...JSON.parse(result.stdout),
+          url: 'https://github.com/other/project/pull/1' }) }
+      }
+      return result
+    }, { writesDiffOutput: true as const })
+  }
+  const orch = buildTridentOrchestrator({
+    fire_workflow: async () => { throw new Error('recovery launch must refuse before any worker') },
+    db_path: s.f.input.db_path, base_branch: 'main',
+    run_host: Object.assign(s.f.context.runHost, { writesDiffOutput: true as const }),
+    read_run: id => s.f.store.get(id), list_stage_events: id => s.f.store.stageEvents(id),
+    read_orchestrator_recovery: run => {
+      readOrchestratorRecovery(s.f.store, run)
+      return s.f.store.orchestratorRecovery(run.id)
+    },
+    record_recovery_refusal: (id, reason) => s.f.store.recordOrchestratorRecoveryRefusal(id, reason),
+    sleep: async () => {},
+  })
+  const refused = await orch.step(admitted.run)
+  expect(refused.run.phase).toBe('failed')
+  expect(refused.run.failure_reason).toContain('Orchestrator recovery refused')
+  expect(await s.f.store.saveIfActive(refused.run)).toBe(true)
+  const reconcile = buildBoardReconcileObserver(s.board, { resolveRepoWebUrl: async () => null })!
+  await reconcile(s.f.store.get(admitted.run.id)!)
+  expect(s.board.get(s.prior.project_slug, s.card.id)).toMatchObject({ status: 'blocked',
+    linked_run_id: admitted.run.id, task_iteration: 1, max_task_iterations: 4,
+    recovery_refusal: expect.stringContaining('published source changed') })
+  expect(s.f.store.get(s.prior.id)).toEqual(s.prior)
+  expect(s.f.store.stageEvents(s.prior.id)).toEqual(sourceEvents)
+  expect(s.f.world.dispatches).toHaveLength(before)
+  expect(s.f.github.prs[0]!.state).toBe('OPEN')
+  expect(await gitOut(s.f.context.runHost, s.f.origin, ['rev-parse', 'refs/heads/main'])).toBe(s.f.baseSha)
+}, 300_000)
 
 test.each([false, true])('native child durable ownership follows validated consuming results (malformed=%s)', async malformedNativeTrailer => {
   const f = await fixture({ malformedNativeTrailer })
