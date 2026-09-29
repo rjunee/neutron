@@ -71,6 +71,8 @@ export function isWorkBoardStatus(value: unknown): value is WorkBoardStatus {
 
 
 export interface WorkBoardItem {
+  /** Recovery can refuse before a replacement run exists. */
+  recovery_refusal?: string | null;
   attempts?: WorkBoardTerminalAttempt[]
   id: string;
   /** Server-only; absent on the live `work_board_changed` frame. */
@@ -370,6 +372,7 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
       continue;
     const run_progress = parseRunProgress(r['run_progress']);
     out.push({
+      recovery_refusal: typeof r['recovery_refusal'] === 'string' ? r['recovery_refusal'] : null,
       attempts: parseWorkBoardAttempts(r['attempts']),
       id,
       title,

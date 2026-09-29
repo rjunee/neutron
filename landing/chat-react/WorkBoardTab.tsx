@@ -264,11 +264,15 @@ interface RunNotice {
 
 function runNotice(item: WorkBoardItem): RunNotice | null {
   const rp = item.run_progress
+  const refusal = item.recovery_refusal?.trim() || null
   // A BLOCKED card's reason is the escalation's own sentence — the most useful line on
   // the card — but it is not a FAILURE, and painting it in the failure tone beside a
   // "Blocked" tag would have the two halves of one row disagree.
   const failure = failureReasonText(rp)
-  if (item.status === 'blocked') return failure === null ? null : { text: failure, tone: 'blocked' }
+  if (item.status === 'blocked') {
+    const reason = refusal ?? failure
+    return reason === null ? null : { text: reason, tone: 'blocked' }
+  }
   if (failure !== null) return { text: failure, tone: 'failure' }
   // A failed run that recorded REVIEW_NOT_RUN and no reason: say the one thing the
   // row proves instead of a blank. A null verdict (legacy frame) claims nothing.
@@ -279,6 +283,9 @@ function runNotice(item: WorkBoardItem): RunNotice | null {
   if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null
   const alert = briefAlertText(rp)
   if (alert !== null) return { text: alert, tone: 'alert' }
+  // A manual lane change does not admit recovery or supersede its refusal.
+  // Existing terminal failures and integrity alerts keep their precedence.
+  if (refusal !== null) return { text: refusal, tone: 'alert' }
   // The retry's resume decision: whether it carried the dead run's checkpoint and
   // task iteration, and why not when it did not. A retry that inherited nothing must
   // SAY so rather than look like a first dispatch. It yields to an integrity alert,

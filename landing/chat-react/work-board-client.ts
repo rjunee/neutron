@@ -90,6 +90,8 @@ export type WorkBoardTaskType = 'build' | 'research'
  * satisfy the SAME type without the tab caring which path produced it.
  */
 export interface WorkBoardItem {
+  /** Recovery can refuse before a replacement run exists. */
+  recovery_refusal?: string | null
   attempts?: WorkBoardTerminalAttempt[]
   id: string
   project_slug?: string
@@ -420,6 +422,7 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
     const run_progress = parseRunProgress(r['run_progress'])
     const task_type = r['task_type'] === 'research' ? 'research' : 'build'
     out.push({
+      recovery_refusal: typeof r['recovery_refusal'] === 'string' ? r['recovery_refusal'] : null,
       attempts: parseWorkBoardAttempts(r['attempts']),
       id,
       title,
