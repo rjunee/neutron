@@ -157,3 +157,46 @@ test('file sources reach authenticated HTML/JSON and import failures preserve ca
     expect(partial.warnings.join(' ')).toContain('Direct phase observations unavailable')
   } finally { await rm(dir, { recursive: true, force: true }) }
 })
+
+test('fresh partial importer coverage reaches API and expanded HTML without inventing phases or tokens', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'timeline-partial-'))
+  const catalogue = join(dir, 'catalogue.json'), observations = join(dir, 'observations.jsonl'), importStatus = join(dir, 'import.json')
+  try {
+    const now = Date.now()
+    await writeFile(catalogue, JSON.stringify({ observedAt: now, repositories: [{ repository: 'example/open', error: null, prs: [
+      { number: 10, title: 'Known PR without attributed work', url: 'https://github.com/example/open/pull/10', state: 'open',
+        createdAt: new Date(now - 10000).toISOString(), closedAt: null, mergedAt: null },
+    ] }] }))
+    await writeFile(observations, '')
+    const read = timelineSourceReader({ catalogue, observations, importStatus, databases: [] })
+    const handler = createTimelineHandler({ username: 'viewer', password: 'test-secret', read })
+    for (const partial of [true, false]) {
+      await writeFile(importStatus, JSON.stringify({ lastSuccessAt: now, error: null, partial,
+        coverage: { registered: 2, emitted: 3, unbound: partial ? 7 : 0, incomplete: 0, scanPartial: false },
+        privatePath: '/private/never-served', transcript: 'private transcript content' }))
+      const response = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: auth } }))
+      const data = await response.json() as TimelineSnapshot
+      expect(response.status).toBe(200)
+      expect(data.cards).toHaveLength(1)
+      expect(data.cards[0]!.segments).toHaveLength(0)
+      expect(data.cards[0]!.prState).toBe('open')
+      const html = await (await handler(new Request('http://localhost/timeline', { headers: { authorization: auth } }))).text()
+      expect(html).toContain('PR #10')
+      expect(html).toContain('No phase timing recorded')
+      if (partial) {
+        expect(data.warnings.join(' ')).toContain('7 observations have no verified PR/phase binding')
+        expect(data.warnings.join(' ')).toContain('0 registered sources are incomplete')
+        expect(data.warnings.join(' ')).not.toContain('stale or failed')
+        expect(html).toContain('<details class="source-note" open>')
+        expect(html).toContain('Direct phase coverage is partial.')
+        expect(html).toContain('7 observations have no verified PR/phase binding')
+      } else {
+        expect(data.warnings).toEqual([])
+        expect(html).not.toContain('Direct phase coverage is partial.')
+        expect(html).not.toContain('class="source-note"')
+      }
+      expect(JSON.stringify(data) + html).not.toContain('/private/never-served')
+      expect(JSON.stringify(data) + html).not.toContain('private transcript content')
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})

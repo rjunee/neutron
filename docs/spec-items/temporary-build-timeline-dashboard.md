@@ -161,7 +161,12 @@ spans carry unknown tokens unless a provider actually attributed usage.
 - [ ] Page/fragment/JSON deny anonymous and incorrect credentials and serve valid
       credentials. Missing credentials refuse startup; read-only SQLite does not
       migrate or write workflow state. Browser refresh is 30 seconds, with stale
-      source and failed-refresh notices. Raw logs and source paths are not served.
+      source and failed-refresh notices. Fresh importer partial coverage and
+      unbound/incomplete counts remain visible in the authenticated API and expanded
+      source notices; a successful refresh alone never implies complete attribution.
+      Explicit zero and unknown counts remain distinct, and raw metadata, logs and
+      source paths are not served. Fresh complete registered-source coverage does
+      not produce a partial-coverage warning or claim coverage of unregistered history.
 - [ ] Consuming tests and bidirectional semantic mutations cover authentication,
       unknown/zero accounting and valid/invalid interval attribution. Both root
       and Trident TypeScript checks and the shared-host suite pass.

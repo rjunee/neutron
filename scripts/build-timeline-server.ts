@@ -4,6 +4,7 @@ import { openTimelineReader, type TimelineSnapshot } from '@neutronai/trident/bu
 import { combineTimelineSources, type PrCatalogue } from '@neutronai/trident/build-timeline-catalogue.ts'
 import { renderTimeline, TIMELINE_PAGE, TIMELINE_SCRIPT } from '@neutronai/trident/build-timeline-html.ts'
 import { readPhaseObservations } from './build-timeline-sources.ts'
+import { importStatusWarnings } from './build-timeline-import-status.ts'
 
 export interface TimelineServerOptions {
   username: string
@@ -90,10 +91,7 @@ export function timelineSourceReader(config: { catalogue: string; observations: 
     catch { warnings.push('Direct phase observations unavailable or invalid. Phase coverage is incomplete.') }
     if (config.importStatus) {
       try {
-        const status = JSON.parse(await readFile(config.importStatus, 'utf8')) as { lastSuccessAt?: unknown; error?: unknown }
-        if (status.error || typeof status.lastSuccessAt !== 'number' || !Number.isFinite(status.lastSuccessAt) || now - status.lastSuccessAt > 60_000) {
-          warnings.push('Direct command importer is stale or failed. Historical spans remain visible; recent phase coverage may be incomplete.')
-        }
+        warnings.push(...importStatusWarnings(JSON.parse(await readFile(config.importStatus, 'utf8')), now))
       } catch { warnings.push('Direct command importer status unavailable. Recent phase coverage is unverified.') }
     }
     const trident: Array<{ repository: string; snapshot: TimelineSnapshot }> = []

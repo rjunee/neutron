@@ -59,7 +59,7 @@ export function renderTimeline(snapshot: TimelineSnapshot): string {
   const time = clockTime
   const warnings = snapshot.warnings.filter(w => !w.startsWith('Showing '))
   return `<div class="chart-meta" data-page="${snapshot.page ?? 0}" data-pages="${snapshot.totalPages ?? 1}"><span>${snapshot.prCount.toLocaleString('en-US')} PRs <span class="muted">· open first · newest activity in each group</span></span><span class="muted">Updated ${h(new Date(snapshot.observedAt).toISOString().slice(11, 16))} UTC</span></div>
-  ${warnings.length ? `<details class="source-note"><summary>Source coverage notes</summary>${warnings.map(w => `<p>${h(w)}</p>`).join('')}</details>` : ''}
+  ${warnings.length ? `<details class="source-note" open><summary>Source coverage notes</summary>${warnings.map(w => `<p>${h(w)}</p>`).join('')}</details>` : ''}
   <div class="scale-tools"><span>${snapshot.scaleMode === 'focus' ? '0–1h focus window · longer bars continue ›' : 'Full range · one shared wall-clock scale'}</span><div class="scale-switch" role="group" aria-label="Time scale"><button type="button" data-scale="focus" aria-pressed="${snapshot.scaleMode !== 'all'}">Focus 1h</button><button type="button" data-scale="all" aria-pressed="${snapshot.scaleMode === 'all'}">Fit all</button></div></div>
   <div class="chart-axis"><span>Pull request</span><div><span>0</span><span>${h(durationLabel(scale / 2))}</span><span>${h(durationLabel(scale))}</span></div><span>Wall time</span></div>
   <div class="rows">${snapshot.cards.length === 0 ? '<p class="empty">No pull requests match this view.</p>' : snapshot.cards.map(card => {
