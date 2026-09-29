@@ -37,6 +37,16 @@ export class AttemptAccounting {
     finally { await this.recordEvent('build-stage-ended', { ...identity, stage, started_at, ended_at: this.now() }) }
   }
 
+  /** Consumer-observed stage timing attributed to this step's dispatch attempt.
+   * Advisory: it never rejects, and a started-only observation records no
+   * ending (missing stays missing, never an invented zero). */
+  async recordStageObservation(request: BoundedWorkRequest,
+    observation: { stage: string; started_at: number; ended_at?: number; outcome?: string }): Promise<void> {
+    const identity = { ...this.key(request), stage: observation.stage, started_at: observation.started_at }
+    if (observation.ended_at === undefined) return this.recordEvent('build-stage-started', identity)
+    return this.recordEvent('build-stage-ended', { ...identity, ended_at: observation.ended_at, outcome: observation.outcome ?? null })
+  }
+
   private key(request: BoundedWorkRequest): AttemptKey {
     // The bounded-work contract makes step_id the actual-call idempotency key.
     // A provider retry is a new step, not a second receipt for this step.

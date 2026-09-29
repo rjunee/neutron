@@ -15,6 +15,15 @@ import { bindNativeChildWorkspace, nativeChildCensusKnown, ownsNativeChildWorksp
 export type ClaudeNativeDispatchEvidence = { kind: 'submission-started' | 'not-submitted' } |
   { kind: 'child-bound'; nativeAgentId: string }
 
+/** `native-submission-queue` is the parent REPL submission-slot wait inside
+ * `acquireTurn`; `native-child-census-wait` is the later sibling-census wait,
+ * observed only when a native workspace is bound. Neither is child execution. */
+export type ClaudeSubmissionQueueStage = 'native-submission-queue' | 'native-child-census-wait'
+export type ClaudeSubmissionQueueObservation =
+  | { kind: 'stage-started'; stage: ClaudeSubmissionQueueStage; started_at: number }
+  | { kind: 'stage-ended'; stage: 'native-submission-queue'; started_at: number; ended_at: number; outcome: 'acquired' | 'acquired-late' | 'rejected' }
+  | { kind: 'stage-ended'; stage: 'native-child-census-wait'; started_at: number; ended_at: number; outcome: 'known' | 'expired' | 'interrupted' }
+
 /** Host-owned launch observation, bound to this exact live session. The host must
  * replace this binding when the session is replaced; never derive it from a request.
  * The child must come from HerdrHost, whose submitLine uses herdrCall via its RPC. */
@@ -32,6 +41,13 @@ export interface ClaudeActingSession {
   /** Synchronous durable writer bound by composition to the original request,
    * session and generation. A failed write must prevent subsequent actuation. */
   onNativeDispatchEvidence?: (event: ClaudeNativeDispatchEvidence) => void
+  /** ADVISORY timing of the parent REPL submission-slot wait (and, with a bound
+   * workspace, the separate sibling-census wait). It is not native child
+   * execution and never authorizes or refuses a dispatch: a throwing observer is
+   * ignored. Unlike `onNativeDispatchEvidence`, which is deliberately
+   * fail-closed, nothing here gates actuation. Each started interval ends at most
+   * once; an interval with no ending is an explicit unknown. */
+  onSubmissionQueue?: (observation: ClaudeSubmissionQueueObservation) => void
 }
 
 const toolRank: Record<ToolGrant, number> = { none: 0, 'read-only': 1, edit: 2, 'edit-and-run': 3 }
@@ -196,6 +212,9 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
   const child = session.child
   const transcript = sessionJsonlPath(session.sessionId, session.cwd, binding.projects_dir)
   const subagents = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+  const observeQueue = (observation: ClaudeSubmissionQueueObservation) => {
+    try { binding.onSubmissionQueue?.(observation) } catch { /* Advisory timing cannot gate dispatch. */ }
+  }
   const actingTurn: ProjectActingTurn = async ({ conversation, request, spec, timeout_ms, deadline_ms, signal }) => {
     let submitted = false
     try {
@@ -256,15 +275,44 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
       if (workspace && !ownsNativeChildWorkspace(workspace, session, request)) {
         return refuse('Native child workspace ownership is unavailable; reconcile existing admitted children first.')
       }
-      const release = await session.acquireTurn(readOnly || workspace ? yieldSlot => { yieldDispatch = yieldSlot } : undefined, workspace)
+      // Queue interval: only the submission-slot wait inside acquireTurn. No
+      // await may sit between this observation and the acquisition, which
+      // claims its slot synchronously.
+      const queuedAt = clock.now()
+      observeQueue({ kind: 'stage-started', stage: 'native-submission-queue', started_at: queuedAt })
+      let release: () => void
+      try {
+        release = await session.acquireTurn(readOnly || workspace ? yieldSlot => { yieldDispatch = yieldSlot } : undefined, workspace)
+      } catch (error) {
+        observeQueue({ kind: 'stage-ended', stage: 'native-submission-queue', started_at: queuedAt, ended_at: clock.now(), outcome: 'rejected' })
+        throw error
+      }
       releaseTurn = release
       try {
-        if (expired()) return beforeDispatchExpired()
-        // Sibling admissions acquire their durable lease before asynchronously
-        // measuring the worktree. Wait for those local proofs under the original
-        // budget; a restart/foreign lease never becomes proof merely by waiting.
-        while (workspace && !nativeChildCensusKnown(workspace) && !expired()) {
-          await delay(Math.min(25, Math.max(1, deadline - clock.now())), undefined, { signal: stopped })
+        // A late settle closes the interval truthfully, exactly once, and still
+        // cannot submit after the original deadline.
+        const late = expired()
+        observeQueue({ kind: 'stage-ended', stage: 'native-submission-queue', started_at: queuedAt, ended_at: clock.now(), outcome: late ? 'acquired-late' : 'acquired' })
+        if (late) return beforeDispatchExpired()
+        if (workspace) {
+          // Census interval: waiting for sibling admission proofs after the slot
+          // was acquired. It is never part of the queue interval above.
+          const censusAt = clock.now()
+          observeQueue({ kind: 'stage-started', stage: 'native-child-census-wait', started_at: censusAt })
+          let censusOutcome: 'known' | 'expired' | 'interrupted' = 'interrupted'
+          try {
+            // Sibling admissions acquire their durable lease before asynchronously
+            // measuring the worktree. Wait for those local proofs under the original
+            // budget; a restart/foreign lease never becomes proof merely by waiting.
+            let known = nativeChildCensusKnown(workspace)
+            while (!known && !expired()) {
+              await delay(Math.min(25, Math.max(1, deadline - clock.now())), undefined, { signal: stopped })
+              known = nativeChildCensusKnown(workspace)
+            }
+            censusOutcome = known ? 'known' : 'expired'
+          } finally {
+            observeQueue({ kind: 'stage-ended', stage: 'native-child-census-wait', started_at: censusAt, ended_at: clock.now(), outcome: censusOutcome })
+          }
         }
         if (expired()) return beforeDispatchExpired()
         // JSON escapes newlines: submitLine accepts one line and owns text/Enter ordering.

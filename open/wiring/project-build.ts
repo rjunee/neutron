@@ -26,6 +26,7 @@ import { liveProjectSessions } from '@neutronai/runtime/adapters/claude-code/per
 import { mergeEnv } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 import type { NativeChildAdmission } from '@neutronai/gateway/project-admission.ts'
 import { createLogger } from '@neutronai/logger'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { Provider } from '@neutronai/runtime/provider.ts'
 import type { ProviderSelectionSource } from '@neutronai/runtime/adapters/select-substrate.ts'
 import type { ProjectBuildHostOptions } from '@neutronai/trident/project-build-host.ts'
@@ -542,6 +543,10 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     if (expired()) return expiredBeforeDispatch()
     enterActor()
     return createClaudeActingTurn({ project_id: context.projectId, topic_id: topic, session, projects_dir: resolveTranscriptProjectsDir(options), ...(workspace ? { workspace } : {}), onDispatchSubmitted, onNativeDispatchEvidence: evidence,
+      // Advisory queue timing on the existing attempt identity; nothing in the
+      // acting path awaits the sink, so it cannot delay, gate or extend dispatch.
+      onSubmissionQueue: observation => fireAndForget('project-build.native-submission-queue',
+        accounting.recordStageObservation(turn.request, observation)),
       grants: { tools: 'edit-and-run', writable: true, network: true, roots: options.extra_dirs ?? [] } })({ ...turn,
         deadline_ms: deadline, timeout_ms: Math.max(1, deadline - Date.now()) })
   }

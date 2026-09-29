@@ -7719,10 +7719,146 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     if (seam === 'acquireTurn') {
       await releaseObserved
       expect(f.admission.listLeases('liveChild')).toEqual([])
+      // The never-granted slot leaves an explicit open queue interval: no
+      // ending, and so no invented duration.
+      const queued = queueEvents(f, `${f.row.id}:plan:0`)
+      expect(queued.filter(event => event.stage === 'build-stage-started')).toHaveLength(1)
+      expect(queued.filter(event => event.stage === 'build-stage-ended')).toEqual([])
     } else expect(f.admission.listLeases('liveChild')).toHaveLength(1)
     expect(f.github.prs).toEqual([])
   }, 60_000)
 }
+
+/** Durable native submission-queue intervals recorded for one step. */
+function queueEvents(f: Awaited<ReturnType<typeof fixture>>, stepId: string, stage = 'native-submission-queue') {
+  return f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-stage-started' || event.stage === 'build-stage-ended')
+    .map(event => ({ stage: event.stage, meta: JSON.parse(event.meta!) }))
+    .filter(event => event.meta.stage === stage && event.meta.step_id === stepId)
+}
+
+/** Holds the FIRST native submission-slot acquisition on the fixture session. */
+async function holdFirstAcquisition(f: Awaited<ReturnType<typeof fixture>>, held: Promise<void>) {
+  f.register()
+  const session = await pool.get(f.key) as unknown as { acquireTurn: (...args: unknown[]) => Promise<() => void> }
+  const original = session.acquireTurn.bind(session)
+  let first = true
+  session.acquireTurn = async (...args) => {
+    if (first) { first = false; await held }
+    return original(...args)
+  }
+}
+
+test('native-submission-queue: a held submission slot persists its queue interval inside the plan attempt', async () => {
+  const f = await fixture()
+  const planStep = `${f.row.id}:plan:0`
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  const record = f.store.recordStageEvent.bind(f.store)
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    const meta = args[2] ? JSON.parse(args[2]) : null
+    // The interval is durable WHILE the slot is still held: release only then.
+    if (args[1] === 'build-stage-started' && meta?.stage === 'native-submission-queue' && meta.step_id === planStep) release()
+  })
+  cleanups.push(() => recording.mockRestore())
+  await holdFirstAcquisition(f, held)
+  const options = await f.prepare()
+  options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 10_000 } }
+  const host = await createProjectBuildHost(options)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'merged' })
+  const queued = queueEvents(f, planStep)
+  expect(queued.map(event => event.stage)).toEqual(['build-stage-started', 'build-stage-ended'])
+  const [started, ended] = queued.map(event => event.meta)
+  expect(started).toEqual({ run_id: f.row.id, step_id: planStep, attempt_id: 'dispatch', stage: 'native-submission-queue', started_at: started.started_at })
+  expect(ended).toMatchObject({ run_id: f.row.id, step_id: planStep, attempt_id: 'dispatch', stage: 'native-submission-queue',
+    started_at: started.started_at, outcome: 'acquired' })
+  expect(ended.ended_at).toBeGreaterThanOrEqual(ended.started_at)
+  // The queue interval nests inside the attempt's own timestamps; nothing sums them.
+  const plan = f.context.attempts.list(f.row.id).find(row => row.step_id === planStep)!
+  expect(plan).toMatchObject({ outcome: 'completed' })
+  expect(plan.started_at!).toBeLessThanOrEqual(ended.started_at)
+  expect(plan.ended_at!).toBeGreaterThanOrEqual(ended.ended_at)
+  for (const census of queueEvents(f, planStep, 'native-child-census-wait')) expect(census.meta.started_at).toBeGreaterThanOrEqual(ended.ended_at)
+  expect(f.world.dispatches.filter(call => call.role === 'plan').map(call => call.step_id)).toEqual([planStep])
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+}, 60_000)
+
+test('native-submission-queue: a late acquisition after the wall ends its interval once and never submits', async () => {
+  const f = await fixture()
+  const planStep = `${f.row.id}:plan:0`
+  let released!: () => void
+  const releaseObserved = new Promise<void>(resolve => { released = resolve })
+  const admission = f.context.nativeChildAdmission
+  f.context.nativeChildAdmission = { ...admission, admit: async (...args) => {
+    const child = await admission.admit(...args)
+    if (child.status !== 'admitted') return child
+    return { ...child, release: async () => { const result = await child.release(); released(); return result } }
+  } }
+  let lateEnded!: () => void
+  const endedSeen = new Promise<void>(resolve => { lateEnded = resolve })
+  const record = f.store.recordStageEvent.bind(f.store)
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    await record(...args)
+    const meta = args[2] ? JSON.parse(args[2]) : null
+    if (args[1] === 'build-stage-ended' && meta?.stage === 'native-submission-queue' && meta.step_id === planStep) lateEnded()
+  })
+  cleanups.push(() => recording.mockRestore())
+  const options = await f.prepare()
+  options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 1_500 } }
+  let grant!: () => void
+  const granted = new Promise<void>(resolve => { grant = resolve })
+  let acquisitions = 0, submissions = 0, slotReleases = 0
+  let slotReleased!: () => void
+  const lateSettled = new Promise<void>(resolve => { slotReleased = resolve })
+  registerSession(f, {
+    sessionId: 'e2e-session', childGeneration: 'e2e-generation', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
+    child: { pid: process.pid, submitLine: async () => { submissions++ } },
+    acquireTurn: async () => { acquisitions++; await granted; return () => { slotReleases++; slotReleased() } },
+  })
+  const host = await createProjectBuildHost(options)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  expect(['blocked', 'unknown']).toContain(outcome.kind)
+  expect(queueEvents(f, planStep).map(event => event.stage)).toEqual(['build-stage-started'])
+  grant()
+  // The late turn releases its slot after closing the interval; the durable write
+  // is fire-and-forget, so bound the wait and let the assertions below decide.
+  await lateSettled
+  await Promise.race([endedSeen, Bun.sleep(5_000)])
+  await releaseObserved
+  const queued = queueEvents(f, planStep)
+  expect(queued.map(event => event.stage)).toEqual(['build-stage-started', 'build-stage-ended'])
+  expect(queued[1]!.meta).toMatchObject({ attempt_id: 'dispatch', outcome: 'acquired-late', started_at: queued[0]!.meta.started_at })
+  expect(acquisitions).toBe(1)
+  expect(submissions).toBe(0)
+  expect(slotReleases).toBe(1)
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+  expect(f.github.prs).toEqual([])
+}, 60_000)
+
+test('native-submission-queue: a failing telemetry sink changes no dispatch, lease or result', async () => {
+  const f = await fixture()
+  const planStep = `${f.row.id}:plan:0`
+  const record = f.store.recordStageEvent.bind(f.store)
+  let refused = 0
+  const recording = spyOn(f.store, 'recordStageEvent').mockImplementation(async (...args) => {
+    const meta = args[2] ? (() => { try { return JSON.parse(args[2]!) } catch { return null } })() : null
+    if (meta?.stage === 'native-submission-queue' || meta?.stage === 'native-child-census-wait') { refused++; throw new Error('telemetry sink down') }
+    await record(...args)
+  })
+  cleanups.push(() => recording.mockRestore())
+  const options = await f.prepare()
+  options.workers.plan.request = { ...options.workers.plan.request, budget: { wall_ms: 10_000 } }
+  const host = await createProjectBuildHost(options)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'merged' })
+  expect(refused).toBeGreaterThan(0)
+  expect(f.world.dispatches.filter(call => call.role === 'plan').map(call => call.step_id)).toEqual([planStep])
+  expect(f.context.attempts.list(f.row.id).find(row => row.step_id === planStep)).toMatchObject({ outcome: 'completed' })
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+  // Truthful absence: nothing was persisted, and nothing was invented.
+  expect(queueEvents(f, planStep)).toEqual([])
+}, 60_000)
 
 test('a plan turn acquired within its wall dispatches once and validates its native result', async () => {
   const f = await fixture()
