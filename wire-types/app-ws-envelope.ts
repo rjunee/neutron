@@ -485,6 +485,8 @@ export interface AppWsOutboundEditUpdate {
 export interface AppWsWorkBoardItem {
   id: string
   title: string
+  /** Durable recovery admission refusal; null when no refusal is recorded. */
+  recovery_refusal?: string | null
   /** `archived` = SHELVED (migration 0130): deprioritised, off the active lane,
    *  and NEVER counted as completed — it is not a quieter `done`.
    *  `blocked` = the build STOPPED ON PURPOSE (migration 0140) and reported why:

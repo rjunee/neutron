@@ -4718,6 +4718,7 @@ export function buildOpenGraphComposer(
             return {
               id: it.id,
               title: it.title,
+              recovery_refusal: it.recovery_refusal ?? null,
               status: it.status,
               sort_order: it.sort_order,
               design_doc_ref: it.design_doc_ref,
