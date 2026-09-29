@@ -46,17 +46,25 @@ export async function prepareLaunch(
     resolveResumeLiveHead,
     resumeHeadDecides,
   } = deps
+  let recoveryEvent: ReturnType<NonNullable<typeof opts.list_stage_events>>[number] | undefined
   let modeState: ReturnType<typeof readBuildModeState>
   try {
-    modeState = readBuildModeState(opts.list_stage_events?.(run.id) ?? [], run)
+    const stageEvents = opts.list_stage_events?.(run.id) ?? []
+    recoveryEvent = stageEvents.find(e => e.stage === ORCHESTRATOR_RECOVERY_STAGE)
+    modeState = readBuildModeState(stageEvents, run)
   } catch {
+    if (recoveryEvent) {
+      const reason = 'Orchestrator recovery refused: canonical checkpoint is unreadable or invalid; no fresh build was started'
+      await opts.record_recovery_refusal?.(run.id, reason)
+      return { run: failedRun(run, reason, true), changed: true, waiting: false,
+        note: `${run.phase} → failed (invalid recovery checkpoint)` }
+    }
     return {
       run: failedRun(run, 'Project driver canonical checkpoint is unreadable or has invalid identity or state', false),
       changed: true, waiting: false, note: `${run.phase} → failed (invalid project driver checkpoint)`,
     }
   }
   const base = await resolveBase(run)
-  const recoveryEvent = opts.list_stage_events?.(run.id).find(e => e.stage === ORCHESTRATOR_RECOVERY_STAGE)
   if (recoveryEvent || modeState?.checkpoint.orchestratorReplan) {
     try {
       const decision = opts.read_orchestrator_recovery?.(run)

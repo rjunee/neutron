@@ -1513,7 +1513,10 @@ export function buildTridentOrchestrator(
     options: StrandedReconcileOptions = {},
   ): Promise<TridentRun | null> {
     try {
-      if (run.merge_mode !== 'pr') return null
+      // Startup calls this reconciler directly, without passing through step's
+      // refusal guard. A rejected recovery retains the old published branch as
+      // evidence, never as stranded work eligible for another push.
+      if (run.merge_mode !== 'pr' || run.failure_reason?.startsWith('Orchestrator recovery refused:')) return null
       const branch = run.branch ?? `trident/${run.slug}`
 
       const local = await opts.run_host(
