@@ -181,6 +181,36 @@ test('unconfirmed close retains cleanup identity and configuration until confirm
   expect(existsSync(config)).toBe(false)
 }, 10000)
 
+test.each(['unknown', 'normal'] as const)('shutdown preserves unconfirmed compose cleanup or confirms %s closure', async mode => {
+  const { server, wired, journal } = rig()
+  server.closeMode = 'unknown'
+  await collect(wired.makeComposeSubstrate('one')!.start(spec('ok')))
+  const session = [...ephemeralSessions][0]!
+  expect(session).toBeDefined()
+  const worker = [...server.panes.values()].find(pane => pane.label === 'Compose · project documents')!
+  const config = worker.argv[worker.argv.indexOf('--mcp-config') + 1]!
+  const ownership = readFileSync(journal, 'utf8')
+  await until(() => server.workerCloses >= 2 ? true : undefined)
+  await Bun.sleep(2100) // The normal finalizer's bounded attempts have expired.
+  expect(ephemeralSessions.has(session)).toBe(true)
+  server.closeMode = mode
+  await shutdownAllPersistentRepls()
+  const confirmed = mode === 'normal'
+  expect(session.hasChildExited()).toBe(confirmed)
+  expect(ephemeralSessions.has(session)).toBe(!confirmed)
+  expect(existsSync(config)).toBe(!confirmed)
+  expect(server.panes.has(worker.pane_id)).toBe(!confirmed)
+  // Shutdown never erases the durable operation receipt/tombstone.
+  expect(readFileSync(journal, 'utf8')).toBe(ownership)
+  if (!confirmed) {
+    server.closeMode = 'normal'
+    await shutdownAllPersistentRepls()
+    expect(session.hasChildExited()).toBe(true)
+    expect(ephemeralSessions.has(session)).toBe(false)
+    expect(existsSync(config)).toBe(false)
+  }
+}, 15000)
+
 test('missing strict manager refuses compose without an ambient layout', async () => {
   const { server, wired } = rig(false)
   const events = await collect(wired.makeComposeSubstrate('one')!.start(spec('ok')))

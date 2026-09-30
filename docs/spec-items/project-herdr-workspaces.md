@@ -107,7 +107,8 @@ Gateway restart preserves active work and is not a sleep event.
       fresh toolless worker in its explicit project's named task tab. Settlement,
       cancellation and failure retire that worker without disturbing Chat or
       deleting conversation history. Unknown closure retains cleanup identity
-      until exit is confirmed; an ambiguous placement retains its operation
+      until exit is confirmed, including through the gateway shutdown sweep;
+      an ambiguous placement retains its operation
       reservation rather than launching a duplicate retry. Verify:
       `open/__tests__/project-compose-lifecycle.test.ts`, including warm Chat,
       missing-manager, lost-reply and unconfirmed-close controls.

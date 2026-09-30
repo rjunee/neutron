@@ -22,9 +22,13 @@ Normal settlement, cancellation and worker failure use the existing disposable
 driver finalizer. `runtime/adapters/claude-code/persistent/pool.ts:604` now retains
 the cleanup session and configuration when its bounded termination attempt cannot
 confirm death. A later confirmed exit releases them. The result stream still
-settles before asynchronous disposal completes. This change does not alter the
-gateway shutdown sweep, native child admission, Chat retirement authority, or
-historical pane migration. The existing worker operation journal retains its
+settles before asynchronous disposal completes. The gateway's disposable-worker
+shutdown sweep at `runtime/adapters/claude-code/persistent/pool.ts:1903` uses this
+same bounded cleanup concurrently; an unconfirmed close
+retains its session and configuration instead of clearing the set or unlinking
+live worker files. A later confirmed shutdown retry releases them. Native child
+admission, ordinary parent shutdown survival, Chat retirement authority and
+historical pane migration are unchanged. The existing worker operation journal retains its
 reservation/tombstone; this slice adds no automatic boot recovery for an
 unconfirmed disposable-worker close. Workspace sleep and deployed acceptance
 remain open on the normative item.
@@ -34,12 +38,14 @@ drives production composition through the real persistent adapter, Herdr host an
 workspace manager over a scripted RPC server and local native-channel fixture.
 It checks actual pane/tab placement, empty native tools, fresh per-call replies,
 warm Chat continuity, cancellation, process failure, lost close replies, retained
-cleanup after refused closes, missing-manager refusal, durable ambiguous operation
+cleanup after refused closes and shutdown, confirmed shutdown cleanup,
+missing-manager refusal, durable ambiguous operation
 retry refusal, and conflicting conversation metering. The related wiring,
 background isolation, disposable-worker, workspace and Herdr placement/exit suites
 also pass. Root and Trident TypeScript checks and changed-file ESLint pass.
 
-Three deliberate mutations each produced an assertion failure: restoring warm
+Five deliberate mutations each produced an assertion failure: restoring warm
 compose, dropping cleanup tracking before confirmed exit, and omitting explicit
-compose terminal placement. Restoring the implementation returns the focused
+compose terminal placement, restoring unconfirmed shutdown cleanup, and omitting
+shutdown termination. Restoring the implementation returns the focused
 suite to green. No live model call or deployed lifecycle result is claimed.

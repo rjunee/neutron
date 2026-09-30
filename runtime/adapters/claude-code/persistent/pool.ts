@@ -1896,20 +1896,13 @@ export async function shutdownAllPersistentRepls(
   await confirmShutdownExits(awaitingExit)
   // Terminate in-flight EPHEMERAL one-shots too (Argus r5 IMPORTANT): they are
   // never pooled, so the pool loop above misses them — a disposable child mid-turn
-  // at shutdown would orphan its process + leak its temp configs.
-  for (const session of ephemeralSessions) {
-    try {
-      session.sizeWatchdog?.stop()
-      session.child.kill()
-      sink.unregister(session.sessionId)
-      unlinkSessionConfigs(session)
-    } catch {
-      // ignore
-    }
-  }
-  ephemeralSessions.clear()
-  // PHASE 3 — every child is now marked and killed, so the live reports can be
-  // attempted with no child's fate behind them. Bounded per sink AND across the
+  // at shutdown would orphan its process + leak its temp configs. Apply the same
+  // confirmed cleanup as normal settlement, concurrently so one child's bounded
+  // termination wait cannot delay signalling the others. Unknown exits retain
+  // their session/configuration and durable workspace operation evidence.
+  await Promise.all([...ephemeralSessions].map(disposeEphemeralSession))
+  // PHASE 3 — teardown attempts are complete, so live reports can be attempted
+  // with no child's termination attempt behind them. Bounded per sink AND across the
   // phase; anything abandoned here is still attributed on the next boot from the
   // marker phase 1 wrote, which is what the marker is for.
   await deliverShutdownKillReports(owedReports)
