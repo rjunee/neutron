@@ -87,6 +87,8 @@ test('native continuation claims once across database connections and retains th
   const restart = new ProjectAdmission({ db: reopened, ownerHandle: 'owner', bootId: 'restart' })
   const original = f.port.continuation!(request, receipt)!
   const recovered = restart.forNativeChild(null).continuation!(request, receipt)!
+  expect(original.current()).toBe(true)
+  expect(recovered.current()).toBe(true)
   expect(original.read()).toBeUndefined()
   const claims = await Promise.all([original.claim('original-preparation'), recovered.claim('second-preparation')])
   expect(claims.filter(Boolean)).toHaveLength(1)
@@ -103,7 +105,9 @@ test('native continuation refuses a fence installed after authentication and can
   f.authority.record({ kind: 'submission-started' })
   const receipt = f.authority.record({ kind: 'child-bound', nativeAgentId: 'child' })
   const continuation = f.port.continuation!(request, receipt)!
+  expect(continuation.current()).toBe(true)
   await f.admission.maintenance.beginMaintenance(f.admission.scopeFor(null))
+  expect(continuation.current()).toBe(false)
   expect(await continuation.claim('must-not-send')).toBe(false)
   expect(continuation.read()).toBeUndefined()
   expect(f.admission.listLeases('liveChild')).toHaveLength(1)

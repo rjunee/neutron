@@ -36,7 +36,15 @@ observation enters the new child's signed original receipt. Mutable registry
 labels alone never provide launch evidence; an Agent-only survivor remains
 unavailable. Executable/argv adoption does not authenticate the survivor's
 effective authentication. Without the original fresh host file-auth observation,
-capacity admission stays UNKNOWN even when the tool launch is known.
+capacity admission stays UNKNOWN even when the tool launch is known. A gateway
+restart may recover that original observation from its authenticated dispatch
+receipt: the versioned descriptor contains only source paths/selectors, never an
+environment map, credential bytes or credential digest. Recovery requires the
+exact original PID, kernel start ticks and boot ID, recorded session and launch
+generation, and the current durable admission authorization epoch. Mutable
+settings sources must still match; all checks repeat before capacity and input.
+This grants no restoration authority to old parents lacking the descriptor, or
+to processes recreated after a host reboot.
 
 A lost acknowledgement or restart makes the saved attempt observation-only.
 Authorized startup restoration may change the parent process generation while
@@ -67,6 +75,12 @@ stable regular-file reader; symlinks, FIFOs and changing snapshots refuse safely
 - [ ] An adopted parent without a fresh host authentication observation refuses
       capacity input, as does an adopted Agent-only parent. Independently observed
       executable/argv alone cannot authorize selection. Verify: the same consuming suite.
+- [ ] A gateway survivor with an authenticated original source descriptor reaches
+      the existing merge gates with exactly one same-child continuation. Missing
+      or tampered receipts, missing original descriptors, changed source settings,
+      PID/start/boot identity or authorization epoch refuse; a postclaim restart
+      never resends. Verify: the consuming suite's restart positive/refusal and
+      `runtime/workers/claude-native-continuation.test.ts`.
 - [ ] Completed and invalid current results take precedence; ordinary errors,
       foreign request/receipt/lease/launch, fencing and expired budget cannot send.
       A concurrent claimant, lost acknowledgement and a newly constructed observer

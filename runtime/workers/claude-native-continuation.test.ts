@@ -20,7 +20,8 @@ import { observeNativeFileAuth } from '../adapters/claude-code/persistent/native
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 
-async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' | 'wrong-digest' | 'wrong-version' | 'adopted' | 'adopted-unavailable' = 'valid') {
+async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' | 'wrong-digest' | 'wrong-version' | 'adopted' | 'adopted-unavailable' = 'valid',
+  witness?: 'legacy' | 'reboot' | 'changed-start') {
   const capacity = await capacityFixture()
   cleanup.push(() => capacity.close())
   const dir = await mkdtemp(join(tmpdir(), 'native-continuation-'))
@@ -63,9 +64,13 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
     reason: 'liveChild', producer: `native-child:boot:${signer.keyDigest}`, workRef: JSON.stringify(['run', 'build:0']) }
   const authority = signer.begin(lease, request)
   authority.prepare()
-  const originalLaunch = readNativeParentLaunchEvidence(session)
+  const originalLaunch = structuredClone(readNativeParentLaunchEvidence(session))
+  const originalIdentity = readProcessIdentity(process.pid)!
+  if (witness === 'legacy' && originalLaunch?.fileAuth) delete originalLaunch.fileAuth.source
+  if (witness === 'reboot') originalIdentity.boot_id = 'previous-boot'
+  if (witness === 'changed-start') originalIdentity.start_ticks++
   authority.record({ kind: 'parent-bound', parent: { sessionId: 'parent', childGeneration: 'generation', pid: process.pid,
-    processIdentity: readProcessIdentity(process.pid) ?? null, ...(originalLaunch ? { launch: originalLaunch } : {}) } })
+    processIdentity: originalIdentity, ...(originalLaunch ? { launch: originalLaunch } : {}) } })
   authority.record({ kind: 'submission-started' })
   const receipt = authority.record({ kind: 'child-bound', nativeAgentId: 'child' })
   const projectsDir = join(dir, 'projects'), transcript = sessionJsonlPath('parent', cwd, projectsDir)
@@ -82,7 +87,7 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
   let saved: string | undefined
   const options: ClaudeContinuationOptions = { request, receipt, stateDir, session, workspace, projectsDir,
     capacity: { configDir: capacity.configDir, env: {}, acquire: capacity.acquire },
-    authority: { lease, read: () => saved, claim: async value => { if (saved !== undefined) return false; saved = value; return true } },
+    authority: { lease, current: () => true, read: () => saved, claim: async value => { if (saved !== undefined) return false; saved = value; return true } },
     signal: new AbortController().signal, deadline: Date.now() + 5000,
     decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, { schemas: new Map([['fixture', result => result === 'done']]), metadata: () => undefined }) }
   const invoke = (input = options) => continueClaudeNativeChild(input)
@@ -192,8 +197,55 @@ test('adoption without fresh launch memory requires the exact signed original pr
   expect(await f.invoke(adopted)).toEqual({ kind: 'unknown', reason: 'launch-unknown' })
   expect(f.inputs).toHaveLength(0)
   adopted.session.attachChild(f.session.child)
-  expect(await f.invoke(adopted)).toEqual({ kind: 'unknown', reason: 'capacity-unavailable' })
+  expect(await f.invoke(adopted)).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('gateway survivor rechecks source settings and current authorization before capacity', async () => {
+  const f = await fixture()
+  const restored = await f.restore(false)
+  restored.authority = { ...restored.authority, current: () => false }
+  expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'capacity-unavailable' })
+  restored.authority = f.options.authority
+  await writeFile(join(f.capacity.configDir, 'settings.json'), JSON.stringify({ apiKeyHelper: 'never-run' }))
+  expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'capacity-unavailable' })
   expect(f.inputs).toHaveLength(0)
+  expect(f.saved()).toBeUndefined()
+})
+
+test.each(['legacy', 'reboot', 'changed-start'] as const)('gateway survivor refuses authenticated but unusable %s witness', async witness => {
+  const f = await fixture('valid', witness)
+  expect(await f.invoke(await f.restore(false))).toMatchObject({ kind: 'unknown' })
+  expect(f.saved()).toBeUndefined(); expect(f.inputs).toHaveLength(0)
+})
+
+test.each(['missing', 'tampered'] as const)('gateway survivor requires the original authenticated receipt: %s', async mode => {
+  const f = await fixture(), restored = await f.restore(false)
+  if (mode === 'missing') restored.receipt = undefined
+  else {
+    const receipt = JSON.parse(JSON.stringify(restored.receipt))
+    receipt.body.parent.launch.fileAuth.source.home = '/other-source'
+    restored.receipt = receipt
+  }
+  expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'identity-unknown' })
+  expect(f.saved()).toBeUndefined(); expect(f.inputs).toHaveLength(0)
+})
+
+test('gateway survivor rechecks authorization after capacity and never refunds a postclaim attempt', async () => {
+  const f = await fixture(), restored = await f.restore(false)
+  let current = true
+  restored.authority = { ...restored.authority, current: () => current }
+  restored.capacity = { ...restored.capacity!, acquire: async request => {
+    const result = await f.capacity.acquire(request); current = false; return result
+  } }
+  expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'capacity-unavailable' })
+  expect(f.saved()).toBeUndefined(); expect(f.inputs).toHaveLength(0)
+  current = true; restored.capacity = f.options.capacity!
+  restored.session.child.submitLine = async line => { f.inputs.push(line); throw Error('lost acknowledgement') }
+  expect(await f.invoke(restored)).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
+  const again = await f.restore(false)
+  expect(await f.invoke(again)).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
+  expect(f.inputs).toHaveLength(1)
 })
 
 test('a reconstructed workspace continues the same yielded native child in its live session', async () => {

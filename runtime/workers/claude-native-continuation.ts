@@ -17,6 +17,7 @@ import type { ProjectTrailerOutcome } from './project-runners.ts'
 import { nativeChildContinuationCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
 import { acquireClaudeCapacity, type AcquireClaudeCapacity, type ClaudeCapacityReceipt } from './claude-capacity-client.ts'
 import { NATIVE_CONTINUATION_PROFILE, nativeModelPin } from '../adapters/claude-code/persistent/native-model-launch.ts'
+import { restoreNativeFileAuth } from '../adapters/claude-code/persistent/native-file-auth.ts'
 
 type Boundary = { offset: number; dev: number; ino: number; prefixDigest: string }
 interface Preparation {
@@ -41,7 +42,7 @@ export type ClaudeContinuationOutcome = { kind: 'result'; outcome: BoundedWorkOu
 export interface ClaudeContinuationOptions {
   request: BoundedWorkRequest
   receipt: unknown
-  authority: { lease: NativeDispatchLease; read(): string | undefined; claim(preparation: string): Promise<boolean> }
+  authority: { lease: NativeDispatchLease; current(): boolean; read(): string | undefined; claim(preparation: string): Promise<boolean> }
   stateDir: string
   session: Pick<ReplSession, 'sessionId' | 'childGeneration' | 'cwd' | 'child' | 'toolSurface' | 'acquireContinuationTurn' | 'hasChildExited'>
   workspace: NativeChildWorkspace
@@ -140,6 +141,8 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
     if (!session.toolSurface.split(',').includes(SUBAGENT_CONTINUATION_TOOL_NAME)) return unknown('tool-unavailable')
     const parent = receipt.body.parent!
     if (!knownLaunch(parent.launch, parent.sessionId, parent.childGeneration, authority.lease.scope.projectId)) return unknown('launch-unknown')
+    const exactSurvivor = () => parent.sessionId === session.sessionId && parent.pid === session.child.pid
+      && isProcessIdentity(parent.processIdentity) && isDeepStrictEqual(readProcessIdentity(session.child.pid), parent.processIdentity)
     const currentParentKnown = () => {
       const currentLaunch = readNativeParentLaunchEvidence(session)
       return session.toolSurface.split(',').includes(SUBAGENT_CONTINUATION_TOOL_NAME) && (currentLaunch
@@ -159,13 +162,21 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
       if (!ownsNativeChildWorkspace(options.workspace, session, request) || !nativeChildContinuationCensusKnown(options.workspace)
         || !isDeepStrictEqual(await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request), quota)) return unknown('identity-unknown')
       if (!currentParentKnown()) return unknown('launch-unknown')
-      const auth = readNativeParentFileAuth(session)
+      // A durable source descriptor is usable only under the authenticated
+      // original receipt/lease and exact surviving process, never a replacement.
+      const restored = !readNativeParentLaunchEvidence(session)?.fileAuth && exactSurvivor() && parent.launch?.fileAuth
+        ? restoreNativeFileAuth(parent.launch.fileAuth) : undefined
+      const observedAuth = readNativeParentFileAuth(session)
+      const sourceAuth = observedAuth ?? restored
+      const auth = sourceAuth && { evidence: sourceAuth.evidence,
+        current: () => authority.current() && sourceAuth.current() && (observedAuth !== undefined || exactSurvivor()) }
       if (!options.capacity || !auth || !parent.launch?.fileAuth
+        || !auth.current()
         || !isDeepStrictEqual(parent.launch.fileAuth, auth.evidence)
         || options.capacity.configDir !== auth.evidence.configDir) return unknown('capacity-unavailable')
       let modelId = request.model_id
       if (!modelId.startsWith('claude-')) {
-        const model = parent.launch.model, current = readNativeParentLaunchEvidence(session)?.model
+        const model = parent.launch.model, current = readNativeParentLaunchEvidence(session)?.model ?? (exactSurvivor() ? model : undefined)
         if (!model || model.selector !== modelId || !isDeepStrictEqual(nativeModelPin(model), model)
           || !isDeepStrictEqual(current, model)
           || parent.launch.argv.flatMap((arg, i) => arg === '--model' ? [parent.launch!.argv[i + 1]] : []).join() !== model.modelId) return unknown('capacity-unavailable')

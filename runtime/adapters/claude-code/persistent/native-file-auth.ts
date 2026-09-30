@@ -2,7 +2,17 @@ import { createHash } from 'node:crypto'
 import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 
-export interface NativeFileAuthEvidence { configDir: string; settingsDigest: string }
+/** Paths/selectors only. Never persist an environment map or credential material.
+ * Authority comes exclusively from the original signed native dispatch receipt. */
+export interface NativeFileAuthSource {
+  version: 1
+  cwd: string
+  home?: string
+  xdgConfigHome?: string
+  policyDir: string
+  settings: string[]
+}
+export interface NativeFileAuthEvidence { configDir: string; settingsDigest: string; source?: NativeFileAuthSource }
 export interface NativeFileAuthObservation { evidence: NativeFileAuthEvidence; current(): boolean }
 
 /** No credential values are retained. Unknown host/descriptor/provider routes
@@ -81,7 +91,29 @@ export function observeNativeFileAuth(input: { cwd: string; argv: readonly strin
       }
       return digest.digest('hex')
     }
-    const evidence = Object.freeze({ configDir: config, settingsDigest: snapshot() })
+    const evidence = Object.freeze({ configDir: config, settingsDigest: snapshot(), source: {
+      version: 1 as const, cwd: resolve(input.cwd), policyDir, settings: settings as string[],
+      ...(input.env.HOME ? { home: input.env.HOME } : {}),
+      ...(input.env.XDG_CONFIG_HOME ? { xdgConfigHome: input.env.XDG_CONFIG_HOME } : {}),
+    } })
     return { evidence, current() { try { return snapshot() === evidence.settingsDigest } catch { return false } } }
+  } catch { return undefined }
+}
+
+/** Only invoke after authenticating the original receipt and its exact surviving
+ * process. This rechecks mutable source files; it does not rediscover credentials. */
+export function restoreNativeFileAuth(evidence: NativeFileAuthEvidence): NativeFileAuthObservation | undefined {
+  try {
+    const source = evidence.source
+    if (!source || source.version !== 1 || !isAbsolute(source.cwd) || !isAbsolute(source.policyDir)
+      || source.home !== undefined && !isAbsolute(source.home)
+      || source.xdgConfigHome !== undefined && !isAbsolute(source.xdgConfigHome)
+      || !Array.isArray(source.settings) || source.settings.length > 1
+      || source.settings.some(path => typeof path !== 'string' || !isAbsolute(path))) return undefined
+    const observation = observeNativeFileAuth({ cwd: source.cwd,
+      argv: source.settings.flatMap(path => ['--settings', path]),
+      env: { CLAUDE_CONFIG_DIR: evidence.configDir, ...(source.home ? { HOME: source.home } : {}),
+        ...(source.xdgConfigHome ? { XDG_CONFIG_HOME: source.xdgConfigHome } : {}) } }, source.policyDir)
+    return observation?.evidence.settingsDigest === evidence.settingsDigest ? observation : undefined
   } catch { return undefined }
 }

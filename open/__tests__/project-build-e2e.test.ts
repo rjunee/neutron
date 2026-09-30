@@ -1026,7 +1026,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
-  nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable'
+  nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable' | 'restart'
   nativeCapacity?: string
   nativeQueuedOrdinary?: boolean
   verdictRepair?: WorkerWorld['verdictRepair']
@@ -1305,6 +1305,13 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
         isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-request' }) + '\n')
       if (options.nativeQueuedOrdinary) emitQuota = rejectQuota
       else await rejectQuota()
+      if (options.nativeContinuation === 'restart') {
+        // New gateway session object has no launch/auth WeakMap entries. The
+        // original receipt still binds the exact live process and native child.
+        registeredSession = { ...session, childGeneration: 'gateway-recovered-generation' }
+        pool.set(key, Promise.resolve(registeredSession as unknown as ReplSession))
+        if (options.nativeCapacity === 'restart-changed-settings') await writeFile(join(capacity!.configDir, 'settings.json'), '{}')
+      }
       world.dispatches.push({ role: request.role, step_id: request.step_id, schema: request.result.schema, wrote: [] })
     } }, acquireTurn: async () => () => {}, acquireContinuationTurn: async () => () => {} }
 
@@ -7463,8 +7470,8 @@ test('a typed subscription quota-limited synthesis stops without quotaLimits enr
   expect(originMain.stdout).toBe(f.baseSha)
 }, 30_000)
 
-test.each(['fresh', 'queued', 'alias'] as const)('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates: %s', async parent => {
-  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeQueuedOrdinary: parent === 'queued',
+test.each(['fresh', 'queued', 'alias', 'restart'] as const)('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates: %s', async parent => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: parent === 'restart' ? 'restart' : 'available', nativeQueuedOrdinary: parent === 'queued',
     ...(parent === 'alias' ? { nativeCapacity: 'alias' } : {}) })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('merged')
@@ -7472,6 +7479,7 @@ test.each(['fresh', 'queued', 'alias'] as const)('native same-ID continuation co
   expect(f.nativeInputs.filter(line => line.includes('synthesis:'))).toHaveLength(1)
   expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(1)
   const saved = f.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations')!
+  if (parent === 'restart') expect(JSON.parse(saved.preparation).childGeneration).toBe('gateway-recovered-generation')
   expect(JSON.parse(saved.preparation).capacity.body).toMatchObject({ kind: 'claude-capacity',
     modelId: parent === 'alias' ? 'claude-fable-5-1' : 'claude-opus-4-6', childId: 'quota', accountGeneration: 'a'.repeat(64), status: 'available' })
   if (parent === 'alias') expect(JSON.parse(saved.preparation).request.model_id).toBe('fable')
@@ -7490,8 +7498,8 @@ for (const mode of ['unavailable', 'foreign-launch', 'lost-ack', 'adopted', 'ado
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 30_000)
 
-test.each(['all-full', 'unknown', 'forged', 'wrong-modelId', 'wrong-childId', 'wrong-leaseId', 'wrong-eventDigest', 'wrong-requestDigest', 'wrong-instanceId', 'wrong-bootId', 'wrong-challenge', 'stale', 'disconnect', 'competing-auth', 'inherited-socket', 'key-fd', 'helper', 'settings-env', 'changed-settings', 'foreign-process', 'alias-missing', 'alias-invalid-pin', 'alias-auth-source', 'alias-parent-conflict', 'alias-force'])('native capacity refuses %s without spending continuation or child ownership', async mode => {
-  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeCapacity: mode })
+test.each(['all-full', 'unknown', 'forged', 'wrong-modelId', 'wrong-childId', 'wrong-leaseId', 'wrong-eventDigest', 'wrong-requestDigest', 'wrong-instanceId', 'wrong-bootId', 'wrong-challenge', 'stale', 'disconnect', 'competing-auth', 'inherited-socket', 'key-fd', 'helper', 'settings-env', 'changed-settings', 'restart-changed-settings', 'foreign-process', 'alias-missing', 'alias-invalid-pin', 'alias-auth-source', 'alias-parent-conflict', 'alias-force'])('native capacity refuses %s without spending continuation or child ownership', async mode => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: mode === 'restart-changed-settings' ? 'restart' : 'available', nativeCapacity: mode })
   const outcome = await drive(f)
   expect(outcome.kind, why(f, outcome)).toBe('blocked')
   expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(0)

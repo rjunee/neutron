@@ -44,6 +44,17 @@ export class ProjectAdmissionStore {
     return this.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations WHERE lease_token = ?', [lease.token])?.preparation;
   }
 
+  /** Recheck the original authorization epoch before capacity and parent input. */
+  nativeContinuationCurrent(lease: AdmissionLeaseRow): boolean {
+    const key = scopeKey(lease.scope);
+    if (this.hasPreparedHostTermination(lease.scope)) return false;
+    return Boolean(this.db.get(`SELECT 1 FROM project_admission_leases l
+      JOIN project_admission_fences f ON f.scope_key = l.scope_key
+      WHERE l.token = ? AND l.scope_key = ? AND l.generation = ? AND l.reason = 'liveChild'
+        AND l.producer = ? AND l.work_ref = ? AND f.phase = 'open' AND f.generation = l.generation`,
+    [lease.token, key, lease.generation, lease.producer, lease.workRef]));
+  }
+
   /** Claim before any parent input. An existing claim is observation-only forever. */
   async claimNativeContinuation(lease: AdmissionLeaseRow, preparation: string): Promise<boolean> {
     return this.db.transaction(async tx => {

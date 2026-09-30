@@ -2,7 +2,7 @@ import { afterEach, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { observeNativeFileAuth } from '../native-file-auth.ts'
+import { observeNativeFileAuth, restoreNativeFileAuth } from '../native-file-auth.ts'
 
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
@@ -18,10 +18,13 @@ async function fixture() {
 test('fresh clean file-auth source observation is credential-free and settings changes revoke it', async () => {
   const f = await fixture(), observed = f.observe()
   expect(observed?.current()).toBe(true)
-  expect(observed?.evidence).toEqual({ configDir: f.config, settingsDigest: expect.stringMatching(/^[a-f0-9]{64}$/) })
+  expect(observed?.evidence).toEqual({ configDir: f.config, settingsDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    source: { version: 1, cwd: f.cwd, home: f.root, policyDir: f.policy, settings: [f.explicit] } })
+  expect(restoreNativeFileAuth(JSON.parse(JSON.stringify(observed!.evidence)))?.current()).toBe(true)
   await writeFile(f.explicit, JSON.stringify({ hooks: {}, env: { ANTHROPIC_API_KEY: 'test-only' } }))
   expect(observed?.current()).toBe(false)
   expect(f.observe()).toBeUndefined()
+  expect(restoreNativeFileAuth(observed!.evidence)).toBeUndefined()
 })
 
 test.each(['ANTHROPIC_UNIX_SOCKET', 'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR', 'ANTHROPIC_PROFILE', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR', 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE'])('inherited %s is not file authentication', async key => {

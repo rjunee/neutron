@@ -46,6 +46,7 @@ export interface NativeChildAdmission {
   /** Authenticated original child only; continuation never acquires another lease. */
   continuation?(request: BoundedWorkRequest, receipt: unknown): {
     lease: NativeDispatchLease
+    current(): boolean
     read(): string | undefined
     claim(preparation: string): Promise<boolean>
   } | undefined
@@ -188,7 +189,7 @@ export class ProjectAdmission {
         const row = rows[0]!;
         const lease = { ...row, reason: 'liveChild' as const };
         if (!verifyNativeDispatchChildBound(receipt, request, lease)) return undefined;
-        return { lease, read: () => this.store.readNativeContinuation(row),
+        return { lease, current: () => this.store.nativeContinuationCurrent(row), read: () => this.store.readNativeContinuation(row),
           claim: preparation => this.store.claimNativeContinuation(row, preparation) };
       },
       dispatchAuthority: (lease, request) => {
