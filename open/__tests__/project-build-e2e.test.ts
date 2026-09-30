@@ -8979,16 +8979,21 @@ test('native queued writer execution expiry preserves exact child recovery witho
   const options = await f.prepare()
   const release = await f.session.acquireTurn()
   const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.row.id,
-    step_id: `${f.row.id}:queued-expiry`, role: 'build', needs_approval_decision: false, budget: { wall_ms: 1_000 } }
+    step_id: `${f.row.id}:queued-expiry`, role: 'build', needs_approval_decision: false, budget: { wall_ms: 2_000 } }
   const signal = new AbortController().signal
   const runner = options.substrate.inRepl!
+  const startedAt = Date.now()
   const running = runner.run(request, 'in-repl', signal)
   try {
     for (let n = 0; n < 100 && (f.session as ReplSession).turnSlotHeld < 2; n++) await Bun.sleep(5)
     expect((f.session as ReplSession).turnSlotHeld).toBe(2)
-    await Bun.sleep(600)
+    await Bun.sleep(1_500)
     release()
     expect((await running).kind).toBe('unknown')
+    // The host may reimburse the measured writer wait once, not buy a second
+    // execution budget. A doubled queue credit would keep this hung child
+    // waiting beyond the bound while still eventually returning `unknown`.
+    expect(Date.now() - startedAt).toBeLessThan(4_800)
     expect(children).toBe(1)
     expect(f.admission.listLeases('liveChild')).toHaveLength(1)
     releaseChild()

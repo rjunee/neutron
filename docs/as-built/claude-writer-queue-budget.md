@@ -32,6 +32,15 @@ outcome. Crediting expired or cancelled acquisition makes all three negative
 budget controls fail; restored controls pass. Root and Trident TypeScript checks
 passed.
 
+The full consuming file passed 516 tests and 7,300 assertions on the frozen
+implementation head. A subsequent consuming-test-only refinement bounded the
+hung child's elapsed time after its real writer wait: doubling the shared queue
+credit turned that test red at 5,028 ms against a 4,800 ms bound, while the
+restored implementation passed. Doubling only the actor-local deadline did not
+extend the outer runner's wall and stayed green, confirming the runner remains
+the controlling boundary. The full consuming file has not been repeated after
+this test-only refinement; exact-head CI is still required before merge.
+
 This budget repair does not itself introduce parallel builds. Existing
 `runtime/adapters/claude-code/persistent/repl-session.ts:553` admits overlapping
 children only under its workspace independence contract; other writers remain
