@@ -9,14 +9,20 @@ import { pool } from '../pool-state.ts'
 import { lifecycleReplHost } from './lifecycle-repl-host.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { classifyPaneForAdoption } from '../orphan-adoption.ts'
+import { setNativeChildLiveness } from '../native-child-liveness.ts'
 
 let dir: string
+const launchOwner = 'native-launch-evidence-owner'
 const body = '#!/bin/sh\nprintf "2.1.285 (Claude Code)\\n"\n'
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'native-launch-'))
   writeFileSync(join(dir, 'claude'), body, { mode: 0o700 })
 })
-afterEach(async () => { await shutdownAllPersistentRepls(); rmSync(dir, { recursive: true, force: true }) })
+afterEach(async () => {
+  setNativeChildLiveness(launchOwner, undefined)
+  await shutdownAllPersistentRepls()
+  rmSync(dir, { recursive: true, force: true })
+})
 const input = () => ({ sessionId: 'session', childGeneration: 'generation', projectId: 'project',
   argv: ['claude', '--session-id', 'session', '--tools', 'Agent,SendMessage'],
   tools: ['Agent', 'SendMessage'], cwd: dir, env: { PATH: dir } })
@@ -82,10 +88,14 @@ test('executable replacement during spawn invalidates observation; next launch r
 })
 
 test('production spawn records only explicitly granted project launches after the host accepts argv', async () => {
+  // Composition fixtures can leave a census over a closed database for `owner`.
+  // This launch fixture owns its empty census and checks the scope actually read.
+  const scopes: Array<string | null> = []
+  setNativeChildLiveness(launchOwner, scope => { scopes.push(scope); return false })
   for (const [project, tools] of [[true, ['Agent', 'SendMessage']], [true, ['Agent']], [false, ['Agent', 'SendMessage']]] as const) {
     const fake = lifecycleReplHost()
     const argvs: string[][] = []
-    const options = { substrate_instance_id: `launch-${project}-${tools.length}`, user_id: 'owner',
+    const options = { substrate_instance_id: `launch-${project}-${tools.length}`, user_id: launchOwner,
       project_id: project ? 'project' : 'general', conversationProjectId: project ? 'project' : null,
       cwd: dir, claude_bin: join(dir, 'claude'), skipTrustSeed: true, idleQuietMs: 0,
       captureConfig: { maxAttempts: 1, attemptDelayMs: 1 },
@@ -109,4 +119,5 @@ test('production spawn records only explicitly granted project launches after th
       expect(evidence!.tools).toEqual(tools)
     } else expect(evidence).toBeUndefined()
   }
+  expect(scopes).toEqual(['project', 'project', null])
 })
