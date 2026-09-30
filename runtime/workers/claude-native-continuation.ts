@@ -3,6 +3,7 @@ import { constants } from 'node:fs'
 import { open, type FileHandle } from 'node:fs/promises'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
@@ -77,7 +78,7 @@ function watchCancellation(options: ClaudeContinuationOptions, workSignal: Abort
         || saved.receiptSignature !== (options.receipt as SignedNativeDispatchRecord).signature) return
       // The work signal is already aborted; cancellation has a separate bounded
       // control exchange and cannot enable any model request.
-      void control({ ...common, ...saved.intent, action: 'cancel', signal: AbortSignal.timeout(1000), deadline: Date.now() + 1000 }).catch(() => {})
+      fireAndForget('claude-native-continuation.cancel', control({ ...common, ...saved.intent, action: 'cancel', signal: AbortSignal.timeout(1000), deadline: Date.now() + 1000 }))
     } catch { /* A missing cancellation acknowledgement grants no new input. */ }
   }
   const expiry = setTimeout(cancel, Math.max(1, common.deadlineMs - Date.now()))

@@ -9059,6 +9059,13 @@ test('native queued writer execution expiry preserves exact child recovery witho
     // The host may reimburse the measured writer wait once, not buy a second
     // execution budget. A doubled queue credit would keep this hung child
     // waiting beyond the bound while still eventually returning `unknown`.
+    // WALL-CLOCK-BOUND-OK: this consuming test covers the real REPL writer queue
+    // and host expiry timers, which have no shared injected timer clock. The same
+    // unknown result, child count and retained lease also occur with doubled
+    // queue credit, so those deterministic assertions cannot replace this bound.
+    // A lawful 1.5s writer wait plus 2s execution leaves 1.3s scheduling margin
+    // below 4.8s; another 1.5s credit crosses it. This checks budget enforcement,
+    // not throughput; the original bound and real timer mechanism stay intact.
     expect(Date.now() - startedAt).toBeLessThan(4_800)
     expect(children).toBe(1)
     expect(f.admission.listLeases('liveChild')).toHaveLength(1)

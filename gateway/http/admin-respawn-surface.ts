@@ -23,6 +23,7 @@ import {
   type AdminRespawnRateState,
 } from '@neutronai/runtime/adapters/claude-code/persistent/admin-respawn-session.ts'
 import type { RespawnOutcome } from '@neutronai/runtime/adapters/claude-code/persistent/session-respawn.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface AdminRespawnSurfaceInput {
   /** Expected operator token — request must present it in `X-Gateway-Token`. */
@@ -58,7 +59,7 @@ async function readCapAuthorization(req: Request): Promise<unknown> {
       chunks.push(next.value)
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'))
-  } finally { void reader.cancel().catch(() => {}); reader.releaseLock() }
+  } finally { fireAndForget('admin-respawn-surface.cancel-authorization-reader', reader.cancel()); reader.releaseLock() }
 }
 
 export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): AdminRespawnSurface {
