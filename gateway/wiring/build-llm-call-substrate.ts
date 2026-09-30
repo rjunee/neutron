@@ -1,4 +1,5 @@
 import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
+import { randomUUID } from 'node:crypto'
 import { actingTurnProjectId } from './conversation-scope.ts'
 import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/configured-chat/index.ts'
 /**
@@ -387,6 +388,9 @@ export interface BuildLlmCallSubstrateInput {
    * the shared strict host. Absent (off Herdr, tests) ⇒ the configured host, as before.
    */
   conversationTerminal?: ConversationTerminal
+  /** A disposable task uses the same strict project host, in its own named worker
+   * tab. Each start reserves one operation identity, also used by spawn retries. */
+  taskTerminal?: { terminal: ConversationTerminal; projectId: string | null; taskLabel: string }
   /**
    * The project-scope lifecycle owner (#1226). Honoured ONLY with `ownerConversation`
    * and a defined conversation scope: the scope's Chat credential is pinned while
@@ -1187,6 +1191,10 @@ export function buildLlmCallSubstrate(
     },
     start(spec: AgentSpec): SessionHandle {
       if (retired) throw new Error('Helper session lifecycle has completed')
+      if (input.taskTerminal !== undefined && (input.ephemeral !== true || input.ownerConversation === true || spec.session !== undefined)) {
+        throw new Error('Task terminal requires a disposable session-less worker')
+      }
+      const taskOperationId = input.taskTerminal === undefined ? undefined : randomUUID()
       // SWAPPABLE PROVIDER — resolve the backend for THIS turn. A NON-EMPTY per-turn
       // resolver value wins (active-project provider); an EMPTY/whitespace resolver
       // result means "no dynamic override this turn" → defer to the statically
@@ -1198,11 +1206,11 @@ export function buildLlmCallSubstrate(
       const chat = input.configuredChat
       // General is explicitly null in the conversation scope. The legacy pool's
       // 'general' sentinel must never select a real project's provider override.
-      const conversationProjectId = input.conversationProjectId !== undefined
+      const conversationProjectId = input.taskTerminal !== undefined ? undefined : input.conversationProjectId !== undefined
         ? input.conversationProjectId : spec.metering_context?.conversationProjectId !== undefined
           ? spec.metering_context.conversationProjectId
           : (input.ownerConversation ? input.projectIdResolver?.() ?? actingTurnProjectId(spec) : undefined)
-      const projectId = conversationProjectId !== undefined
+      const projectId = input.taskTerminal !== undefined ? input.taskTerminal.projectId ?? undefined : conversationProjectId !== undefined
         ? conversationProjectId ?? undefined
         : input.projectIdResolver?.() ?? spec.metering_context?.project_id
       const resolvedSelection = conversationProjectId !== undefined
@@ -1355,7 +1363,8 @@ export function buildLlmCallSubstrate(
         const cred = { id: resolved.cred_id }
         const opts = await claudeOptionsFor(
           input, resolved,
-          () => conversationProjectId !== undefined ? conversationProjectId ?? 'general'
+          () => input.taskTerminal !== undefined ? input.taskTerminal.projectId ?? 'general'
+            : conversationProjectId !== undefined ? conversationProjectId ?? 'general'
             : input.projectIdResolver?.() ?? spec.metering_context?.project_id,
           () => {
             // A Claude turn invalidates this scope's OpenAI continuation before
@@ -1373,6 +1382,14 @@ export function buildLlmCallSubstrate(
         if (conversationProjectId !== undefined) {
           opts.conversationProjectId = conversationProjectId
           placeConversation(opts, input, conversationProjectId)
+        }
+        if (input.taskTerminal !== undefined) {
+          const { terminal, taskLabel } = input.taskTerminal
+          opts.projectPlacement = {
+            ...terminal.placementFor(projectId ?? null), role: 'worker', taskLabel,
+            operationId: taskOperationId!,
+          }
+          if (terminal.host !== undefined) opts.ptyHost = terminal.host
         }
         if (retired) {
           yield { kind: 'error', retryable: false, message: 'Helper session lifecycle has completed' }

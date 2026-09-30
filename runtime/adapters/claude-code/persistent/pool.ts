@@ -598,21 +598,30 @@ async function retireOwnedPersistentRepl(
  * the child is the whole point — the disposable REPL must never linger warm, so no
  * later one-shot purpose can reuse its transcript and no transcript can grow
  * unbounded. `terminateChild` is safe on an already-dead child; the spawn's own
- * exit handler clears the `childByKey` mirror once it exits, and we drop the sink
- * registration explicitly so a never-firing exit can't leak it.
+ * exit handler clears the `childByKey` mirror once it exits. A termination timeout
+ * is not death: keep the cleanup identity until an exit is confirmed.
  */
 async function disposeEphemeralSession(session: ReplSession): Promise<void> {
-  ephemeralSessions.delete(session)
   session.sizeWatchdog?.stop()
+  const release = () => {
+    if (!session.hasChildExited()) return
+    ephemeralSessions.delete(session)
+    sink.unregister(session.sessionId)
+    unlinkSessionConfigs(session)
+  }
+  // A lost close reply can be corroborated by a later host observation. Retain the
+  // session for shutdown retry while uncertain; never report it disposed early.
+  fireAndForget('pool.ephemeral-exit', session.child.exited.then(release))
   try {
     if (!session.hasChildExited()) await terminateChild(session.child)
   } catch {
-    /* already gone */
+    // A termination error is inconclusive; the exit check below owns cleanup.
   }
-  sink.unregister(session.sessionId)
-  // Eager unlink so the temp configs are gone by the time dispose resolves (the
-  // child-exit handler also unlinks, but that fires on its own microtask chain).
-  unlinkSessionConfigs(session)
+  if (!session.hasChildExited()) {
+    process.stderr.write(`[repl] ephemeral cleanup unconfirmed; retaining session=${session.sessionId}\n`)
+    return
+  }
+  release()
 }
 
 /**

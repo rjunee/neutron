@@ -74,8 +74,8 @@ export interface WiredSubstrates {
   /**
    * PER-PROJECT ISOLATED-COMPOSE factory (`cc-compose-*`; #377/#378, Approach A).
    * Builds a substrate keyed to ONE `project_id` for composing that project's
-   * onboarding docs + opening message. Each project resolves a DISTINCT warm REPL
-   * (S3 §2 project dimension) → separate transcript per project → NO cross-project
+   * onboarding docs + opening message. Each call owns a disposable REPL
+   * in its project's workspace → separate transcript per call → NO cross-project
    * bleed (#378). DISTINCT pool-key namespace from `cc-agent-*` (live chat) → a
    * compose can never evict/terminate the owner's in-flight live-chat turn (B1).
    * TOOLLESS (no `enableToolBridge`) + no owner-chat delivery sinks → untrusted
@@ -264,8 +264,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           ...(ctx.startCodexOwner === undefined ? {} : { startCodexOwner: ctx.startCodexOwner }),
           // #1226 — each conversation spawn is placed as its dispatch's `Chat` tab,
           // for the dispatch's exact scope (resolved per turn: this one substrate
-          // serves General AND every project). Only this family; nudge, compose,
-          // fire and the disposable substrates keep the configured host.
+          // serves General AND every project). Compose uses a separate task tab;
+          // nudge, fire and the other disposable substrates keep the configured host.
           ...(ctx.conversationTerminal === undefined ? {} : { conversationTerminal: ctx.conversationTerminal }),
           // #1226 — credential rotation is a verified Chat handoff at the scope's
           // lifecycle owner (pin while usable; retire the old exact owner first).
@@ -364,9 +364,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // wiring): the doc + opening composers all shared ONE `cc-llm-*` accumulating
   // transcript, so project 2/3's docs and openings echoed project 1 (#378). This
   // factory:
-  //   1. keys per-project via `projectIdResolver: () => project_id` folded into the
-  //      warm-pool key (S3 §2 project dimension) → a DISTINCT REPL/transcript per
-  //      project → no cross-project bleed (#378, closed for BOTH the doc
+  //   1. binds `projectIdResolver: () => project_id` and gives each call a fresh
+  //      disposable REPL/transcript → no cross-project bleed (#378, closed for BOTH the doc
   //      materializer AND the openings — B3);
   //   2. uses a DISTINCT instance id (`cc-compose-*`) from the live-chat
   //      `cc-agent-*` pool key, so composing an opening can NEVER evict/terminate
@@ -382,29 +381,40 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   //      chat (fixes #419's B2 side-effect).
   //
   // Provider parity mirrors `cc-llm-*` (phase-spec, TOOLLESS): openai without the
-  // tool manifest. A fresh wrapper per call is cheap — the actual REPL is pooled by
-  // (instance, user, project, credential), so all compose calls for one project
-  // reuse that project's ONE warm REPL. Null (LLM-less) → composers stay undefined.
-  const makeComposeSubstrate = (project_id: string): Substrate | null =>
-    !conversationalAvailable
-      ? null
-      : buildLlmCallSubstrate({
-          ...anthropicPoolArg,
-          substrate_instance_id: `cc-compose-${owner_handle}`,
-          repl_pane_label: 'compose',
-          cwd: owner_home,
-          owner_handle,
-          user_id: OWNER_USER_ID,
-          project_slug,
-          // Per-project isolation dimension — the whole point (see block comment).
-          projectIdResolver: () => project_id,
-          // Untrusted, toolless compose trust class — see substrate-profiles.ts.
-          profile: PROFILE_ISOLATED_COMPOSE,
-          // Mirror the phase-spec provider (openai WITHOUT the tool manifest); the
-          // compose substrate is never tool-bridged.
-          ...phaseSpecProvider,
-          ...(substrateFactory !== undefined ? { substrateFactory } : {}),
-        })
+  // tool manifest. These jobs are on demand: their temporary task tab retires when
+  // the turn settles. They never retain a warm helper or resume a chat transcript.
+  // Null (LLM-less) → composers stay undefined.
+  const makeComposeSubstrate = (project_id: string): Substrate | null => {
+    if (!conversationalAvailable) return null
+    const substrate = buildLlmCallSubstrate({
+      ...anthropicPoolArg,
+      substrate_instance_id: `cc-compose-${owner_handle}`,
+      repl_pane_label: 'Compose · project documents',
+      ephemeral: true,
+      ...(ctx.conversationTerminal === undefined ? {} : {
+        taskTerminal: { terminal: ctx.conversationTerminal, projectId: project_id, taskLabel: 'Compose · project documents' },
+      }),
+      cwd: owner_home,
+      owner_handle,
+      user_id: OWNER_USER_ID,
+      project_slug,
+      // Per-project isolation dimension — the whole point (see block comment).
+      projectIdResolver: () => project_id,
+      // Untrusted, toolless compose trust class — see substrate-profiles.ts.
+      profile: PROFILE_ISOLATED_COMPOSE,
+      // Mirror the phase-spec provider (openai WITHOUT the tool manifest); the
+      // compose substrate is never tool-bridged.
+      ...phaseSpecProvider,
+      ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+    })
+    if (substrate === null) return null
+    return {
+      start(spec) {
+        if (spec.session !== undefined) throw new Error('Project compose requires a session-less task')
+        return substrate.start(spec)
+      },
+    }
+  }
 
   // BACKGROUND PROACTIVE-COMPOSE substrate (`cc-nudge-*`).
   //

@@ -369,7 +369,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     // input has no tool surface and never posts to the owner's chat — B2).
     for (const o of composeOpts) {
       expect(o.enableToolBridge).not.toBe(true)
-      expect(o.ephemeral).not.toBe(true)
+      expect(o.ephemeral).toBe(true)
       expect(o.onDeadTurnNotice).toBeUndefined()
       expect(o.onSizeAlert).toBeUndefined()
       expect(o.onRateLimitBanner).toBeUndefined()
