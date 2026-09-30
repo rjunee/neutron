@@ -28,6 +28,9 @@ class ComposeServer extends FakeHerdrWorkspaceServer {
   closeMode: 'normal' | 'unknown' | 'lost' = 'normal'
   lostWorkerLayout = false
   workerCloses = 0
+  workerLayoutGate?: Promise<void>
+  workerLayoutReady = false
+  omitChannelBound = false
   override async call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
     const worker = this.panes.get(String(params['pane_id']))?.label === 'Compose · project documents'
     if (method === 'pane.close' && worker) {
@@ -66,7 +69,11 @@ class ComposeServer extends FakeHerdrWorkspaceServer {
         } })
         this.channels.push(server)
         await post('/channel-ready', { session_id: sessionId, channel_port: server.port, pid: this.panes.get(pane)!.shell_pid })
-        await post('/channel-bound', { session_id: sessionId })
+        if (!this.omitChannelBound) await post('/channel-bound', { session_id: sessionId })
+        if (params['tab_label'] !== 'Chat') {
+          this.workerLayoutReady = true
+          await this.workerLayoutGate
+        }
       }
     }
     return result
@@ -106,7 +113,8 @@ function rig(strict = true) {
       if (opts.projectPlacement !== undefined) placements.push(opts.projectPlacement)
       return createPersistentReplSubstrate({ ...opts, ptyHost: opts.ptyHost ?? fallback,
       skipTrustSeed: true, idleQuietMs: 0, captureConfig: { maxAttempts: 1, attemptDelayMs: 1 },
-      assertConfig: { readyBudgetMs: 1000, readyIntervalMs: 10, healthBudgetMs: 1000, healthIntervalMs: 10 } })
+      assertConfig: { readyBudgetMs: 1000, readyIntervalMs: 10, healthBudgetMs: 1000, healthIntervalMs: 10,
+        channelBoundBudgetMs: 250, channelBoundIntervalMs: 10 } })
     },
   }
   return { root, server, journal, placements, wired: wireSubstrates(context) }
@@ -217,6 +225,55 @@ test('missing strict manager refuses compose without an ambient layout', async (
   expect(events).toContainEqual(expect.objectContaining({ kind: 'error', message: expect.stringContaining('requires a workspace manager') }))
   expect(server.callsTo('layout.apply')).toHaveLength(0)
 })
+
+test.each(['normal', 'unknown'] as const)('pending compose layout after shutdown never injects and handles %s close', async mode => {
+  const { server, wired, journal } = rig()
+  server.closeMode = mode
+  let release!: () => void
+  server.workerLayoutGate = new Promise<void>(resolve => { release = resolve })
+  const draining = collect(wired.makeComposeSubstrate('one')!.start(spec('must not inject')))
+  await until(() => server.workerLayoutReady ? true : undefined)
+  const worker = [...server.panes.values()].find(pane => pane.label === 'Compose · project documents')!
+  const config = worker.argv[worker.argv.indexOf('--mcp-config') + 1]!
+  await shutdownAllPersistentRepls({ pendingSpawnGraceMs: 1 })
+  expect(server.messages).toEqual([])
+  expect(existsSync(config)).toBe(true)
+  release()
+  const events = await draining
+  expect(server.messages).toEqual([])
+  expect(events).toContainEqual(expect.objectContaining({ kind: 'error', code: 'repl_unreconciled',
+    message: expect.stringContaining('disposable worker startup interrupted') }))
+  expect(server.messages).toEqual([])
+  expect(server.workerLayouts()).toHaveLength(1)
+  expect(server.panes.has(worker.pane_id)).toBe(mode === 'unknown')
+  expect(existsSync(config)).toBe(mode === 'unknown')
+  expect([...ephemeralSessions].some(session => session.child.paneHandle === worker.pane_id)).toBe(mode === 'unknown')
+  expect(readFileSync(journal, 'utf8')).toContain(worker.pane_id)
+  server.closeMode = 'normal'
+  await shutdownAllPersistentRepls()
+  expect(server.panes.has(worker.pane_id)).toBe(false)
+  // A fresh dispatch after restart is still usable; only the admitted old turn is fenced.
+  expect(await collect(wired.makeComposeSubstrate('two')!.start(spec('new turn'))))
+    .toContainEqual({ kind: 'token', text: 'turn=0 new turn' })
+}, 15000)
+
+test.each(['normal', 'unknown'] as const)('shutdown during compose readiness retains the exact child for %s cleanup', async mode => {
+  const { server, wired, journal } = rig()
+  server.closeMode = mode
+  server.omitChannelBound = true
+  const draining = collect(wired.makeComposeSubstrate('one')!.start(spec('must not inject')))
+  const session = await until(() => [...ephemeralSessions][0])
+  const pane = [...server.panes.values()].find(worker => worker.label === 'Compose · project documents')!
+  const config = pane.argv[pane.argv.indexOf('--mcp-config') + 1]!
+  await shutdownAllPersistentRepls({ pendingSpawnGraceMs: 1 })
+  const events = await draining
+  expect(events).toContainEqual(expect.objectContaining({ kind: 'error', code: 'repl_unreconciled' }))
+  expect(server.messages).toEqual([])
+  expect(server.workerLayouts()).toHaveLength(1)
+  expect(ephemeralSessions.has(session)).toBe(mode === 'unknown')
+  expect(existsSync(config)).toBe(mode === 'unknown')
+  expect(readFileSync(journal, 'utf8')).toContain(pane.pane_id)
+}, 15000)
 
 test('lost worker placement records ambiguity and cannot retry that operation as another pane', async () => {
   const { server, wired, journal, placements } = rig()

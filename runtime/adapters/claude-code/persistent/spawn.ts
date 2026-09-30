@@ -95,11 +95,17 @@ function assertFailedSpawnReaped(sessionKey: string): void {
   if (failedSpawnSetups.get(sessionKey) === failed) failedSpawnSetups.delete(sessionKey)
 }
 
+interface DisposableSpawnLifecycle {
+  onChild(session: ReplSession): void
+  checkpoint(): void
+}
+
 async function spawnSession(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
   spec: ReplSpawnProfile,
   resume?: ResumeDirective,
+  disposableLifecycle?: DisposableSpawnLifecycle,
 ): Promise<ReplSession> {
   assertFailedSpawnReaped(sessionKey)
   const cwd = requireReplCwd(options.cwd)
@@ -580,6 +586,7 @@ async function spawnSession(
         ? await prepareNativeParentLaunch({ sessionId, childGeneration, projectId: options.project_id,
           argv, tools: toolSurface, cwd, env: launchEnv })
         : undefined
+      disposableLifecycle?.checkpoint()
       child = await ptyHost.spawn(launch?.argv ?? argv, {
       cwd,
       env: launch?.env ?? launchEnv,
@@ -623,6 +630,7 @@ async function spawnSession(
     })
     scanChild = child
     session.attachChild(child)
+    disposableLifecycle?.onChild(session)
     // No first chat can run until the exact native process has an authenticated route.
     await relay?.register(session)
     launch?.record(session)
@@ -742,6 +750,7 @@ async function spawnSession(
       throw e
     }
 
+    disposableLifecycle?.checkpoint()
     // Post-spawn assertion: child alive → /channel-ready (transport attached) →
     // HTTP /health → /channel-bound (MCP handshake complete).
     const assertion = await assertReplAlive(
@@ -761,6 +770,7 @@ async function spawnSession(
       },
       options.assertConfig ?? {},
     )
+    disposableLifecycle?.checkpoint()
     if (startupResumeRejected) {
       if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
       sink.unregisterIf(sessionId, session)
@@ -1124,6 +1134,7 @@ export async function spawnWithChannelWedgeRespawn(
   options: PersistentReplSubstrateOptions,
   spec: ReplSpawnProfile,
   resume?: ResumeDirective,
+  disposableLifecycle?: DisposableSpawnLifecycle,
 ): Promise<ReplSession> {
   const alert =
     options.postWedgeAlert ??
@@ -1131,7 +1142,8 @@ export async function spawnWithChannelWedgeRespawn(
   const result = await runBoundedChannelWedgeRespawn<ReplSession>({
     attempt: async (n) => {
       try {
-        return { ok: true, value: await spawnSession(sessionKey, options, spec, resume) }
+        disposableLifecycle?.checkpoint()
+        return { ok: true, value: await spawnSession(sessionKey, options, spec, resume, disposableLifecycle) }
       } catch (e) {
         const wedged = e instanceof ChannelWedgedSpawnError
         if (wedged && n < MAX_FLEET_RESPAWNS) {

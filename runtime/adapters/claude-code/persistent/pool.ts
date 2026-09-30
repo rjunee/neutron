@@ -43,6 +43,13 @@ import { gateFor, getOrSpawnSession, injectMessage, shutdownQuarantinedChildren,
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const activeTurnRoutes = new Map<string, { session: ReplSession; turn: ActiveTurn }>()
+const pendingEphemeralSpawns = new Map<Promise<ReplSession>, { shutdown: boolean }>()
+const retiringEphemeralSessions = new WeakSet<ReplSession>()
+
+function ephemeralShutdownError(): Error {
+  return Object.assign(new Error('persistent-repl: disposable worker startup interrupted by gateway shutdown'),
+    { substrateErrorClass: 'repl_unreconciled' as const })
+}
 
 function activeTurnRoutePrefix(input: {
   substrate_instance_id: string
@@ -379,11 +386,29 @@ export async function spawnEphemeralSession(
   // otherwise throw straight to `start()` with no bounded recovery + no cap alert.
   // resume is undefined here, so each retry gets a FRESH sessionId (no transcript
   // sharing) — clean to retry on the same disposable key.
-  const session = await spawnWithChannelWedgeRespawn(ephemeralKey, ephemeralOptions, spec)
-  // Track for shutdown teardown — ephemeral sessions are never pooled, so the
-  // pool-walk in `shutdownAllPersistentRepls` would otherwise miss them.
-  ephemeralSessions.add(session)
-  return session
+  const lifecycle = { shutdown: false }
+  const children = new Set<ReplSession>()
+  const checkpoint = () => { if (lifecycle.shutdown) throw ephemeralShutdownError() }
+  const spawning = spawnWithChannelWedgeRespawn(ephemeralKey, ephemeralOptions, spec, undefined, {
+    checkpoint,
+    onChild(session) {
+      // Enroll the exact child before channel readiness, including failed startup.
+      children.add(session)
+      ephemeralSessions.add(session)
+      if (lifecycle.shutdown) retiringEphemeralSessions.add(session)
+    },
+  })
+  pendingEphemeralSpawns.set(spawning, lifecycle)
+  try {
+    const session = await spawning
+    checkpoint()
+    return session
+  } catch (error) {
+    await Promise.all([...children].map(disposeEphemeralSession))
+    throw error
+  } finally {
+    pendingEphemeralSpawns.delete(spawning)
+  }
 }
 
 export type HelperRetirement = 'absent' | 'deferred' | 'retired' | 'refused'
@@ -879,6 +904,7 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // from a timed-out/cancelled prior turn (different seq) or a prior
           // incarnation of this resumed session (different nonce), in both the
           // pre-inject-park and inject-in-flight windows (see ActiveTurn.turnId).
+          if (ephemeral && retiringEphemeralSessions.has(session)) throw ephemeralShutdownError()
           const initialDelivery = injectMessage(session, spec.prompt, turn.turnId)
           // Publish immediately, but serialize follow-ups behind the initial
           // POST. This removes the wire-observed/route-not-yet-visible race
@@ -1552,6 +1578,11 @@ export async function shutdownAllPersistentRepls(
     onAdoptionSnapshot?: () => void
   } = {},
 ): Promise<void> {
+  // Fence admitted disposable startups synchronously, before any shutdown await.
+  // Their exact child may not be available yet; its later callback retains it.
+  const pendingDisposable = [...pendingEphemeralSpawns.keys()]
+  for (const lifecycle of pendingEphemeralSpawns.values()) lifecycle.shutdown = true
+  for (const session of ephemeralSessions) retiringEphemeralSessions.add(session)
   // Stop the watchdog/heartbeat timers FIRST so no tick fires mid-teardown.
   for (const w of activeWatchdogs.values()) w.stop()
   activeWatchdogs.clear()
@@ -1894,6 +1925,16 @@ export async function shutdownAllPersistentRepls(
   // actually gone is recorded as killed by this shutdown; one that outlives the
   // escalation records an undetermined disposition instead.
   await confirmShutdownExits(awaitingExit)
+  if (pendingDisposable.length > 0) {
+    const bound = cancellableWait(opts.pendingSpawnGraceMs ?? SHUTDOWN_PENDING_SPAWN_GRACE_MS)
+    try {
+      await Promise.race([Promise.allSettled(pendingDisposable), bound.expired])
+    } finally {
+      bound.cancel()
+    }
+    // Unresolved entries stay enrolled. Their fenced completion cleans the exact
+    // child and refuses the turn, even after this bounded shutdown has returned.
+  }
   // Terminate in-flight EPHEMERAL one-shots too (Argus r5 IMPORTANT): they are
   // never pooled, so the pool loop above misses them — a disposable child mid-turn
   // at shutdown would orphan its process + leak its temp configs. Apply the same
