@@ -32,6 +32,45 @@ describe('bounded native Codex operation reconstruction', () => {
     identity: Record<string, unknown> = {}) => record('token_usage_record', {
       thread_id: 'thread-1', turn_id: 'turn-1', turn_token_usage: totals, ...identity,
     }, 8000)
+  test('exact task registration also serves nested tests without a checkout binding or duplicate usage', async () => {
+    const result = await run([command(), usage(), task()], { ...turnOptions, bindings: [] })
+    expect(result.coverage.unbound).toBe(0)
+    const snapshot = combineTimelineSources({ observedAt: 10000, repositories: [] }, result.observations, [], 10000)
+    const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: () => snapshot })
+    const response = await handler(new Request('http://localhost/api/timeline', {
+      headers: { authorization: `Basic ${Buffer.from('viewer:fixture').toString('base64')}` },
+    }))
+    expect(response.status).toBe(200)
+    const data = await response.json() as typeof snapshot
+    expect(data.cards).toHaveLength(1)
+    expect(data.cards[0]!.pr).toBe(7)
+    expect(data.cards[0]!.segments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: 'test', start: 2000, end: 4000, model: 'model-a',
+        usage: expect.objectContaining({ tokens: null, input: null, output: null }) }),
+      expect.objectContaining({ phase: 'build', start: 1000, end: 9000,
+        usage: expect.objectContaining({ tokens: 27, input: 20, output: 2, cacheRead: 5 }) }),
+    ]))
+    expect(data.cards[0]!.segments).toHaveLength(2)
+  })
+  test('nested test ownership refuses foreign turns and conflicting or ambiguous checkout evidence', async () => {
+    const binding = turnOptions.turnBindings![0]!
+    for (const opts of [
+      { ...turnOptions, bindings: [], turnBindings: [{ ...binding, sessionId: 'foreign' }] },
+      { ...turnOptions, bindings: [], turnBindings: [{ ...binding, turnId: 'foreign' }] },
+      { ...turnOptions, bindings: [{ ...options.bindings![0]!, links: [{ repository: repo, prNumber: 8 }] }] },
+      { ...turnOptions, bindings: [options.bindings![0]!, options.bindings![0]!] },
+    ]) {
+      const result = await run([command()], opts)
+      expect(result.observations).toEqual([])
+      expect(result.coverage.unbound).toBe(1)
+    }
+    expect((await run([command()], turnOptions)).observations[0]!.links).toEqual(binding.links)
+    const shared = await run([command()], { ...turnOptions, bindings: [], turnBindings: [{
+      ...binding, links: [...binding.links, { repository: repo, prNumber: 8 }],
+    }] })
+    expect(shared.observations).toHaveLength(1)
+    expect(shared.observations[0]!.links).toHaveLength(2)
+  })
   test('an exact native turn receipt supplies disjoint token fields and leaves unreported metrics unknown', async () => {
     const result = await run([command(), usage(), task()], turnOptions)
     expect(result.observations).toHaveLength(2)
