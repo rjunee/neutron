@@ -21,3 +21,13 @@ Root, Open and Trident TypeScript checks passed. The affected live-board consumi
 file passed one test with 14 assertions; the full lint gate passed. New-head full
 CI remains required. Historical broad test receipts are not attributed to this
 dependency-only repair, and no live or deployed acceptance is claimed.
+
+The native-child ownership control at
+`open/wiring/__tests__/project-build-native-child-lease.test.ts:103` now uses a
+bounded five-second observation budget. CI spent 277 milliseconds in that
+non-deadline case against the shared fixture's 50-millisecond budget and returned
+`unknown` before observing the parent turn end. Its malformed-trailer and held
+lease assertions are unchanged; the uncertainty controls retain 50 milliseconds.
+This is test scheduling slack, not a runtime authority or deadline change.
+The complete native-child lease file passed seven tests with 45 assertions;
+root and Trident TypeScript checks passed with the combined repair.

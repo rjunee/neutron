@@ -98,7 +98,9 @@ test('a malformed trailer and ended parent turn cannot release the child under a
   await mkdir(join(f.context.stateRoot), { recursive: true })
   await writeFile(f.request.result.path, '{}')
 
-  expect((await f.captured().actingTurn(f.turn())).kind).toBe('turn-ended')
+  // This ownership control is not a deadline test: allow bounded CI scheduling
+  // slack while retaining the short deadline in the uncertainty controls below.
+  expect((await f.captured().actingTurn({ ...f.turn(), timeout_ms: 5_000 })).kind).toBe('turn-ended')
   // The child lease existed while the child ran, naming the exact request.
   expect(f.observedDuringTurn).toEqual([[JSON.stringify([f.row.id, 'build:0'])]])
   // Malformed evidence cannot release it. The run's build lease also remains.
