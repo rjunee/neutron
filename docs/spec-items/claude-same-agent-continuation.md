@@ -72,9 +72,10 @@ stable regular-file reader; symlinks, FIFOs and changing snapshots refuse safely
       merge gates. Known-unavailable and foreign launch profiles refuse with no replacement
       `Agent`, no merge and the original child lease retained.
       Verify: `bun test open/__tests__/project-build-e2e.test.ts`.
-- [ ] An adopted parent without a fresh host authentication observation refuses
-      capacity input, as does an adopted Agent-only parent. Independently observed
-      executable/argv alone cannot authorize selection. Verify: the same consuming suite.
+- [ ] An adopted parent lacking both a fresh host authentication observation and
+      an authenticated original source descriptor refuses capacity input, as does
+      an adopted Agent-only parent. Independently observed executable/argv alone
+      cannot authorize selection. Verify: the same consuming suite.
 - [ ] A gateway survivor with an authenticated original source descriptor reaches
       the existing merge gates with exactly one same-child continuation. Missing
       or tampered receipts, missing original descriptors, changed source settings,
