@@ -1451,12 +1451,19 @@ export class TridentRunStore {
     let step: unknown
     try { step = JSON.parse(mode.meta ?? 'null')?.checkpoint?.pending?.step_id } catch { return [mode] }
     if (typeof step !== 'string') return [mode]
-    const binding = latest("stage = 'claude-native-child-bound' AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.stepId') END = ?", [step])
+    const binding = latest(`stage = 'claude-native-child-bound' AND CASE WHEN json_valid(meta) THEN
+      CASE WHEN json_type(meta, '$.parentStepId') IS NULL THEN json_extract(meta, '$.stepId')
+      ELSE json_extract(meta, '$.parentStepId') END END = ?`, [step])
     if (!binding) return [mode]
     let child: unknown
-    try { child = JSON.parse(binding.meta ?? 'null')?.childId } catch { return [mode, binding] }
-    if (typeof child !== 'string') return [mode, binding]
-    const state = latest("stage IN ('claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended') AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.stepId') END = ? AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.childId') END = ?", [step, child])
+    let childStep: unknown
+    try {
+      const identity = JSON.parse(binding.meta ?? 'null')
+      child = identity?.childId
+      childStep = identity?.stepId
+    } catch { return [mode, binding] }
+    if (typeof child !== 'string' || typeof childStep !== 'string') return [mode, binding]
+    const state = latest("stage IN ('claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended') AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.stepId') END = ? AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.childId') END = ?", [childStep, child])
     return state ? [mode, binding, state] : [mode, binding]
   }
 

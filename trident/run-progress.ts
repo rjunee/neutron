@@ -137,14 +137,20 @@ export function deriveQuotaWait(run: TridentRun, events: readonly TridentStageEv
     const pending = parseBuildModeState(mode.meta, run).checkpoint.pending
     if (!pending) return null
     const binding = scoped.filter(event => event.stage === 'claude-native-child-bound')
-      .filter(event => metaOf(event)?.stepId === pending.step_id).at(-1)
+      .filter(event => {
+        const identity = metaOf(event)
+        // The authenticated producer retains the enclosing host step for panel
+        // children. Their own request step remains the quota event identity.
+        return (identity?.parentStepId === undefined ? identity?.stepId : identity.parentStepId) === pending.step_id
+      }).at(-1)
     if (!binding) return null
     const identity = metaOf(binding)
-    if (typeof identity?.childId !== 'string' || !identity.childId) return null
+    if (typeof identity?.childId !== 'string' || !identity.childId
+      || typeof identity.stepId !== 'string' || !identity.stepId) return null
     const state = scoped.filter(event => ['claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended'].includes(event.stage))
       .filter(event => {
         const meta = metaOf(event)
-        return event.id > binding.id && meta?.stepId === pending.step_id && meta?.childId === identity.childId
+        return event.id > binding.id && meta?.stepId === identity.stepId && meta?.childId === identity.childId
       }).at(-1)
     if (!state || state.stage !== 'claude-quota-waiting') return null
     const retry = metaOf(state)?.retryAtMs

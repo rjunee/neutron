@@ -42,6 +42,36 @@ describe('durable quota wait projection', () => {
     expect(project(events, { ...current, inner_checkpoint: 'pr-merged' })).toBeNull()
     expect(project([{ ...events[0]!, meta: '{}' }, ...events.slice(1)])).toBeNull()
   })
+  const parentStepId = `${current.id}:review:1:head:${'a'.repeat(40)}`
+  const stepId = `review-${'b'.repeat(64)}:1:0`
+  const nested = quotaWaitEvents(current, T0 + 60_000, { parentStepId, stepId })
+  test('an authenticated nested review or synthesis child projects its actual step under the enclosing host step', () => {
+    expect(project(nested)).toEqual({ retry_at: '2026-07-02T00:01:00.000Z' })
+    expect(project(quotaWaitEvents(current, null, { parentStepId, stepId }))).toEqual({ retry_at: null })
+    for (const stage of ['claude-quota-resumed', 'claude-quota-wait-ended']) {
+      const ended = { ...nested[2]!, id: 4, stage }
+      expect(project([...nested, ended])).toBeNull()
+      // The outer step cannot impersonate the nested child, even with its child ID.
+      expect(project([...nested, { ...ended, meta: JSON.stringify({ stepId: parentStepId, childId: 'native-child-current' }) }])).toEqual(project(nested))
+    }
+  })
+  test('nested children require an explicit exact host mapping, never step spelling or current-child coincidence', () => {
+    for (const parent of [undefined, null, '', 1, `${current.id}:review:2`, `${parentStepId}:1:0`]) {
+      const meta = { stepId, childId: 'native-child-current', parentStepId: parent }
+      expect(project([nested[0]!, { ...nested[1]!, meta: JSON.stringify(meta) }, nested[2]!])).toBeNull()
+    }
+    for (const change of [{ stepId: parentStepId }, { stepId: `${stepId}:foreign` }, { childId: 'foreign-child' }]) {
+      expect(project([nested[0]!, nested[1]!, { ...nested[2]!, meta: JSON.stringify({ ...JSON.parse(nested[2]!.meta!), ...change }) }])).toBeNull()
+    }
+    const foreignBinding = { ...nested[1]!, id: 4, meta: JSON.stringify({ stepId, childId: 'native-child-current', parentStepId: `${current.id}:review:2` }) }
+    expect(project([...nested, foreignBinding])).toEqual(project(nested))
+    expect(project([...nested, { ...nested[1]!, id: 4 }])).toBeNull()
+    const mode = JSON.parse(nested[0]!.meta!)
+    for (const pending of [undefined, { phase: 'review', step_id: `${current.id}:review:2` }]) {
+      expect(project([...nested, { ...nested[0]!, id: 5, meta: JSON.stringify({ ...mode, checkpoint: { ...mode.checkpoint, pending } }) }])).toBeNull()
+    }
+    for (const phase of ['done', 'failed', 'stopped'] as const) expect(project(nested, { ...current, phase })).toBeNull()
+  })
 })
 
 function run(over: Partial<TridentRun> = {}): TridentRun {

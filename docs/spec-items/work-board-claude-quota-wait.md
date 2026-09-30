@@ -15,7 +15,12 @@ The current host checkpoint's pending step and the authenticated native child
 binding govern the read. Durable `claude-quota-waiting` events carry
 `{stepId, childId, retryAtMs}`; matching `claude-quota-resumed` or
 `claude-quota-wait-ended` clears the notice. The authenticated producer records
-`claude-native-child-bound` before waiting. Unknown reset time remains null.
+`claude-native-child-bound` before waiting. For nested review and synthesis,
+that binding retains `parentStepId` from the original authenticated host
+dispatch; it matches the current pending step while quota state still matches
+the child's actual `stepId` and `childId`. Missing parent evidence permits only
+an exact direct-step match, never inference from step spelling. Unknown reset
+time remains null.
 Terminal runs, completed checkpoints, subsequent steps and replacement child
 bindings supersede prior waiting. Foreign runs, steps and child identities
 cannot relabel the current card. Queries return at most three selected rows.
@@ -31,6 +36,10 @@ and [`claude-same-agent-continuation`](claude-same-agent-continuation.md).
 
 - [ ] Current authenticated waits render known and unknown reset times; rejecting
       all waits fails the accepting controls in `trident/run-progress.test.ts`.
+      Nested review/synthesis waits require the original authenticated enclosing
+      step; ignoring that mapping fails the foreign-step refusing controls.
+      Verify `trident/quota-wait-projection.test.ts` and the consuming native
+      synthesis case in `open/__tests__/project-build-e2e.test.ts`.
 - [ ] Matching resume/end, settlement, terminal outcome and current identity
       changes clear waiting; preserving stale waiting fails refusing controls.
 - [ ] HTTP and pushed projection read bounded durable state, survive a store
