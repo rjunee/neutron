@@ -47,3 +47,15 @@ incomplete run, not full-suite acceptance. The focused command was
 findings, including the untracked worktree pointer and existing denylist matches;
 purity is not claimed green. Publication, exact-head CI and served acceptance
 remain outstanding.
+
+The publication preflight compared immutable tracked archives of candidate
+`093c2c507` and fetched main `718fb2def` using the same local denylist and
+`bash scripts/ci/leak-gate.sh --tree <archive>`. Both report the same 451
+denylist findings (167 substring and 284 word matches); the worktree adds one
+untracked-pointer finding. The candidate's changed files have zero denylist hits
+under the gate's actual pattern compiler. The same compiler rejects known
+baseline controls in `README.md` and `app/__tests__/general-scope.test.ts`.
+The outgoing eight commit-message lines pass the messages-only scan. These
+checks establish no candidate-introduced denylist finding, not a clean whole
+tree. Main's successful CI purity uses inputs whose exact difference from the
+local denylist remains unverified; candidate CI purity is still required.
