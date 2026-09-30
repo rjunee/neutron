@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test'
+import { expect, spyOn, test } from 'bun:test'
+import { writeFileSync } from 'node:fs'
 import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -155,5 +156,97 @@ test('file sources reach authenticated HTML/JSON and import failures preserve ca
     expect(partial.cards).toHaveLength(1)
     expect(partial.cards[0]!.segments).toHaveLength(0)
     expect(partial.warnings.join(' ')).toContain('Direct phase observations unavailable')
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('fresh partial importer coverage reaches API and expanded HTML without inventing phases or tokens', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'timeline-partial-'))
+  const catalogue = join(dir, 'catalogue.json'), observations = join(dir, 'observations.jsonl'), importStatus = join(dir, 'import.json')
+  try {
+    const now = Date.now()
+    await writeFile(catalogue, JSON.stringify({ observedAt: now, repositories: [{ repository: 'example/open', error: null, prs: [
+      { number: 10, title: 'Known PR without attributed work', url: 'https://github.com/example/open/pull/10', state: 'open',
+        createdAt: new Date(now - 10000).toISOString(), closedAt: null, mergedAt: null },
+    ] }] }))
+    await writeFile(observations, '')
+    const read = timelineSourceReader({ catalogue, observations, importStatus, databases: [] })
+    const handler = createTimelineHandler({ username: 'viewer', password: 'test-secret', read })
+    for (const partial of [true, false]) {
+      await writeFile(importStatus, JSON.stringify({ lastSuccessAt: now, error: null, partial,
+        coverage: { registered: 2, emitted: 3, unbound: partial ? 7 : 0, incomplete: 0, scanPartial: false },
+        privatePath: '/private/never-served', transcript: 'private transcript content' }))
+      const response = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: auth } }))
+      const data = await response.json() as TimelineSnapshot
+      expect(response.status).toBe(200)
+      expect(data.cards).toHaveLength(1)
+      expect(data.cards[0]!.segments).toHaveLength(0)
+      expect(data.cards[0]!.prState).toBe('open')
+      const html = await (await handler(new Request('http://localhost/timeline', { headers: { authorization: auth } }))).text()
+      expect(html).toContain('PR #10')
+      expect(html).toContain('No phase timing recorded')
+      if (partial) {
+        expect(data.warnings.join(' ')).toContain('7 observations have no verified PR/phase binding')
+        expect(data.warnings.join(' ')).toContain('0 registered sources are incomplete')
+        expect(data.warnings.join(' ')).not.toContain('stale or failed')
+        expect(html).toContain('<details class="source-note" open>')
+        expect(html).toContain('Direct phase coverage is partial.')
+        expect(html).toContain('7 observations have no verified PR/phase binding')
+      } else {
+        expect(data.warnings).toEqual([])
+        expect(html).not.toContain('Direct phase coverage is partial.')
+        expect(html).not.toContain('class="source-note"')
+      }
+      expect(JSON.stringify(data) + html).not.toContain('/private/never-served')
+      expect(JSON.stringify(data) + html).not.toContain('private transcript content')
+    }
+    for (const status of [{ lastSuccessAt: now, error: null }, { lastSuccessAt: now, error: null, partial: false, coverage: {} }]) {
+      await writeFile(importStatus, JSON.stringify(status))
+      const data = await (await handler(new Request('http://localhost/api/timeline', { headers: { authorization: auth } }))).json() as TimelineSnapshot
+      const html = await (await handler(new Request('http://localhost/timeline', { headers: { authorization: auth } }))).text()
+      expect(data.warnings.join(' ')).toContain('coverage is unverified')
+      expect(data.warnings.join(' ')).toContain('count unknown')
+      expect(data.warnings.join(' ')).not.toContain('stale or failed')
+      expect(data.cards[0]!.segments).toHaveLength(0)
+      expect(html).toContain('<details class="source-note" open>')
+      expect(html).toContain('coverage is unverified')
+      expect(html).toContain('count unknown')
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
+
+test('production reader samples importer freshness after a status update during source reads, rejecting future and stale success', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'timeline-status-clock-'))
+  const catalogue = join(dir, 'catalogue.json'), observations = join(dir, 'observations.jsonl'), importStatus = join(dir, 'import.json')
+  const startedAt = 100_000, completedAt = startedAt + 10
+  const status = (lastSuccessAt: number) => ({ lastSuccessAt, error: null, partial: false,
+    coverage: { unbound: 0, incomplete: 0, scanPartial: false } })
+  try {
+    await writeFile(catalogue, JSON.stringify({ observedAt: startedAt, repositories: [] }))
+    await writeFile(observations, '')
+    const read = timelineSourceReader({ catalogue, observations, importStatus, databases: [] })
+    const handler = createTimelineHandler({ username: 'viewer', password: 'test-secret', read })
+    for (const [lastSuccessAt, warns] of [[startedAt + 5, false], [completedAt + 1, true], [completedAt - 60_001, true]] as const) {
+      await writeFile(importStatus, JSON.stringify(status(startedAt - 60_001)))
+      let clock = startedAt, updated = false
+      const now = spyOn(Date, 'now').mockImplementation(() => {
+        if (!updated) {
+          updated = true
+          queueMicrotask(() => {
+            writeFileSync(importStatus, JSON.stringify(status(lastSuccessAt)))
+            clock = completedAt
+          })
+        }
+        return clock
+      })
+      try {
+        const response = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: auth } }))
+        const data = await response.json() as TimelineSnapshot
+        expect(response.status).toBe(200)
+        expect(updated).toBe(true)
+        expect(clock).toBe(completedAt)
+        expect(data.warnings.some(warning => warning.includes('stale or failed'))).toBe(warns)
+        if (!warns) expect(data.warnings).toEqual([])
+      } finally { now.mockRestore() }
+    }
   } finally { await rm(dir, { recursive: true, force: true }) }
 })

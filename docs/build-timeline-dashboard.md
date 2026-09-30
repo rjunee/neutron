@@ -11,7 +11,7 @@ it never starts builds, changes workflow state or applies database migrations.
 | `TIMELINE_OBSERVATIONS` | Required path to phase observation NDJSON |
 | `TIMELINE_PORT` | Loopback listener port, default `8790` |
 | `TIMELINE_DATABASES` | JSON array of `{path, repoPath, repository}` SQLite sources; default `[]`; `repoPath` is an exact database filter |
-| `TIMELINE_IMPORT_STATUS` | Optional importer status JSON `{lastSuccessAt, error}`; stale or failed imports warn without hiding prior observations |
+| `TIMELINE_IMPORT_STATUS` | Optional importer status JSON `{lastSuccessAt, error, partial, coverage: {unbound, incomplete, scanPartial}}`; stale, failed, partial or unknown coverage warns without hiding prior observations |
 
 Expose the loopback listener through the operator's HTTPS reverse proxy. The
 application owns the single Basic-auth gate. `/` serves the page, `/timeline`
@@ -37,13 +37,22 @@ phases partitioned on the same wall-clock axis rather than added together. Concu
 phase categories share the height of the bar. Hover reveals phase information;
 focus or tap opens a custom phase popover; the full-size duration control exposes
 all actions, including tiny spans. Clicking the PR label opens complete evidence.
+Single-phase hover shows the activity once, followed by elapsed time, tokens,
+model and local start/completion clocks. The full explorer retains range context.
 Open PRs form the first section, with merged/closed below and recent activity
 ordering within each section. Explicit PR state is separate from fresh provider
 work signals. The default shared 1h focus window clips longer bars with an explicit
 overflow control; Fit all shows their complete proportional extent. The locked
 [timeline spec](spec-items/temporary-build-timeline-dashboard.md) owns status
 freshness thresholds and the focus-window contract.
-Source failures have a visible coverage disclosure and refresh failures an alert.
+Source warnings have an expanded coverage disclosure and refresh failures an alert.
+Import status uses a numeric millisecond `lastSuccessAt`, nullable `error`, boolean
+`partial` and `scanPartial`, and nonnegative safe-integer `unbound` observation and
+`incomplete` source counts. Fresh complete registered-source reports use explicit
+false flags and zero counts. Legacy `{lastSuccessAt, error}` records and missing
+coverage fields remain unverified; a successful refresh alone never proves
+complete attribution. Unknown counts are not zero, and unbound history is never
+silently assigned to a PR. Raw importer errors and paths are not served.
 Run-only records remain in the authenticated JSON API, outside the PR chart.
 
 ## Readable chart acceptance
