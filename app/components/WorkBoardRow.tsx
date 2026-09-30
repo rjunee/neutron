@@ -358,7 +358,7 @@ function WorkBoardRowImpl({
                       ? styles.resumeNote
                       : styles.briefAlert
               }
-              numberOfLines={item.recovery_refusal?.trim() === notice.text ? undefined : 1}
+              numberOfLines={item.recovery_refusal?.trim() === notice.text || item.run_progress?.quota_wait ? undefined : 1}
               testID={`work-board-run-notice-${notice.tone}`}
             >
               {notice.text}

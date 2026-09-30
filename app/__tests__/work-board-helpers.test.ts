@@ -72,6 +72,16 @@ function progress(over: Partial<RunProgress> = {}): RunProgress {
 }
 
 describe('nextStatus', () => {
+  it('quota waiting is an explicit informational notice and suppresses duplicate play until cleared', () => {
+    const waiting = item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress({
+      quota_wait: { retry_at: null }, heartbeat_fresh_until: null,
+    }) });
+    expect(runNotice(waiting)).toEqual({ text: 'Waiting for Claude quota · Reset time unavailable · Resumes automatically', tone: 'info' });
+    expect(canPlay(waiting)).toBe(false);
+    const resumed = { ...waiting, run_progress: { ...waiting.run_progress!, quota_wait: null } };
+    expect(runNotice(resumed)).toBeNull();
+    expect(canPlay(resumed)).toBe(true);
+  });
   it('cycles upcoming → in_progress → done; done stays done', () => {
     expect(nextStatus('upcoming')).toBe('in_progress');
     expect(nextStatus('in_progress')).toBe('done');

@@ -59,6 +59,7 @@ import {
   docLinkLabel,
   docPathFromDesignRef,
   resolveStepLabel,
+  quotaWaitText,
   type RunPhaseLabel,
   type RunProgress,
   type WorkBoardItem,
@@ -154,6 +155,7 @@ function canPlay(item: WorkBoardItem): boolean {
   return (
     item.status !== 'done' &&
     item.status !== 'blocked' &&
+    quotaWaitText(item) === null &&
     !isLinkedRunning(item) &&
     !item.inline_active
   )
@@ -281,6 +283,8 @@ function runNotice(item: WorkBoardItem): RunNotice | null {
   // A recovered integrity alert is evidence, not a fallback explanation for an
   // unrelated terminal failure whose reason happens to be missing.
   if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null
+  const waiting = quotaWaitText(item)
+  if (waiting !== null) return { text: waiting, tone: 'info' }
   const alert = briefAlertText(rp)
   if (alert !== null) return { text: alert, tone: 'alert' }
   // A manual lane change does not admit recovery or supersede its refusal.

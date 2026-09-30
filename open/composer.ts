@@ -4669,6 +4669,7 @@ export function buildOpenGraphComposer(
     const boardRunAccess = {
       get: (id: string): TridentRun | null => boardRunStore.get(id),
       latestHeartbeatAt: (id: string): string | null => boardRunStore.latestHeartbeatAt(id),
+      quotaWaitEvents: (id: string) => boardRunStore.quotaWaitEvents(id),
       update: (id: string, patch: { phase: TridentRun['phase'] }): Promise<unknown> =>
         boardRunStore.update(id, patch),
       terminate: async (id: string, phase: TridentRun['phase'], reason?: string): Promise<{ won: boolean }> => {
@@ -4712,6 +4713,7 @@ export function buildOpenGraphComposer(
               nowMs,
               undefined,
               (id) => boardRunStore.latestHeartbeatAt(id),
+              (id) => boardRunStore.quotaWaitEvents(id),
             )
             return {
               id: it.id,

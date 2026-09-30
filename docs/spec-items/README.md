@@ -25,6 +25,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`trident-build-efficiency`](trident-build-efficiency.md) — Avoid repeated build work and measure Trident's time and token costs
+- [`work-board-claude-quota-wait`](work-board-claude-quota-wait.md) — Show durable Claude quota waits on the Work Board
 - [`codex-inactive-seat-freshness`](codex-inactive-seat-freshness.md) — Refresh inactive Codex seat usage before pool selection
 - [`codex-operator-custody`](codex-operator-custody.md) — Adopt Codex account custody and expose bounded operator rotation
 - [`work-board-attempt-provenance`](work-board-attempt-provenance.md) — Preserve terminal Work Board attempts across retry and shelving
@@ -65,6 +66,7 @@ branch is cut (standard §3.1, §3.2).
 | [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) | The project REPL owns the build loop | P0 | yes |
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
 | [`trident-build-efficiency`](trident-build-efficiency.md) | Avoid repeated build work and measure Trident's time and token costs | P0 | yes |
+| [`work-board-claude-quota-wait`](work-board-claude-quota-wait.md) | Show durable Claude quota waits on the Work Board | P0 | yes |
 | [`a-changed-literal-must-not-leave-new-prose-stale`](a-changed-literal-must-not-leave-new-prose-stale.md) | Refuse newly added prose that asserts a constant's replaced literal | P1 | — |
 | [`a-fake-cannot-be-silently-incomplete`](a-fake-cannot-be-silently-incomplete.md) | Require output-capable hosts at merge construction | P1 | — |
 | [`a-run-whose-head-does-not-resolve-must-refuse-to-commit`](a-run-whose-head-does-not-resolve-must-refuse-to-commit.md) | A run whose HEAD does not resolve must refuse to commit | P1 | — |

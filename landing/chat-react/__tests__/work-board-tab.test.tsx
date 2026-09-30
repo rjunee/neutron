@@ -154,6 +154,19 @@ function listOf(rows: WorkBoardItem[]): Handler {
 }
 
 describe('WorkBoardTab (happy-dom)', () => {
+  it('renders quota waiting from HTTP and removes it when a resumed push arrives', async () => {
+    const live = fakeLive()
+    const waiting = item({ status: 'in_progress', linked_run_id: 'current', run_progress: {
+      run_id: 'current', phase_label: 'building', step_label: 'building', round: 1,
+      started_at: '', last_advanced_at: '', elapsed_ms: 0, stalled: false, stalled_ms: null,
+      pr: null, pr_url: null, verdict: null, failure_reason: null, quota_wait: { retry_at: null },
+    } })
+    const { container, root, act } = await mount(listOf([waiting]), live.source)
+    expect(container.textContent).toContain('Waiting for Claude quota · Reset time unavailable · Resumes automatically')
+    await act(async () => live.emit([{ ...waiting, run_progress: { ...waiting.run_progress!, quota_wait: null } }], PROJECT))
+    expect(container.textContent).not.toContain('Waiting for Claude quota')
+    await act(async () => root.unmount())
+  })
   it('renders a durable blocked recovery refusal without new run progress and over old source notices', async () => {
     const reason = 'Recovery refused: published head moved.'
     const terminal: RunProgress = {

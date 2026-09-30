@@ -102,6 +102,14 @@ describe('the fix: base + every live scoped topic', () => {
 })
 
 describe('the PRODUCTION fan actually does this (wiring, not just mechanism)', () => {
+  test('both HTTP access and pushed progress wire the bounded durable quota query', async () => {
+    const src = await Bun.file(new URL('../composer.ts', import.meta.url)).text()
+    const access = src.slice(src.indexOf('const boardRunAccess ='), src.indexOf('const boardRunAccess =') + 600)
+    expect(access).toContain('quotaWaitEvents: (id: string) => boardRunStore.quotaWaitEvents(id)')
+    const fan = src.slice(src.indexOf('const fanWorkBoardChanged ='), src.indexOf('work_board_push_failed', src.indexOf('const fanWorkBoardChanged =')))
+    expect(fan).toContain('(id) => boardRunStore.quotaWaitEvents(id)')
+    expect(fan).toContain('runProgressForItem(')
+  })
   test('composer fans the board to scoped topics, exactly as it fans activity_event', async () => {
     const src = await Bun.file(new URL('../composer.ts', import.meta.url)).text()
     const at = src.indexOf('const fanWorkBoardChanged =')

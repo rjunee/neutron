@@ -8,8 +8,41 @@ import {
 } from './run-progress.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
+import { quotaWaitEvents } from './testing/quota-wait-events.ts'
 
 const T0 = Date.parse('2026-07-02T00:00:00Z')
+
+describe('durable quota wait projection', () => {
+  const current = run({ worktree: '/worktree' })
+  const events = quotaWaitEvents(current, T0 + 60_000)
+  const project = (rows = events, row = current) => deriveRunProgress(row, T0, null, null, rows).quota_wait
+  test('shows a current authenticated wait, with known or unknown reset', () => {
+    expect(project()).toEqual({ retry_at: '2026-07-02T00:01:00.000Z' })
+    expect(project(quotaWaitEvents(current))).toEqual({ retry_at: null })
+    expect(deriveRunProgress(current, T0, null, null, events).phase_label).toBe('planning')
+  })
+  test('matching resume/end clears waiting; foreign child/step/run cannot clear or label it', () => {
+    for (const stage of ['claude-quota-resumed', 'claude-quota-wait-ended']) {
+      const end = { ...events[2]!, id: 4, stage, meta: JSON.stringify({ stepId: `${current.id}:plan:0`, childId: 'native-child-current' }) }
+      expect(project([...events, end])).toBeNull()
+      for (const meta of [{ stepId: 'other-step', childId: 'native-child-current' }, { stepId: `${current.id}:plan:0`, childId: 'other-child' }])
+        expect(project([...events, { ...end, meta: JSON.stringify(meta) }])).toEqual(project())
+      expect(project([...events, { ...end, run_id: 'foreign' }])).toEqual(project())
+    }
+    expect(project(events.map(event => ({ ...event, run_id: 'foreign' })))).toBeNull()
+    expect(project(events.filter(event => event.stage !== 'claude-native-child-bound'))).toBeNull()
+    expect(project([events[0]!, events[1]!, { ...events[2]!, meta: JSON.stringify({ stepId: `${current.id}:plan:0`, childId: 'foreign' }) }])).toBeNull()
+  })
+  test('settlement, next step, child replacement and terminal outcome supersede old waiting', () => {
+    const mode = JSON.parse(events[0]!.meta!)
+    for (const pending of [undefined, { phase: 'build', step_id: `${current.id}:build:0` }])
+      expect(project([...events, { ...events[0]!, id: 5, meta: JSON.stringify({ ...mode, checkpoint: { ...mode.checkpoint, pending } }) }])).toBeNull()
+    expect(project([...events, { ...events[1]!, id: 5 }])).toBeNull()
+    for (const phase of ['done', 'failed', 'stopped'] as const) expect(project(events, { ...current, phase })).toBeNull()
+    expect(project(events, { ...current, inner_checkpoint: 'pr-merged' })).toBeNull()
+    expect(project([{ ...events[0]!, meta: '{}' }, ...events.slice(1)])).toBeNull()
+  })
+})
 
 function run(over: Partial<TridentRun> = {}): TridentRun {
   return makeTridentRun({

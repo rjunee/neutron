@@ -518,6 +518,7 @@ export interface AppWsWorkBoardItem {
 
 /** Item 1 — the wire shape of a bound run's live progress (see `RunProgress`). */
 export interface AppWsRunProgress {
+  quota_wait?: { retry_at: string | null } | null
   run_id: string
   phase_label: 'planning' | 'building' | 'reviewing' | 'merged' | 'failed' | 'cancelled'
   step_label: 'building' | 'reviewing' | 'fixing' | 'merging' | 'retrying' | 'done' | 'failed'

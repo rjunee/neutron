@@ -75,6 +75,20 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 describe('WorkBoardRow brief alerts (mobile)', () => {
+  it('renders the complete quota wait and clears it on the next snapshot', async () => {
+    const props = { busy: false, index: 0, laneCount: 1, onAdvance: () => {}, onRename: () => {},
+      onReorderTo: () => {}, onDelete: () => {}, onPlay: () => {} };
+    const waiting = item({ run_progress: { ...item().run_progress!, brief_alert: null,
+      quota_wait: { retry_at: '2026-09-30T12:00:00.000Z' } } });
+    const screen = await mountScreen(createElement(WorkBoardRow, { ...props, item: waiting }));
+    expect(screen.text()).toContain('Waiting for Claude quota');
+    expect(screen.text()).toContain('Reset expected 2026-09-30T12:00:00.000Z');
+    expect(screen.text()).toContain('Resumes automatically');
+    await screen.rerender(createElement(WorkBoardRow, { ...props,
+      item: { ...waiting, run_progress: { ...waiting.run_progress!, quota_wait: null } } }));
+    expect(screen.text()).not.toContain('Waiting for Claude quota');
+    screen.unmount();
+  });
   it('renders a blocked recovery refusal without replacement progress and gives it precedence over source notices', async () => {
     const reason = 'Recovery refused: published head moved.';
     for (const run_progress of [undefined, {

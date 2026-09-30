@@ -1440,6 +1440,26 @@ export class TridentRunStore {
       .all(run_id)
   }
 
+  /** Board projection reads at most three rows, never the complete stage history. */
+  quotaWaitEvents(run_id: string): TridentStageEvent[] {
+    const latest = (predicate: string, params: string[]): TridentStageEvent | null => this.db
+      .prepare<TridentStageEvent, string[]>(`SELECT id, run_id, stage, at, meta
+        FROM code_trident_stage_events WHERE run_id = ? AND ${predicate} ORDER BY id DESC LIMIT 1`)
+      .get(run_id, ...params)
+    const mode = latest("stage = 'build-mode-state'", [])
+    if (!mode) return []
+    let step: unknown
+    try { step = JSON.parse(mode.meta ?? 'null')?.checkpoint?.pending?.step_id } catch { return [mode] }
+    if (typeof step !== 'string') return [mode]
+    const binding = latest("stage = 'claude-native-child-bound' AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.stepId') END = ?", [step])
+    if (!binding) return [mode]
+    let child: unknown
+    try { child = JSON.parse(binding.meta ?? 'null')?.childId } catch { return [mode, binding] }
+    if (typeof child !== 'string') return [mode, binding]
+    const state = latest("stage IN ('claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended') AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.stepId') END = ? AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.childId') END = ?", [step, child])
+    return state ? [mode, binding, state] : [mode, binding]
+  }
+
   getBySlug(project_slug: string, slug: string): TridentRun | null {
     const row = this.db
       .prepare<TridentRunDbRow, [string, string]>(

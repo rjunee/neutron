@@ -11,7 +11,7 @@
  * `dotState`, `roundText`, `canPlay`, `isRetry`, `formatCompletedShort`.
  */
 
-import { resolveStepLabel } from './work-board-client';
+import { resolveStepLabel, quotaWaitText } from './work-board-client';
 import type { RunPhaseLabel, RunProgress, WorkBoardItem, WorkBoardStatus } from './work-board-client';
 import type { PhaseColor } from './theme';
 
@@ -296,6 +296,8 @@ export function runNotice(item: WorkBoardItem): RunNotice | null {
   // terminal failure has no recorded reason, do not relabel the earlier alert
   // as though it caused that failure.
   if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null;
+  const waiting = quotaWaitText(item);
+  if (waiting !== null) return { text: waiting, tone: 'info' };
   const alert = briefAlertText(rp);
   if (alert !== null) return { text: alert, tone: 'alert' };
   // A manual lane change does not admit recovery or supersede its refusal.
@@ -440,6 +442,7 @@ export function canPlay(item: WorkBoardItem): boolean {
   return (
     item.status !== 'done' &&
     item.status !== 'blocked' &&
+    quotaWaitText(item) === null &&
     !isLinkedRunning(item) &&
     !item.inline_active
   );
