@@ -103,6 +103,17 @@ Gateway restart preserves active work and is not a sleep event.
       actual per-dispatch scope, including General, and routes through this
       manager. Verify consuming Open composition and
       `open/__tests__/project-build-e2e.test.ts`.
+- [ ] Project document/opening composition is on demand and session-less, with a
+      fresh toolless worker in its explicit project's named task tab. Settlement,
+      cancellation and failure retire that worker without disturbing Chat or
+      deleting conversation history. Unknown closure retains cleanup identity
+      until exit is confirmed, including through the gateway shutdown sweep.
+      Shutdown fences pending startup before its first turn, waits a bounded
+      interval, and retains exact late-child cleanup without injecting a prompt;
+      an ambiguous placement retains its operation
+      reservation rather than launching a duplicate retry. Verify:
+      `open/__tests__/project-compose-lifecycle.test.ts`, including warm Chat,
+      missing-manager, lost-reply and unconfirmed-close controls.
 - [ ] Sleep refuses busy, queued, uncertain, foreign, and unverified sessions;
       an idle owned workspace closes without deleting conversation history and
       resumes on wake. Restart adopts surviving work without duplication.

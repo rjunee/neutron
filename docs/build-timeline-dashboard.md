@@ -127,9 +127,11 @@ scan; an empty newly created file contributes incomplete coverage until bytes
 arrive. Replacement, truncation below N, and same-size rewrites refuse. The
 private refresher retains journal event IDs and appends
 only new observations as above. The directory root authorizes reading native
-receipts; it does not attest PR ownership or phase. Command spans still need an
-explicit time-bounded checkout-to-PR binding (or an exact successful GitHub
-command), and in-conversation tasks still need exact `turnBindings`. New unbound
+receipts; it does not attest PR ownership or phase. Test command spans need an
+explicit time-bounded checkout-to-PR binding or an exact session/turn binding.
+When both are present their PR links must agree; conflicting or ambiguous
+checkout evidence refuses attribution. Successful GitHub commands can identify
+their own PR. In-conversation tasks still need exact `turnBindings`. New unbound
 rollouts appear in coverage without generating attributed phases.
 
 Large session histories with explicit source registrations use the library API
@@ -209,6 +211,10 @@ nested tests or review commands, so their overlapping durations are not additive
 Register the session root and private binding config with the refresher; the
 discovery command then picks up new rollout files without per-file registration.
 New orchestration lanes still require explicit binding records.
+An exact turn registration also covers that turn's nested local test commands,
+including commands completed before task completion. It never lends ownership
+to sibling or follow-up turns. Command usage stays unknown; only the completed
+task envelope receives its native per-turn usage receipt.
 Use explicit start/completion records for forward work while a task is still open.
 
 Manual native task registration is available once the exact session and turn have

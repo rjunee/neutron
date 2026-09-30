@@ -1440,6 +1440,47 @@ export class TridentRunStore {
       .all(run_id)
   }
 
+  /** Board projection reads at most three rows, never the complete stage history. */
+  quotaWaitEvents(run_id: string): TridentStageEvent[] {
+    const latest = (predicate: string, params: string[]): TridentStageEvent | null => this.db
+      .prepare<TridentStageEvent, string[]>(`SELECT id, run_id, stage, at, meta
+        FROM code_trident_stage_events AS event WHERE run_id = ? AND ${predicate} ORDER BY id DESC LIMIT 1`)
+      .get(run_id, ...params)
+    const mode = latest("stage = 'build-mode-state'", [])
+    if (!mode) return []
+    let step: unknown
+    try { step = JSON.parse(mode.meta ?? 'null')?.checkpoint?.pending?.step_id } catch { return [mode] }
+    if (typeof step !== 'string') return [mode]
+    const field = (alias: string, name: string) => `CASE WHEN json_valid(${alias}.meta) THEN json_extract(${alias}.meta, '$.${name}') END`
+    const hostStep = (alias: string) => `CASE WHEN json_valid(${alias}.meta) THEN
+      CASE WHEN json_type(${alias}.meta, '$.parentStepId') IS NULL THEN json_extract(${alias}.meta, '$.stepId')
+      ELSE json_extract(${alias}.meta, '$.parentStepId') END END`
+    // Select one current waiting child, not merely the newest sibling. Each
+    // correlated lookup stays run-indexed and returns no historical rows.
+    const binding = latest(`stage = 'claude-native-child-bound' AND ${hostStep('event')} = ?
+      AND NOT EXISTS (SELECT 1 FROM code_trident_stage_events AS newer
+        WHERE newer.run_id = event.run_id AND newer.stage = 'claude-native-child-bound'
+          AND newer.id > event.id AND ${hostStep('newer')} = ?
+          AND ${field('newer', 'stepId')} = ${field('event', 'stepId')})
+      AND (SELECT state.stage FROM code_trident_stage_events AS state
+        WHERE state.run_id = event.run_id AND state.id > event.id
+          AND state.stage IN ('claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended')
+          AND ${field('state', 'stepId')} = ${field('event', 'stepId')}
+          AND ${field('state', 'childId')} = ${field('event', 'childId')}
+        ORDER BY state.id DESC LIMIT 1) = 'claude-quota-waiting'`, [step, step])
+    if (!binding) return [mode]
+    let child: unknown
+    let childStep: unknown
+    try {
+      const identity = JSON.parse(binding.meta ?? 'null')
+      child = identity?.childId
+      childStep = identity?.stepId
+    } catch { return [mode, binding] }
+    if (typeof child !== 'string' || typeof childStep !== 'string') return [mode, binding]
+    const state = latest("stage IN ('claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended') AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.stepId') END = ? AND CASE WHEN json_valid(meta) THEN json_extract(meta, '$.childId') END = ?", [childStep, child])
+    return state ? [mode, binding, state] : [mode, binding]
+  }
+
   getBySlug(project_slug: string, slug: string): TridentRun | null {
     const row = this.db
       .prepare<TridentRunDbRow, [string, string]>(

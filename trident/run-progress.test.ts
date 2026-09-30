@@ -8,8 +8,80 @@ import {
 } from './run-progress.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
+import { quotaWaitEvents } from './testing/quota-wait-events.ts'
 
 const T0 = Date.parse('2026-07-02T00:00:00Z')
+
+describe('durable quota wait projection', () => {
+  const current = run({ worktree: '/worktree' })
+  const events = quotaWaitEvents(current, T0 + 60_000)
+  const project = (rows = events, row = current) => deriveRunProgress(row, T0, null, null, rows).quota_wait
+  test('shows a current authenticated wait, with known or unknown reset', () => {
+    expect(project()).toEqual({ retry_at: '2026-07-02T00:01:00.000Z' })
+    expect(project(quotaWaitEvents(current))).toEqual({ retry_at: null })
+    expect(deriveRunProgress(current, T0, null, null, events).phase_label).toBe('planning')
+  })
+  test('matching resume/end clears waiting; foreign child/step/run cannot clear or label it', () => {
+    for (const stage of ['claude-quota-resumed', 'claude-quota-wait-ended']) {
+      const end = { ...events[2]!, id: 4, stage, meta: JSON.stringify({ stepId: `${current.id}:plan:0`, childId: 'native-child-current' }) }
+      expect(project([...events, end])).toBeNull()
+      for (const meta of [{ stepId: 'other-step', childId: 'native-child-current' }, { stepId: `${current.id}:plan:0`, childId: 'other-child' }])
+        expect(project([...events, { ...end, meta: JSON.stringify(meta) }])).toEqual(project())
+      expect(project([...events, { ...end, run_id: 'foreign' }])).toEqual(project())
+    }
+    expect(project(events.map(event => ({ ...event, run_id: 'foreign' })))).toBeNull()
+    expect(project(events.filter(event => event.stage !== 'claude-native-child-bound'))).toBeNull()
+    expect(project([events[0]!, events[1]!, { ...events[2]!, meta: JSON.stringify({ stepId: `${current.id}:plan:0`, childId: 'foreign' }) }])).toBeNull()
+  })
+  test('settlement, next step, child replacement and terminal outcome supersede old waiting', () => {
+    const mode = JSON.parse(events[0]!.meta!)
+    for (const pending of [undefined, { phase: 'build', step_id: `${current.id}:build:0` }])
+      expect(project([...events, { ...events[0]!, id: 5, meta: JSON.stringify({ ...mode, checkpoint: { ...mode.checkpoint, pending } }) }])).toBeNull()
+    expect(project([...events, { ...events[1]!, id: 5 }])).toBeNull()
+    for (const phase of ['done', 'failed', 'stopped'] as const) expect(project(events, { ...current, phase })).toBeNull()
+    expect(project(events, { ...current, inner_checkpoint: 'pr-merged' })).toBeNull()
+    expect(project([{ ...events[0]!, meta: '{}' }, ...events.slice(1)])).toBeNull()
+  })
+  const parentStepId = `${current.id}:review:1:head:${'a'.repeat(40)}`
+  const stepId = `review-${'b'.repeat(64)}:1:0`
+  const nested = quotaWaitEvents(current, T0 + 60_000, { parentStepId, stepId })
+  test('a resumed sibling cannot hide another current child wait; replacing its exact step can', () => {
+    const sibling = { stepId: `review-${'c'.repeat(64)}:1:0`, parentStepId, childId: 'sibling' }
+    const rows = [...nested,
+      { ...nested[1]!, id: 4, meta: JSON.stringify(sibling) },
+      { ...nested[2]!, id: 5, meta: JSON.stringify(sibling) },
+      { ...nested[2]!, id: 6, stage: 'claude-quota-resumed', meta: JSON.stringify(sibling) }]
+    expect(project(rows)).toEqual({ retry_at: '2026-07-02T00:01:00.000Z' })
+    expect(project([...rows, { ...nested[1]!, id: 7, meta: JSON.stringify({ stepId, parentStepId, childId: 'replacement' }) }])).toBeNull()
+  })
+  test('an authenticated nested review or synthesis child projects its actual step under the enclosing host step', () => {
+    expect(project(nested)).toEqual({ retry_at: '2026-07-02T00:01:00.000Z' })
+    expect(project(quotaWaitEvents(current, null, { parentStepId, stepId }))).toEqual({ retry_at: null })
+    for (const stage of ['claude-quota-resumed', 'claude-quota-wait-ended']) {
+      const ended = { ...nested[2]!, id: 4, stage }
+      expect(project([...nested, ended])).toBeNull()
+      // The outer step cannot impersonate the nested child, even with its child ID.
+      expect(project([...nested, { ...ended, meta: JSON.stringify({ stepId: parentStepId, childId: 'native-child-current' }) }])).toEqual(project(nested))
+    }
+  })
+  test('nested children require an explicit exact host mapping, never step spelling or current-child coincidence', () => {
+    for (const parent of [undefined, null, '', 1, `${current.id}:review:2`, `${parentStepId}:1:0`]) {
+      const meta = { stepId, childId: 'native-child-current', parentStepId: parent }
+      expect(project([nested[0]!, { ...nested[1]!, meta: JSON.stringify(meta) }, nested[2]!])).toBeNull()
+    }
+    for (const change of [{ stepId: parentStepId }, { stepId: `${stepId}:foreign` }, { childId: 'foreign-child' }]) {
+      expect(project([nested[0]!, nested[1]!, { ...nested[2]!, meta: JSON.stringify({ ...JSON.parse(nested[2]!.meta!), ...change }) }])).toBeNull()
+    }
+    const foreignBinding = { ...nested[1]!, id: 4, meta: JSON.stringify({ stepId, childId: 'native-child-current', parentStepId: `${current.id}:review:2` }) }
+    expect(project([...nested, foreignBinding])).toEqual(project(nested))
+    expect(project([...nested, { ...nested[1]!, id: 4 }])).toBeNull()
+    const mode = JSON.parse(nested[0]!.meta!)
+    for (const pending of [undefined, { phase: 'review', step_id: `${current.id}:review:2` }]) {
+      expect(project([...nested, { ...nested[0]!, id: 5, meta: JSON.stringify({ ...mode, checkpoint: { ...mode.checkpoint, pending } }) }])).toBeNull()
+    }
+    for (const phase of ['done', 'failed', 'stopped'] as const) expect(project(nested, { ...current, phase })).toBeNull()
+  })
+})
 
 function run(over: Partial<TridentRun> = {}): TridentRun {
   return makeTridentRun({

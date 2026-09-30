@@ -19,6 +19,8 @@ import { CronScheduler } from '@neutronai/cron/scheduler.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
 import { LoopRegistry, type SupervisedLoop } from '@neutronai/loop'
 import { McpServer } from '@neutronai/mcp/server.ts'
+import { ClaudeMcpHandlerDrain } from '../claude-mcp-handler-drain.ts'
+import type { ReplToolBridge } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import {
   setReplToolBridge,
   clearReplToolBridgeIf,
@@ -375,10 +377,10 @@ export function buildCoreModules(
   // in the composer BEFORE this graph composes, so it reaches the in-process
   // registry through a late-bound module singleton. Here — once `mcp` exists and
   // every Core / doc-search / etc. has registered into the shared registry — we
-  // point that singleton at the graph's `McpServer` (which structurally satisfies
-  // `ReplToolBridge`: it has `listToolSchemas` + `dispatch`). Shutdown clears it
+  // wrap the graph's McpServer with durable Claude handler admission. Other
+  // in-process callers keep their own existing dispatch authority. Shutdown clears it
   // so a torn-down instance can't dispatch tool calls against a dead registry.
-  let wiredBridgeServer: McpServer | undefined
+  let wiredBridgeServer: ReplToolBridge | undefined
   // WAVE 3.5 task B — the TodoWrite→Work Board reconciler wired alongside the
   // bridge (both are late-bound singletons the persistent-REPL sink reads). Held
   // here so shutdown can identity-guard-clear it. Only wired when the shared
@@ -389,7 +391,12 @@ export function buildCoreModules(
     name: 'repl-tool-bridge',
     deps: ['mcp'],
     init: (ctx) => {
-      wiredBridgeServer = ctx.graph.get<McpServer>('mcp')
+      const server = ctx.graph.get<McpServer>('mcp')
+      wiredBridgeServer = {
+        listToolSchemas: () => server.listToolSchemas(),
+        dispatch: input => server.dispatch(input),
+        claudeHandlerAdmission: new ClaudeMcpHandlerDrain(input.db, input.project_slug),
+      }
       setReplToolBridge(wiredBridgeServer)
       const board = input.work_board?.store
       if (board !== undefined) {

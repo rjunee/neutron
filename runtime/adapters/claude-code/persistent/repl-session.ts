@@ -17,7 +17,8 @@ import type { SessionSizeWatchdog } from './session-size-watchdog.ts'
 import { CHILD_KILL_GRACE_MS, ZERO_USAGE, defaultIsPidAlive } from './signatures.ts'
 import type { ActiveTurn } from './types.ts'
 import { defaultSinkTokenPath, loadOrCreateSinkToken } from './sink-coordinates.ts'
-import { independentNativeChildren, markNativeChildWorkspaceAmbiguous, nativeChildWorkspaceAmbiguous, nativeChildWorkspaceCompletion, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
+import { independentNativeChildren, markNativeChildWorkspaceAmbiguous, nativeChildWorkspaceAmbiguous, nativeChildWorkspaceCompletion, sameNativeChildWorkspace, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
+import { nativeRelayRouteFingerprint } from '../../../workers/claude-capacity-client.ts'
 
 // ---------------------------------------------------------------------------
 // ReplSession — one warm REPL + its dev-channel + its turn serialization.
@@ -29,14 +30,18 @@ export class ReplSession {
   private readyResolve: (() => void) | undefined
   readonly ready: Promise<void>
   activeTurn: ActiveTurn | undefined
-  /** The ACTIVE project scope this warm REPL serves (`options.project_id`).
-   *  The pool key folds `project_id` in (`poolKeyFor`), so one session serves
-   *  exactly ONE project scope for its whole lifetime — `'general'` (or absent)
-   *  for the General surface, the project id otherwise. The topic-agnostic
-   *  `/tool-call` sink reads it to thread the active project into the tool
-   *  dispatch, so an agent `work_board_*` write scopes to the composing turn's
-   *  project instead of falling back to the owner/General slug. */
+  /** Legacy pool label (`options.project_id`). It can spell both General and
+   *  the literal project "general" identically; MCP authority uses toolProjectId. */
   projectId: string | undefined
+  /** Canonical MCP admission scope. Undefined is unknown, null is General;
+   * legacy labels alone cannot establish General or projects named "general"/"default". */
+  toolProjectId: string | null | undefined
+
+  bindToolProjectScope(options: { conversationProjectId?: string | null; project_id?: string }): void {
+    this.toolProjectId = options.conversationProjectId !== undefined ? options.conversationProjectId
+      : options.project_id && options.project_id !== 'general' && options.project_id !== 'default'
+        ? options.project_id : undefined
+  }
   /** ABANDON-POISON flag (2026-06-18 warm-session hang fix). Set true when a turn
    *  on this warm REPL is ABANDONED before its reply lands — the caller's budget
    *  elapsed (`handle.cancel()`, e.g. the synthesis `dispatchTurn` 90s timeout) OR
@@ -230,7 +235,8 @@ export class ReplSession {
    *  the sink BEFORE spawning so a fast /channel-ready can't race). */
   private childRef: PtyChild | undefined
   /** Per-session turn mutex: only one turn injected at a time. */
-  private turnTail: Promise<void> = Promise.resolve()
+  private parentSlotActive = false
+  private readonly parentQueue: { continuation: boolean; blocked(): boolean; grant(): void }[] = []
   /** Monotonic per-incarnation turn-sequence source. Combined with `incarnation`
    *  into `activeTurn.turnId` so a reply can be correlated to the exact turn that
    *  produced it (see `ActiveTurn.turnId`). RESETS per `ReplSession` — which is
@@ -522,22 +528,46 @@ export class ReplSession {
 
   private readonly backgroundChildren = new Map<Promise<void>, NativeChildWorkspace | undefined>()
 
+  private drainParentQueue(): void {
+    if (this.parentSlotActive || this.parentQueue.length === 0) return
+    // Normal submissions remain FIFO. Only a continuation can overtake a head
+    // waiting on background completion: that completion may need this very input.
+    const index = !this.parentQueue[0]!.blocked() ? 0
+      : this.parentQueue.findIndex(entry => entry.continuation && !entry.blocked())
+    if (index < 0) return
+    const [entry] = this.parentQueue.splice(index, 1)
+    this.parentSlotActive = true
+    entry!.grant()
+  }
+
+  /** Serializes another parent submission for the same admitted child without
+   * waiting for that child to finish itself. Its durable busy lease stays held. */
+  acquireContinuationTurn(workspace: NativeChildWorkspace): Promise<() => void> {
+    return this.acquireTurnSlot(undefined, workspace, true)
+  }
+
   /** Acquire the per-session write slot and a busy lease. A background dispatcher
    * may yield only after binding its child. Readers can overlap readers; host
    * admitted writers can overlap disjoint admitted writers. Other turns wait.
    * A queued writer owns the queue before waiting, so later readers cannot starve it. */
   async acquireTurn(backgroundDispatch?: (yieldDispatch: () => void) => void, workspace?: NativeChildWorkspace): Promise<() => void> {
-    let release: () => void = () => {}
-    const prev = this.turnTail
-    this.turnTail = new Promise<void>((res) => {
-      release = res
-    })
+    return this.acquireTurnSlot(backgroundDispatch, workspace, false)
+  }
+
+  private async acquireTurnSlot(backgroundDispatch: ((yieldDispatch: () => void) => void) | undefined, workspace: NativeChildWorkspace | undefined, continuation: boolean): Promise<() => void> {
+    let parentReleased = false
+    const release = () => {
+      if (parentReleased) return
+      parentReleased = true
+      this.parentSlotActive = false
+      this.drainParentQueue()
+    }
     // COUNTED FROM BEFORE THE WAIT, deliberately. A caller QUEUED behind the active
     // turn is already committed work on this session: it has passed
     // `getOrSpawnSession`'s freshness guards and bound itself to THIS child. Counting
     // only post-wait holders made the count read zero the instant the last active turn
     // released — so the turn-completion path's `retireOnIdle` check saw an idle session
-    // and killed the child, and the queued caller then resumed from `await prev` into a
+    // and killed the child, and the queued caller then resumed after its queue grant into a
     // dead REPL. That is the stranded turn `evictWarmReplsForMcpSurfaceChange` is
     // documented as refusing to cause, arriving by the other door.
     //
@@ -546,11 +576,12 @@ export class ReplSession {
     // already strikes: a turn admitted under a grant that was in force runs to
     // completion, and the teardown happens the moment no committed turn is left.
     this.turnSlotHeld += 1
-    await prev
-    // An ambiguous child retains its durable lease, not an unfinishable local
-    // queue wait. The caller reaches the lease guard and receives a refusal.
-    await Promise.all([...this.backgroundChildren].filter(([, prior]) =>
-      !nativeChildWorkspaceAmbiguous(prior) && (!backgroundDispatch || !independentNativeChildren(workspace, prior))).map(([done]) => done))
+    await new Promise<void>(grant => {
+      this.parentQueue.push({ continuation, grant, blocked: () => [...this.backgroundChildren.values()].some(prior =>
+        !(continuation && sameNativeChildWorkspace(workspace, prior)) && !nativeChildWorkspaceAmbiguous(prior)
+        && (!backgroundDispatch || !independentNativeChildren(workspace, prior))) })
+      this.drainParentQueue()
+    })
     let released = false
     let finishReader!: () => void
     const reader = new Promise<void>(resolve => { finishReader = resolve })
@@ -573,11 +604,12 @@ export class ReplSession {
       finishReader()
       this.turnSlotHeld -= 1
       release()
+      this.drainParentQueue()
     }
     // A writable child outlives observation timeout, cancellation and lost ack.
     // Only the host's validated completion (also used by recovery) releases it.
     const completion = workspace && nativeChildWorkspaceCompletion(workspace)
-    if (completion) {
+    if (completion && !continuation) {
       fireAndForget('persistent-repl.native-child-completion', completion.then(finish))
       return () => {
         if (yielded || released || ambiguousUnqueued) return
@@ -868,6 +900,8 @@ export function authFingerprintFor(
   env: Record<string, string | undefined> | undefined,
   tokenPath?: string,
 ): string {
+  const relay = nativeRelayRouteFingerprint()
+  if (relay) return relay
   if (env === undefined) return ''
   const secret = env['CLAUDE_CODE_OAUTH_TOKEN'] ?? env['ANTHROPIC_AUTH_TOKEN'] ?? env['ANTHROPIC_API_KEY']
   if (typeof secret !== 'string' || secret.length === 0) return ''

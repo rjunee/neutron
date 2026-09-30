@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import { createClaudeNativeDispatchReceipt, createNativeDispatchSigner, nativeDispatchReceiptPath,
-  readClaudeNativeDispatchReceipt, verifyNativeDispatchNotSubmitted, type NativeDispatchLease,
+  readClaudeNativeDispatchReceipt, verifyNativeDispatchNotSubmitted, verifyNativeDispatchChildBound, type NativeDispatchLease,
   type SignedNativeDispatchRecord } from './claude-native-dispatch-receipt.ts'
 
 const dirs: string[] = []
@@ -14,12 +14,12 @@ const request: BoundedWorkRequest = { run_id: 'run', step_id: 'run:plan:0', role
   result: { path: '/result', schema: 'project-plan-v2' }, thread: null, budget: { wall_ms: 100 }, needs_approval_decision: false }
 const parent = { sessionId: 'native-session', childGeneration: 'native-generation', pid: 4321,
   processIdentity: { boot_id: 'kernel-boot', start_ticks: 42 } }
-function fixture() {
+function fixture(deadlineMs?: number, parentStepId?: string) {
   const dir = mkdtempSync(join(tmpdir(), 'native-dispatch-receipt-')); dirs.push(dir)
   const signer = createNativeDispatchSigner()
   const lease: NativeDispatchLease = { scope: { ownerHandle: 'owner', projectId: 'project' }, token: crypto.randomUUID(),
     generation: 2, reason: 'liveChild', producer: `native-child:boot:${signer.keyDigest}`, workRef: JSON.stringify([request.run_id, request.step_id]) }
-  const authority = signer.begin(lease, request)
+  const authority = signer.begin(lease, request, deadlineMs, parentStepId)
   const writer = createClaudeNativeDispatchReceipt(dir, request, authority)
   return { dir, signer, lease, authority, writer, path: nativeDispatchReceiptPath(dir, request),
     read: () => readClaudeNativeDispatchReceipt(dir, request) }
@@ -46,6 +46,20 @@ test('post-submit uncertainty and actual native child IDs never certify non-subm
   f.writer.record({ kind: 'child-bound', nativeAgentId: 'real-native-id' })
   expect((f.read() as SignedNativeDispatchRecord).body.nativeAgentId).toBe('real-native-id')
   expect(verifyNativeDispatchNotSubmitted(f.read(), request, f.lease)).toBe(false)
+})
+
+test('original host budget and enclosing review step are signed before child dispatch and cannot be relabelled', () => {
+  const deadline = Date.now() + 1000, f = fixture(deadline, 'host-review-step')
+  f.writer.record({ kind: 'parent-bound', parent })
+  f.writer.record({ kind: 'submission-started' })
+  f.writer.record({ kind: 'child-bound', nativeAgentId: 'child' })
+  const receipt = f.read() as SignedNativeDispatchRecord
+  expect(receipt.body).toMatchObject({ deadlineMs: deadline, parentStepId: 'host-review-step' })
+  expect(verifyNativeDispatchChildBound(receipt, request, f.lease)).toBe(true)
+  const changedParent = structuredClone(receipt); changedParent.body.parentStepId = 'another-step'
+  expect(verifyNativeDispatchChildBound(changedParent, request, f.lease)).toBe(false)
+  const changedBudget = structuredClone(receipt); changedBudget.body.deadlineMs = deadline + 1000
+  expect(verifyNativeDispatchChildBound(changedBudget, request, f.lease)).toBe(false)
 })
 
 test('worker mutation, foreign key, request, scope, token, generation and producer cannot release', () => {

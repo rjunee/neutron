@@ -1,4 +1,5 @@
 import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
+import { randomUUID } from 'node:crypto'
 import { actingTurnProjectId } from './conversation-scope.ts'
 import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/configured-chat/index.ts'
 /**
@@ -47,6 +48,7 @@ import {
   hasRecoverableClaudeRepl,
   reconcileExistingClaudeRepl,
   recoverExistingClaudeRepl,
+  rearmExistingClaudeReplCap,
   type ChildCrashInfo,
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
@@ -386,6 +388,9 @@ export interface BuildLlmCallSubstrateInput {
    * the shared strict host. Absent (off Herdr, tests) ⇒ the configured host, as before.
    */
   conversationTerminal?: ConversationTerminal
+  /** A disposable task uses the same strict project host, in its own named worker
+   * tab. Each start reserves one operation identity, also used by spawn retries. */
+  taskTerminal?: { terminal: ConversationTerminal; projectId: string | null; taskLabel: string }
   /**
    * The project-scope lifecycle owner (#1226). Honoured ONLY with `ownerConversation`
    * and a defined conversation scope: the scope's Chat credential is pinned while
@@ -1023,6 +1028,8 @@ function placeConversation(opts: ClaudeCodeSubstrateOptions, input: BuildLlmCall
 }
 
 export interface LlmCallSubstrate extends Substrate {
+  rearmCap(request: import('@neutronai/runtime/adapters/claude-code/persistent/operator-cap-rearm.ts').CapRearmRequest,
+    authorized: () => boolean): Promise<boolean>
   /** Retire already-owned exact helper keys; preserve registry-only survivors. */
   retireExistingHelpers(projectIds?: readonly (string | undefined)[]): Promise<ReadonlyArray<{ sessionKey: string; outcome: HelperRetirement }>>
   /** Stop admission and retire only the Claude keys this instance actually served. */
@@ -1076,7 +1083,7 @@ export function buildLlmCallSubstrate(
   const failureLane: FailureOrigin = input.credential_failure_lane ?? 'interactive'
   async function reconcileAuthorized(
     projectIds: readonly (string | null)[],
-    reconcile: (options: ClaudeCodeSubstrateOptions) => Promise<void>,
+    reconcile: (options: ClaudeCodeSubstrateOptions, currentAuthority: () => boolean) => Promise<void>,
   ): Promise<void> {
     if (input.ephemeral === true || retired) return
     for (const conversationProjectId of new Set(projectIds)) {
@@ -1098,6 +1105,18 @@ export function buildLlmCallSubstrate(
         }
         try {
           if (!hasRecoverableClaudeRepl(identity)) continue
+          const capturedCredential = { id: credential.id, kind: credential.kind, secret: credential.secret, base_url: credential.base_url }
+          const currentAuthority = (): boolean => {
+            // An asynchronous-only pool resolver cannot prove the current credential
+            // under the synchronous registry CAS. Open supplies its canonical pool.
+            if (retired || input.pool !== pool) return false
+            if (input.configuredChat?.env !== undefined && projectModelTier(input.configuredChat.env, projectId) !== undefined) return false
+            const currentSelection = input.providerResolver?.(projectId, 'conversation')
+            const currentProvider = typeof currentSelection === 'object' ? currentSelection.provider : currentSelection
+            if (normalizeProvider(currentProvider?.trim() ? currentProvider : input.provider) !== 'anthropic') return false
+            return pool.credentials.some(current => current.id === capturedCredential.id && current.kind === capturedCredential.kind
+              && current.secret === capturedCredential.secret && current.base_url === capturedCredential.base_url)
+          }
           const resolved = await resolveCredentialAuthEnv({
             ...(input.oauthRefresh === undefined ? {} : { oauthRefresh: input.oauthRefresh }),
             ...(input.owner_handle === undefined ? {} : { owner_handle: input.owner_handle }),
@@ -1105,7 +1124,7 @@ export function buildLlmCallSubstrate(
           const opts = await claudeOptionsFor(input, resolved, () => conversationProjectId ?? 'general')
           opts.conversationProjectId = conversationProjectId
           placeConversation(opts, input, conversationProjectId)
-          await reconcile(opts)
+          await reconcile(opts, currentAuthority)
         } catch (error) {
           substrateLog.warn('boot_repl_recovery_unavailable', {
             substrate_instance_id: input.substrate_instance_id, project_id: projectId,
@@ -1116,6 +1135,13 @@ export function buildLlmCallSubstrate(
     }
   }
   return {
+    async rearmCap(request, authorized) {
+      let rearmed = false
+      await reconcileAuthorized([request.projectId], async (options, currentAuthority) => {
+        if (rearmExistingClaudeReplCap(options, request, () => currentAuthority() && authorized())) rearmed = true
+      })
+      return rearmed
+    },
     async retireExistingHelpers(projectIds = [undefined]) {
       const outcomes: Array<{ sessionKey: string; outcome: HelperRetirement }> = []
       const credentialPool = input.pool ?? await input.resolvePool?.()
@@ -1165,6 +1191,10 @@ export function buildLlmCallSubstrate(
     },
     start(spec: AgentSpec): SessionHandle {
       if (retired) throw new Error('Helper session lifecycle has completed')
+      if (input.taskTerminal !== undefined && (input.ephemeral !== true || input.ownerConversation === true || spec.session !== undefined)) {
+        throw new Error('Task terminal requires a disposable session-less worker')
+      }
+      const taskOperationId = input.taskTerminal === undefined ? undefined : randomUUID()
       // SWAPPABLE PROVIDER — resolve the backend for THIS turn. A NON-EMPTY per-turn
       // resolver value wins (active-project provider); an EMPTY/whitespace resolver
       // result means "no dynamic override this turn" → defer to the statically
@@ -1176,11 +1206,11 @@ export function buildLlmCallSubstrate(
       const chat = input.configuredChat
       // General is explicitly null in the conversation scope. The legacy pool's
       // 'general' sentinel must never select a real project's provider override.
-      const conversationProjectId = input.conversationProjectId !== undefined
+      const conversationProjectId = input.taskTerminal !== undefined ? undefined : input.conversationProjectId !== undefined
         ? input.conversationProjectId : spec.metering_context?.conversationProjectId !== undefined
           ? spec.metering_context.conversationProjectId
           : (input.ownerConversation ? input.projectIdResolver?.() ?? actingTurnProjectId(spec) : undefined)
-      const projectId = conversationProjectId !== undefined
+      const projectId = input.taskTerminal !== undefined ? input.taskTerminal.projectId ?? undefined : conversationProjectId !== undefined
         ? conversationProjectId ?? undefined
         : input.projectIdResolver?.() ?? spec.metering_context?.project_id
       const resolvedSelection = conversationProjectId !== undefined
@@ -1333,7 +1363,8 @@ export function buildLlmCallSubstrate(
         const cred = { id: resolved.cred_id }
         const opts = await claudeOptionsFor(
           input, resolved,
-          () => conversationProjectId !== undefined ? conversationProjectId ?? 'general'
+          () => input.taskTerminal !== undefined ? input.taskTerminal.projectId ?? 'general'
+            : conversationProjectId !== undefined ? conversationProjectId ?? 'general'
             : input.projectIdResolver?.() ?? spec.metering_context?.project_id,
           () => {
             // A Claude turn invalidates this scope's OpenAI continuation before
@@ -1351,6 +1382,14 @@ export function buildLlmCallSubstrate(
         if (conversationProjectId !== undefined) {
           opts.conversationProjectId = conversationProjectId
           placeConversation(opts, input, conversationProjectId)
+        }
+        if (input.taskTerminal !== undefined) {
+          const { terminal, taskLabel } = input.taskTerminal
+          opts.projectPlacement = {
+            ...terminal.placementFor(projectId ?? null), role: 'worker', taskLabel,
+            operationId: taskOperationId!,
+          }
+          if (terminal.host !== undefined) opts.ptyHost = terminal.host
         }
         if (retired) {
           yield { kind: 'error', retryable: false, message: 'Helper session lifecycle has completed' }

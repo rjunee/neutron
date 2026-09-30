@@ -154,6 +154,26 @@ Bidirectional throughout: an adoption path that refuses everything satisfies eve
 refusal criterion and delivers nothing, so each refusal is paired with the acceptance
 it must not swallow.
 
+- [ ] **OPERATOR CAP REARM DOES NOT REQUIRE A RECOVERED SESSION.** An authenticated
+      `POST /admin/rearm-session-cap` can release one exact cap episode on a current
+      authorized Claude conversation before supervision has registered it. The JSON
+      body is a short-lived Ed25519 `operator-repl-cap-rearm` envelope verified
+      against independently pinned host/installation authority. The web/mobile
+      owner bearer alone grants no release authority; an envelope cannot supply
+      its verification key. Its request binds `projectId` (null for General),
+      `sessionKey`, `sessionId`, `childGeneration` and `cappedAt`. Scope, selected provider, credential and
+      fingerprint are resolved from current host authority. The locked write changes
+      only `capped_at`; it never starts a turn, resumes a child or releases work.
+      A foreign/deleted/retired scope, unresolved admission, changed identity or cap,
+      in-flight respawn, unavailable authority or unheld lock refuses unchanged.
+      The already-running recovery scheduler subsequently resumes through its
+      existing gates without another gateway restart or synthetic chat.
+      Later readiness and elapsed time never automatically clear the storm latch.
+      Verify: `runtime/adapters/claude-code/persistent/__tests__/operator-cap-rearm.test.ts`
+      and `open/__tests__/boot-live-agent-adoption.test.ts`, plus
+      `open/__tests__/operator-cap-rearm-authorization.test.ts`, with accepting and
+      refusing semantic mutations.
+
 - [ ] **BOOT RESTORES AUTHORIZED LIVE-CHAT SURVIVORS WITHOUT AN APP TURN.** The
       production graph installs its tool bridge before adoption, then awaits
       reconciliation for General and current projects on Claude routes. The

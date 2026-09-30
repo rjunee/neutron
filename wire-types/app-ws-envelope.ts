@@ -485,6 +485,8 @@ export interface AppWsOutboundEditUpdate {
 export interface AppWsWorkBoardItem {
   id: string
   title: string
+  /** Durable recovery admission refusal; null when no refusal is recorded. */
+  recovery_refusal?: string | null
   /** `archived` = SHELVED (migration 0130): deprioritised, off the active lane,
    *  and NEVER counted as completed — it is not a quieter `done`.
    *  `blocked` = the build STOPPED ON PURPOSE (migration 0140) and reported why:
@@ -518,6 +520,7 @@ export interface AppWsWorkBoardItem {
 
 /** Item 1 — the wire shape of a bound run's live progress (see `RunProgress`). */
 export interface AppWsRunProgress {
+  quota_wait?: { retry_at: string | null } | null
   run_id: string
   phase_label: 'planning' | 'building' | 'reviewing' | 'merged' | 'failed' | 'cancelled'
   step_label: 'building' | 'reviewing' | 'fixing' | 'merging' | 'retrying' | 'done' | 'failed'

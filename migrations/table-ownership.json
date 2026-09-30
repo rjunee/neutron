@@ -33,9 +33,18 @@
     },
     "project_admission_fences": {
       "owner": "gateway/project-admission-store.ts",
-      "writers": ["gateway/project-admission-store.ts"]
+      "writers": ["gateway/claude-mcp-handler-drain.ts", "gateway/project-admission-store.ts"],
+      "notes": [
+        "claude-mcp-handler-drain.ts takes the scoped fence write lock with a generation-preserving UPDATE",
+        "before checking the open phase and exact admission generation in its handler-acceptance transaction.",
+        "project-admission-store.ts remains the owner of fence creation and lifecycle transitions."
+      ]
     },
     "project_admission_leases": {
+      "owner": "gateway/project-admission-store.ts",
+      "writers": ["gateway/project-admission-store.ts"]
+    },
+    "claude_native_continuations": {
       "owner": "gateway/project-admission-store.ts",
       "writers": ["gateway/project-admission-store.ts"]
     },

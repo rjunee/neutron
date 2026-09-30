@@ -18,7 +18,8 @@
  * and refine the live phases with the checkpoint.
  */
 
-import type { TridentPhase, TridentRun } from './store.ts'
+import type { TridentPhase, TridentRun, TridentStageEvent } from './store.ts'
+import { parseBuildModeState } from './build-mode-state.ts'
 import { STAGE_HEARTBEAT_CADENCE_MS, STALLED_WARN_MS } from './liveness.ts'
 
 export { STALLED_WARN_MS }
@@ -58,6 +59,8 @@ export type RunStepLabel = 'building' | 'reviewing' | 'fixing' | 'merging' | 're
  * client can use to tick `elapsed`/`stalled` live between polls.
  */
 export interface RunProgress {
+  /** Durable wait for the current native child; absent on older frames. */
+  quota_wait?: { retry_at: string | null } | null
   /** Which run this progress is for (correlates with `linked_run_id`). */
   run_id: string
   phase_label: RunPhaseLabel
@@ -121,6 +124,48 @@ export interface RunProgress {
 
 const TERMINAL_PHASES: readonly TridentPhase[] = ['done', 'failed', 'stopped']
 
+/** Only an authenticated child binding for the host's current pending step counts. */
+export function deriveQuotaWait(run: TridentRun, events: readonly TridentStageEvent[]): Exclude<RunProgress['quota_wait'], undefined> {
+  if (TERMINAL_PHASES.includes(run.phase) || run.inner_checkpoint === 'pr-merged') return null
+  const scoped = events.filter(event => event.run_id === run.id).sort((a, b) => a.id - b.id)
+  const mode = scoped.filter(event => event.stage === 'build-mode-state').at(-1)
+  if (!mode) return null
+  const metaOf = (event: TridentStageEvent): Record<string, unknown> | null => {
+    try { return JSON.parse(event.meta ?? 'null') } catch { return null }
+  }
+  try {
+    const pending = parseBuildModeState(mode.meta, run).checkpoint.pending
+    if (!pending) return null
+    const bindings = scoped.filter(event => event.stage === 'claude-native-child-bound')
+      .filter(event => {
+        const identity = metaOf(event)
+        // The authenticated producer retains the enclosing host step for panel
+        // children. Their own request step remains the quota event identity.
+        return (identity?.parentStepId === undefined ? identity?.stepId : identity.parentStepId) === pending.step_id
+      }).reverse()
+    const selectedSteps = new Set<string>()
+    for (const binding of bindings) {
+      const identity = metaOf(binding)
+      if (typeof identity?.stepId !== 'string' || !identity.stepId || selectedSteps.has(identity.stepId)) continue
+      // Replacements supersede only their own actual child step. A completed
+      // sibling cannot conceal another child still waiting in this review.
+      selectedSteps.add(identity.stepId)
+      if (typeof identity.childId !== 'string' || !identity.childId) continue
+      const state = scoped.filter(event => ['claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended'].includes(event.stage))
+        .filter(event => {
+          const meta = metaOf(event)
+          return event.id > binding.id && meta?.stepId === identity.stepId && meta?.childId === identity.childId
+        }).at(-1)
+      if (!state || state.stage !== 'claude-quota-waiting') continue
+      const retry = metaOf(state)?.retryAtMs
+      const retry_at = typeof retry === 'number' && Number.isSafeInteger(retry) && retry > 0
+        && retry <= 8_640_000_000_000_000 ? new Date(retry).toISOString() : null
+      return { retry_at }
+    }
+    return null
+  } catch { return null }
+}
+
 /** The base label for a phase, before any `inner_checkpoint` refinement. */
 function baseLabel(phase: TridentPhase): RunPhaseLabel {
   switch (phase) {
@@ -177,6 +222,7 @@ export function deriveRunProgress(
   nowMs: number,
   repo_web_url?: string | null,
   heartbeat_at: string | null = null,
+  quota_events: readonly TridentStageEvent[] = [],
 ): RunProgress {
   const startedMs = Date.parse(run.started_at)
   const advancedMs = Date.parse(run.last_advanced_at)
@@ -240,6 +286,7 @@ export function deriveRunProgress(
 
   const stalled = !terminal && sinceAdvance > STALLED_WARN_MS
   return {
+    quota_wait: deriveQuotaWait(run, quota_events),
     run_id: run.id,
     phase_label,
     step_label: !terminal && run.infra_retries > 0
@@ -286,6 +333,7 @@ export function runProgressForItem(
   nowMs: number,
   peekRepoWebUrl?: ((repo_path: string) => string | null) | undefined,
   latestHeartbeatAt?: ((run_id: string) => string | null) | undefined,
+  quotaWaitEvents?: ((run_id: string) => readonly TridentStageEvent[]) | undefined,
 ): RunProgress | null {
   const runId = item.linked_run_id
   if (runId === null || runId.length === 0) return null
@@ -299,5 +347,6 @@ export function runProgressForItem(
     nowMs,
     peekRepoWebUrl !== undefined ? peekRepoWebUrl(run.repo_path) : null,
     latestHeartbeatAt !== undefined ? latestHeartbeatAt(run.id) : null,
+    quotaWaitEvents?.(run.id) ?? [],
   )
 }

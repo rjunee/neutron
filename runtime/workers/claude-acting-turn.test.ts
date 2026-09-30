@@ -79,7 +79,22 @@ test.each(['draft', 'multiline', 'busy', 'unreadable', 'unavailable', 'unguarded
   f.binding.session.child.submitLineGuarded = guarded
   expect(await f.run()).toEqual({ kind: 'turn-ended' })
   expect(f.commands).toHaveLength(1)
-  expect(submitted).toEqual(['not-submitted', 'dispatch', 'submission-started'])
+  expect(submitted).toEqual(['not-submitted', 'submission-started', 'dispatch'])
+})
+
+test.each(['retained', 'guarded'] as const)('original receipt failure prevents %s terminal dispatch and preparation release', async transport => {
+  const f = await fixture()
+  if (transport === 'guarded') f.binding.session = { ...f.binding.session, child: { ...f.binding.session.child, paneHandle: 'fixture-pane',
+    submitLineGuarded: async (line, preflight, signal) => { await preflight(); await f.binding.session.child.submitLine!(line, signal) } } }
+  let releasedPreparation = false
+  f.binding.onDispatchSubmitted = () => { releasedPreparation = true }
+  f.binding.onNativeDispatchEvidence = event => {
+    if (event.kind === 'submission-started') throw new Error('Original receipt unavailable')
+  }
+  await expect(f.run()).rejects.toThrow('Original receipt unavailable')
+  expect(f.commands).toEqual([])
+  expect(releasedPreparation).toBe(false)
+  expect(f.released()).toBe(1)
 })
 
 test('a screen read that returns after abandonment never pastes or presses Enter', async () => {
@@ -786,7 +801,12 @@ for (const scenario of ['late trailer', 'no subagent', 'no trailer', 'throw', 't
     let offered = 0
     let observation: Awaited<ReturnType<ProjectActingTurn>> | undefined
     const runners = await createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
-      actingTurn: async input => { offered = input.timeout_ms; observation = await actingTurn(input); return observation }, headless: {},
+      actingTurn: async input => {
+        // This observer advances a logical clock. Its zero-wait queue must use
+        // that same clock, not reimburse real filesystem scheduling jitter.
+        const { dispatchBudget: _realClockBudget, ...logicalInput } = input
+        offered = input.timeout_ms; observation = await actingTurn(logicalInput); return observation
+      }, headless: {},
       trailer: { schemas: new Map([['v1', () => true]]), metadata: () => undefined } })
     const outcome = await runners.inRepl!.run(f.input.request, 'in-repl', f.input.signal)
     expect(offered).toBeGreaterThan(50_000)

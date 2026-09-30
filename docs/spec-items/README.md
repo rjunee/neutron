@@ -17,6 +17,7 @@ at the old name. Retitle through the `title:` frontmatter instead.
 These are the items the harness-orchestrator cutover is gated on.
 
 - [`cancel-stops-host-review-suite`](cancel-stops-host-review-suite.md) — Cancellation stops the run's host review suite
+- [`claude-same-agent-continuation`](claude-same-agent-continuation.md) — Continue a quota-limited Claude child on its original native agent ID
 - [`codex-review-provider-limit`](codex-review-provider-limit.md) — Preserve explicit Codex provider usage limits at the review gate
 - [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) — Let the initial planner select a persisted execution strategy
 - [`published-branch-preservation`](published-branch-preservation.md) — Preserve previously published work across fresh dispatch and replay
@@ -24,11 +25,13 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`trident-build-efficiency`](trident-build-efficiency.md) — Avoid repeated build work and measure Trident's time and token costs
+- [`work-board-claude-quota-wait`](work-board-claude-quota-wait.md) — Show durable Claude quota waits on the Work Board
 - [`codex-inactive-seat-freshness`](codex-inactive-seat-freshness.md) — Refresh inactive Codex seat usage before pool selection
 - [`codex-operator-custody`](codex-operator-custody.md) — Adopt Codex account custody and expose bounded operator rotation
 - [`work-board-attempt-provenance`](work-board-attempt-provenance.md) — Preserve terminal Work Board attempts across retry and shelving
 - [`repl-model-background-poll-test-stability`](repl-model-background-poll-test-stability.md) — Synchronize the REPL model background-poll race test
 - [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) — A gateway restart keeps the project REPLs, conversation and all
+- [`claude-tool-generation-settlement`](claude-tool-generation-settlement.md) — Fence Claude tool admission and account for accepted calls durably
 - [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
 - [`native-bun-cache-hardlinks`](native-bun-cache-hardlinks.md) — Native scratch installs reuse Bun cache hardlinks
 - [`project-herdr-workspaces`](project-herdr-workspaces.md) — Project-owned Herdr workspaces and sleep lifecycle
@@ -51,6 +54,7 @@ branch is cut (standard §3.1, §3.2).
 | [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) | Carry a dead run's checkpoint and task iteration into its retry | P0 | yes |
 | [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) | Emit a terminal cause on every terminal path, and report it | P0 | yes |
 | [`cancel-stops-host-review-suite`](cancel-stops-host-review-suite.md) | Cancellation stops the run's host review suite | P0 | yes |
+| [`claude-same-agent-continuation`](claude-same-agent-continuation.md) | Continue a quota-limited Claude child on its original native agent ID | P0 | yes |
 | [`codex-review-provider-limit`](codex-review-provider-limit.md) | Preserve explicit Codex provider usage limits at the review gate | P0 | yes |
 | [`host-test-suite-efficiency`](host-test-suite-efficiency.md) | Diagnose early and remove measured host test-suite waste | P0 | yes |
 | [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) | Let the initial planner select a persisted execution strategy | P0 | yes |
@@ -62,6 +66,7 @@ branch is cut (standard §3.1, §3.2).
 | [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) | The project REPL owns the build loop | P0 | yes |
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
 | [`trident-build-efficiency`](trident-build-efficiency.md) | Avoid repeated build work and measure Trident's time and token costs | P0 | yes |
+| [`work-board-claude-quota-wait`](work-board-claude-quota-wait.md) | Show durable Claude quota waits on the Work Board | P0 | yes |
 | [`a-changed-literal-must-not-leave-new-prose-stale`](a-changed-literal-must-not-leave-new-prose-stale.md) | Refuse newly added prose that asserts a constant's replaced literal | P1 | — |
 | [`a-fake-cannot-be-silently-incomplete`](a-fake-cannot-be-silently-incomplete.md) | Require output-capable hosts at merge construction | P1 | — |
 | [`a-run-whose-head-does-not-resolve-must-refuse-to-commit`](a-run-whose-head-does-not-resolve-must-refuse-to-commit.md) | A run whose HEAD does not resolve must refuse to commit | P1 | — |
@@ -121,6 +126,7 @@ branch is cut (standard §3.1, §3.2).
 | Item | Title | Priority | Cutover |
 |---|---|---|---|
 | [`a-gateway-restart-keeps-the-project-repls`](a-gateway-restart-keeps-the-project-repls.md) | A gateway restart keeps the project REPLs, conversation and all | P0 | yes |
+| [`claude-tool-generation-settlement`](claude-tool-generation-settlement.md) | Fence Claude tool admission and account for accepted calls durably | P0 | yes |
 | [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) | The sink's coordinates outlive the gateway, and an orphan must not | P0 | yes |
 | [`herdr-host-implements-ptyhost-over-the-socket-api`](herdr-host-implements-ptyhost-over-the-socket-api.md) | HerdrHost implements PtyHost over the herdr socket API | P0 | yes |
 | [`migration-owner-atomic-publication`](migration-owner-atomic-publication.md) | Publish complete migration ownership markers without replacement | P0 | yes |

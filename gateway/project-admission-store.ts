@@ -40,6 +40,39 @@ function scopeKey(scope: ProjectAdmissionScope): string {
 export class ProjectAdmissionStore {
   constructor(private readonly db: ProjectDb) {}
 
+  readNativeContinuation(lease: AdmissionLeaseRow): string | undefined {
+    return this.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations WHERE lease_token = ? ORDER BY rowid DESC LIMIT 1', [lease.token])?.preparation;
+  }
+
+  /** Recheck the original authorization epoch before capacity and parent input. */
+  nativeContinuationCurrent(lease: AdmissionLeaseRow): boolean {
+    const key = scopeKey(lease.scope);
+    if (this.hasPreparedHostTermination(lease.scope)) return false;
+    return Boolean(this.db.get(`SELECT 1 FROM project_admission_leases l
+      JOIN project_admission_fences f ON f.scope_key = l.scope_key
+      WHERE l.token = ? AND l.scope_key = ? AND l.generation = ? AND l.reason = 'liveChild'
+        AND l.producer = ? AND l.work_ref = ? AND f.phase = 'open' AND f.generation = l.generation`,
+    [lease.token, key, lease.generation, lease.producer, lease.workRef]));
+  }
+
+  /** Each episode remains spent forever, including after its successor is claimed. */
+  async claimNativeContinuation(lease: AdmissionLeaseRow, episodeId: string, preparation: string): Promise<boolean> {
+    if (!/^[a-f0-9]{64}$/.test(episodeId)) return false;
+    return this.db.transaction(async tx => {
+      const key = scopeKey(lease.scope);
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      if (this.hasPreparedHostTermination(lease.scope)) return false;
+      const fence = tx.get<FenceRow>('SELECT generation, phase FROM project_admission_fences WHERE scope_key = ?', [key]);
+      if (!fence || fence.phase !== 'open' || fence.generation !== lease.generation) return false;
+      const exact = tx.get(`SELECT 1 FROM project_admission_leases WHERE token = ? AND scope_key = ?
+        AND generation = ? AND reason = 'liveChild' AND producer = ? AND work_ref = ?`,
+      [lease.token, key, lease.generation, lease.producer, lease.workRef]);
+      if (!exact) return false;
+      return tx.runSync('INSERT OR IGNORE INTO claude_native_continuations (lease_token, authenticated_episode_id, preparation) VALUES (?, ?, ?)',
+        [lease.token, episodeId, preparation]).changes === 1;
+    });
+  }
+
   /** Explicit provisioning only; never resets a pre-existing maintenance fence. */
   async register(scope: ProjectAdmissionScope): Promise<void> {
     await this.db.run(`INSERT INTO project_admission_fences (scope_key, phase) VALUES (?, 'open')

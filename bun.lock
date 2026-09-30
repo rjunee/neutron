@@ -491,6 +491,7 @@
         "jose": "^5.9.0",
       },
       "devDependencies": {
+        "@neutronai/app": "workspace:*",
         "@neutronai/codegen-core": "workspace:*",
       },
     },

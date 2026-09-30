@@ -1,5 +1,10 @@
 /** A real Open graph consumes its previous gateway's project REPL before any turn. */
-import { afterAll, afterEach, beforeAll, beforeEach, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test, spyOn } from 'bun:test'
+import { generateKeyPairSync } from 'node:crypto'
+import * as nativeSpawn from '@neutronai/runtime/adapters/claude-code/persistent/spawn.ts'
+import * as transcriptPaths from '@neutronai/runtime/adapters/claude-code/persistent/session-size-watchdog.ts'
+import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
+import { issueCapRearmAuthorization } from '../sign-repl-cap-rearm.ts'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -7,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
-import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
 import { getPersistentReplModel, switchPersistentReplModel } from '@neutronai/runtime/adapters/claude-code/persistent/model-control.ts'
 import { writeInstanceModelProvider } from '@neutronai/gateway/storage/owner-metadata.ts'
@@ -44,6 +49,124 @@ const SECOND_HANDLE = 'pane:second-survivor'
 const SECOND_PID = 31338
 const SECOND_PROJECT = 'second-project'
 const API_KEY = 'sk-ant-synthetic-boot-adoption'
+
+test.each(['provider', 'model', 'credential', 'removed', 'retired', 'unchanged'] as const)(
+  'operator cap CAS revalidates authority after async resolution: %s', async change => {
+    const paths = deriveReplSupervisionPaths(home!)
+    mkdirSync(paths.stateDir, { recursive: true })
+    const credentials = newCredentialPool({ strategy: 'round_robin', credentials: [
+      { id: 'anthropic:ANTHROPIC_API_KEY', kind: 'api_key', secret: API_KEY },
+    ] })
+    let provider = 'anthropic'
+    const modelEnv: Record<string, string | undefined> = {}
+    const substrate = buildLlmCallSubstrate({ pool: credentials, substrate_instance_id: 'cc-agent-owner',
+      cwd: home!, user_id: 'owner', owner_handle: 'owner', providerResolver: () => provider, configuredChat: { env: modelEnv } })
+    if (!substrate) throw new Error('Synthetic credential pool must create a substrate')
+    const key = poolKeyFor({ substrate_instance_id: 'cc-agent-owner', cwd: home!, user_id: 'owner',
+      project_id: PROJECT, credential_identity: credentials.credentials[0]!.id })
+    const row = { ...registryRow(key, 'pane:gone', GENERATION, 1), conversationProjectId: PROJECT,
+      model: 'claude-test', capped_at: 100 }
+    writeFileSync(paths.replRegistryPath, JSON.stringify({ [key]: row }))
+    const pending = substrate.rearmCap({ projectId: PROJECT, sessionKey: key, sessionId: SESSION,
+      childGeneration: GENERATION, cappedAt: 100 }, () => true)
+    // The first await has resolved the old identity but has not reached the CAS.
+    if (change === 'provider') provider = 'openai-codex'
+    if (change === 'model') modelEnv['NEUTRON_PROJECT_MODELS'] = JSON.stringify({ [PROJECT]: 'configured-test-tier' })
+    if (change === 'credential') credentials.credentials[0]!.secret = 'replacement-key'
+    if (change === 'removed') credentials.credentials.splice(0)
+    if (change === 'retired') await substrate.retire()
+    expect(await pending).toBe(change === 'unchanged')
+    expect(JSON.parse(readFileSync(paths.replRegistryPath, 'utf8'))[key].capped_at)
+      .toBe(change === 'unchanged' ? undefined : 100)
+  })
+
+test('production operator cap rearm resolves canonical scope without supervision and preserves unresolved children', async () => {
+  process.env['NEUTRON_DB_PATH'] = join(home!, 'operator-cap.db')
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
+  db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  seedProject(PROJECT)
+  const host = patchHost()
+  const paths = deriveReplSupervisionPaths(home!)
+  mkdirSync(paths.stateDir, { recursive: true })
+  const key = poolKeyFor({ substrate_instance_id: 'cc-agent-owner', cwd: home!, user_id: 'owner',
+    project_id: PROJECT, credential_identity: 'anthropic:ANTHROPIC_API_KEY' })
+  const originalRow = registryRow(key, 'pane:gone', GENERATION, 1)
+  const row: ReplRegistryRecord = { ...originalRow,
+    conversationProjectId: PROJECT, model: 'claude-test', capped_at: 100, first_ready_at: 100000,
+    reuse: { ...originalRow.reuse!,
+      tool_surface: PROJECT_REPL_TOOL_DEFS.map(tool => tool.name).join(',') } }
+  delete row.pane_handle; delete row.pid
+  writeFileSync(paths.replRegistryPath, JSON.stringify({ [key]: row }))
+  const bearer = 'synthetic-operator-cap-bearer-0123456789'
+  const pair = generateKeyPairSync('ed25519')
+  const authority = { publicKey: pair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
+    hostId: 'test-host', instanceId: 'test-install', attestBoot: async () => undefined }
+  const keyBytes = Buffer.from(pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString())
+  const composition = await buildOpenGraphComposer({ env: process.env, ownerBearer: bearer,
+    nativeHostRecoveryAuthority: authority,
+    substrateFactory: options => ({ start: () => ({ events: (async function* () {
+      yield { kind: 'completion' as const, usage: { input_tokens: 0, output_tokens: 0 }, substrate_instance_id: options.substrate_instance_id }
+    })(), respondToTool: async () => {}, cancel: async () => {}, tool_resolution: 'internal' }) })
+  })({ db, project_slug: 'owner' })
+  const admission = composition.project_admission!
+  await admission.maintenance.register(admission.scopeFor(PROJECT))
+  const child = await admission.admit(PROJECT, 'liveChild', 'native-child', 'operator-test-child')
+  expect(child.status).toBe('admitted')
+  const request = { projectId: PROJECT, sessionKey: key, sessionId: SESSION, childGeneration: GENERATION, cappedAt: 100 }
+  const call = (body: unknown = request, signed = true) => composition.admin_respawn_handler!(new Request('http://instance.test/admin/rearm-session-cap', {
+    method: 'POST', headers: { 'X-Gateway-Token': bearer }, body: JSON.stringify(signed
+      ? issueCapRearmAuthorization(body, '/test-key', authority.hostId, authority.instanceId, { uid: () => 0, readKey: () => keyBytes }) : body),
+  }))
+  // Only the final native spawn is substituted. The real Open scheduler,
+  // canonical authorization and runtime startup recovery run on both passes.
+  const transcript = join(home!, 'cap-transcript.jsonl')
+  writeFileSync(transcript, '{"retained":true}\n')
+  const pathsSpy = spyOn(transcriptPaths, 'sessionJsonlPath').mockReturnValue(transcript)
+  const spawnSpy = spyOn(nativeSpawn, 'getOrSpawnSession').mockImplementation(async (sessionKey, _options, _profile, resume) => {
+    expect(sessionKey).toBe(key)
+    expect(resume?.sessionId).toBe(SESSION)
+    return new ReplSession(key, 'resumed-generation', SESSION, CHANNEL, home!)
+  })
+  try {
+    graph = await composeProductionGraph(composition)
+    expect(supervisedBySessionKey.has(key)).toBe(false)
+    expect((await call())!.status).toBe(409)
+    expect(JSON.parse(readFileSync(paths.replRegistryPath, 'utf8'))[key]).toEqual(row)
+    const lease = admission.listLeases('liveChild')[0]!
+    expect(await admission.maintenance.prepareHostTermination('test-prepared-operation', lease,
+      'retained-test-preparation', () => true)).toBe(true)
+    if (child.status === 'admitted') expect(await child.release()).toBe(false)
+    // Adversarial fixture: an orphan preparation still holds even without its
+    // lease. Production release correctly refused above; only this test DB is edited.
+    db.raw().run('DELETE FROM project_admission_leases WHERE token = ?', [lease.token])
+    expect(admission.listLeases()).toHaveLength(0)
+    expect((await call())!.status).toBe(409)
+    expect(JSON.parse(readFileSync(paths.replRegistryPath, 'utf8'))[key]).toEqual(row)
+    // Fixture-only removal; production has no clear-preparation endpoint.
+    db.raw().run('DELETE FROM native_host_terminations WHERE operation_id = ?', ['test-prepared-operation'])
+    db.raw().run('UPDATE projects SET deleted_at = ? WHERE id = ?', ['2026-01-01', PROJECT])
+    expect((await call())!.status).toBe(409)
+    db.raw().run('UPDATE projects SET deleted_at = NULL WHERE id = ?', [PROJECT])
+    expect((await call(request, false))!.status).toBe(403)
+    expect(JSON.parse(readFileSync(paths.replRegistryPath, 'utf8'))[key]).toEqual(row)
+    expect((await call())!.status).toBe(200)
+    const { capped_at: _cap, ...expected } = row
+    expect(JSON.parse(readFileSync(paths.replRegistryPath, 'utf8'))[key]).toEqual(expected)
+    expect(supervisedBySessionKey.has(key)).toBe(false)
+    expect(host.spawns()).toBe(0)
+    expect(spawnSpy).not.toHaveBeenCalled()
+    // Wait for the scheduler already started by graph readiness. No second boot,
+    // synthetic chat or direct recover call may provide the missing stimulus.
+    const deadline = Date.now() + 35000
+    while (!supervisedBySessionKey.has(key) && Date.now() < deadline) await Bun.sleep(20)
+    expect(spawnSpy).toHaveBeenCalledTimes(1)
+    expect(supervisedBySessionKey.has(key)).toBe(true)
+  } finally {
+    await graph?.shutdown(); graph = undefined
+    spawnSpy.mockRestore(); pathsSpy.mockRestore()
+    for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
+  }
+}, 60_000)
 const ENV_KEYS = [
   'NEUTRON_HOME', 'OWNER_HOME', 'NEUTRON_DB_PATH', 'NEUTRON_INSTANCE_SLUG',
   'NEUTRON_LANDING_STATIC_DIR', 'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
@@ -208,7 +331,7 @@ async function toolCall(credential: string, callId: string, sessionId = SESSION)
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential },
     body: JSON.stringify({ session_id: sessionId, tool_name: 'work_board_add',
-      args: { title: `board item ${callId}` }, call_id: callId, project_id: 'forged-project' }),
+      args: { title: `board item ${callId}` }, call_id: callId.padEnd(16, '_'), project_id: 'forged-project' }),
   })
   return { status: response.status, body: await response.json() as Record<string, unknown> }
 }
@@ -257,6 +380,13 @@ test('production graph grants two project survivors only after bridge wiring, wi
     [secondKey]: registryRow(secondKey, SECOND_HANDLE, SECOND_GENERATION, secondDevChannel.port!,
       { session: SECOND_SESSION, channel: SECOND_CHANNEL, pid: SECOND_PID }),
   }
+  // These two tool-capable survivors carry their original durable generation;
+  // legacy unstamped rows in the other tests deliberately remain unknown.
+  const originalAdmission = new ProjectAdmission({ db: db!, ownerHandle: 'owner', bootId: 'prior-boot' })
+  for (const [key, project] of [[goodKey, PROJECT], [secondKey, SECOND_PROJECT]] as const) {
+    await originalAdmission.maintenance.register(originalAdmission.scopeFor(project))
+    registry[key]!.admission_generation = originalAdmission.inspect(project)!.generation
+  }
   writeFileSync(paths.replRegistryPath, JSON.stringify(registry, null, 2))
 
   // Only phase-spec prewarm reaches this seam: adoption itself constructs no
@@ -297,7 +427,7 @@ test('production graph grants two project survivors only after bridge wiring, wi
     expect((await pool.get(secondKey))?.child.paneHandle).toBe(SECOND_HANDLE)
     const accepted = await toolCall(childCredential, 'good')
     expect(accepted.status).toBe(200)
-    expect(accepted.body['ok']).toBe(true)
+    expect(accepted.body['ok'], JSON.stringify(accepted.body)).toBe(true)
     const secondAccepted = await toolCall(secondCredential, 'second', SECOND_SESSION)
     expect(secondAccepted.status).toBe(200)
     expect(secondAccepted.body['ok']).toBe(true)
@@ -673,6 +803,12 @@ test('stable credential IDs adopt only when the surviving child still has the cu
   const cursorBefore = credentials.cursor
   const dispatched: Array<{ project_id: string | null | undefined }> = []
   setReplToolBridge({
+    // Credential-adoption routing fixture; the production graph test above and
+    // project-build E2E exercise the real durable handler ledger.
+    claudeHandlerAdmission: { dispatch: async (_identity, _id, _binding, current, handler) => {
+      if (!current()) throw new Error('revoked')
+      return await handler()
+    } },
     listToolSchemas: () => [{ name: 'work_board_add', description: 'capture project', input_schema: { type: 'object' } }],
     dispatch: async (input) => { dispatched.push({ project_id: input.project_id }); return { project_id: input.project_id } },
   })

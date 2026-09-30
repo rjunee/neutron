@@ -13,12 +13,29 @@ import {
   docLinkLabel,
   docPathFromDesignRef,
   parseWorkBoardItems,
+  quotaWaitText,
   WORK_BOARD_STATUSES,
   type WorkBoardItem,
 } from '../work-board-client.ts'
 
 const BASE = 'https://sam.neutron.test'
 const TOKEN = 'dev:sam'
+
+it('decodes quota waits without guessing reset times and respects the current binding', () => {
+  const frame = (wait: unknown) => parseWorkBoardItems([{ ...row({ status: 'in_progress', linked_run_id: 'current' }), run_progress: {
+    run_id: 'current', phase_label: 'building', step_label: 'building', quota_wait: wait,
+  } }])[0]!
+  expect(quotaWaitText(frame({ retry_at: null }))).toBe('Waiting for Claude quota · Reset time unavailable · Resumes automatically')
+  expect(quotaWaitText(frame({ retry_at: '2026-09-30T12:00:00Z' }))).toContain('Reset expected 2026-09-30T12:00:00.000Z')
+  for (const malformed of [undefined, {}, 'waiting', { retry_at: 'bad' }, { retry_at: 42 }])
+    expect(quotaWaitText(frame(malformed))).toBeNull()
+  const valid = frame({ retry_at: null })
+  expect(quotaWaitText({ ...valid, linked_run_id: 'foreign' })).toBeNull()
+  for (const status of ['done', 'failed', 'blocked', 'archived', 'upcoming'] as const)
+    expect(quotaWaitText({ ...valid, status })).toBeNull()
+  for (const phase_label of ['merged', 'failed', 'cancelled'] as const)
+    expect(quotaWaitText({ ...valid, run_progress: { ...valid.run_progress!, phase_label } })).toBeNull()
+})
 
 it('parses the durable recovery refusal while accepting absent and malformed older fields', () => {
   const refusal = 'Recovery refused: published head moved.'

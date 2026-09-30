@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { readArmedTrailerReservation, reserveTrailerSlot } from './trailer-slot.ts'
@@ -8,6 +7,8 @@ import type { BoundedWorkOutcome, BoundedWorkRequest, WorkerRunner } from '../bo
 import { SUBAGENT_TOOL_NAME } from './claude-tool-contract.ts'
 import { PLANNER_ROLE, PLANNER_NATIVE_TOOL, requiresPlannerWork } from './planner-work.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
+import { readClaudeContinuationResult } from './claude-native-continuation.ts'
+import { ClaudeDispatchBudget, waitForClaudeDeadline } from './claude-dispatch-budget.ts'
 
 
 export interface ClaudeInReplOptions {
@@ -16,7 +17,7 @@ export interface ClaudeInReplOptions {
   state_dir: string
   /** The project's conversational spec, including its constant tool surface and scope. */
   spec: Omit<AgentSpec, 'prompt'>
-  composeActingTurn(topic: string, spec: AgentSpec, opts: { timeout_ms: number; deadline_ms: number; signal: AbortSignal }): Promise<string>
+  composeActingTurn(topic: string, spec: AgentSpec, opts: { timeout_ms: number; deadline_ms: number; dispatchBudget: ClaudeDispatchBudget; signal: AbortSignal }): Promise<string>
   /** Host validates the requested schema and identity, and supplies measured outcome metadata.
    * The input is exclusively the trailer file, never conversational text. */
   decodeTrailer(bytes: string, req: BoundedWorkRequest): ProjectTrailerOutcome
@@ -32,8 +33,9 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
   const execute = async (recoveryOnly: boolean, ...[req, placement, signal]: Parameters<WorkerRunner['run']>): Promise<BoundedWorkOutcome> => {
       const supported = supports(req.role, placement)
       if (!supported.ok) return { kind: 'refused', reason: supported.reason }
-      const deadline = Date.now() + req.budget.wall_ms
-      if (signal.aborted || Date.now() >= deadline) return unseen('Cancelled or out of time before dispatch.')
+      const dispatchBudget = new ClaudeDispatchBudget(Date.now() + req.budget.wall_ms)
+      const deadline = () => dispatchBudget.deadline_ms
+      if (signal.aborted || Date.now() >= deadline()) return unseen('Cancelled or out of time before dispatch.')
       try {
         // Atomic reservation survives runner/gateway replacement. An uncertain
         // dispatch is never replayed; the host must reconcile the original step.
@@ -44,11 +46,11 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
         // Reserving and clearing in either order leaves a restart window that either
         // reads the previous round's trailer or destroys this step's own receipt.
         const held = recoveryOnly
-          ? await readArmedTrailerReservation(reservation, identity, { signal, deadline })
+          ? await readArmedTrailerReservation(reservation, identity, { signal, deadline: deadline() })
           : await reserveTrailerSlot(reservation, identity, req.result.path)
         if (held.kind === 'unknown') return unseen(held.detail)
         if (held.kind === 'dispatch') {
-          if (signal.aborted || Date.now() >= deadline) return unseen('Cancelled or out of time before dispatch.')
+          if (signal.aborted || Date.now() >= deadline()) return unseen('Cancelled or out of time before dispatch.')
           const args = {
             subagent_type: requiresPlannerWork(req) ? PLANNER_ROLE : 'general-purpose',
             description: `${req.role}: ${req.step_id}`,
@@ -79,24 +81,25 @@ export function claudeInReplRunner(options: ClaudeInReplOptions): WorkerRunner {
           const dispatchSignal = AbortSignal.any([signal, timer.signal])
           try {
             await Promise.race([
-              options.composeActingTurn(options.topic_id, spec, { timeout_ms: Math.max(1, deadline - Date.now()), deadline_ms: deadline, signal: dispatchSignal }),
-              delay(Math.max(1, deadline - Date.now()), undefined, { signal: dispatchSignal })
+              options.composeActingTurn(options.topic_id, spec, { timeout_ms: Math.max(1, deadline() - Date.now()), deadline_ms: deadline(), dispatchBudget, signal: dispatchSignal }),
+              waitForClaudeDeadline(deadline, dispatchSignal)
                 .then(() => { throw new Error('Dispatch wait expired') }),
             ])
           } finally {
             timer.abort()
           }
         }
-        while (!signal.aborted && Date.now() < deadline) {
+        while (!signal.aborted && Date.now() < deadline()) {
           try {
-            const outcome = options.decodeTrailer(await readFile(req.result.path, 'utf8'), req)
-            if (outcome.kind !== 'not-current-step') return outcome
+            const observed = await readClaudeContinuationResult({ request: req, decodeTrailer: options.decodeTrailer })
+            if (observed?.kind === 'result') return observed.outcome
+            if (observed) return unseen('Trailer could not be read or validated.')
           } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
               return unseen('Trailer could not be read or validated.')
             }
           }
-          await delay(Math.min(50, Math.max(1, deadline - Date.now())), undefined, { signal })
+          await delay(Math.min(50, Math.max(1, deadline() - Date.now())), undefined, { signal })
         }
         return unseen('Stopped waiting without a validated trailer; subagent completion is unknown.')
       } catch {

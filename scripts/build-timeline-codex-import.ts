@@ -252,7 +252,15 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
     const exact = directLink(args, item, allowed)
     const start = p.started_at_ms, end = p.completed_at_ms
     const candidates = bindings.filter(b => cwd(item.cwd) === b.cwd && start >= b.startedAt && end <= b.endedAt)
-    const links = exact ? [exact] : candidates.length === 1 ? candidates[0]!.links : []
+    const turnBinding = turnBindings.find(b => b.sessionId === sessionId && b.turnId === p.turn_id)
+    const sameLinks = (a: Link[], b: Link[]) => a.length === b.length &&
+      a.every(link => b.some(other => link.repository === other.repository && link.prNumber === other.prNumber))
+    // A task's explicit ownership also covers its nested test operations. Do not
+    // borrow another turn's binding or resolve conflicting checkout evidence by
+    // silently preferring one source. Successful GitHub commands remain direct evidence.
+    const turnLinks = turnBinding && candidates.length <= 1 &&
+      (!candidates.length || sameLinks(turnBinding.links, candidates[0]!.links)) ? turnBinding.links : []
+    const links = exact ? [exact] : turnBinding ? turnLinks : candidates.length === 1 ? candidates[0]!.links : []
     if (!links.length || (!exact && classification.phase !== 'test')) { coverage.unbound++; continue }
     const model = (contexts.get(p.turn_id) ?? []).filter(c => c.at <= (p.started_at_ms as number)).sort((a, b) => b.at - a.at)[0]?.model ?? null
     observations.push({
@@ -261,7 +269,7 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
       inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheCreationTokens: null, costUsd: null,
       source: { kind: 'codex-log', sessionId, turnId: p.turn_id, ...(parentSessionId ? { parentSessionId } : {}), sourceEventId: item.id,
         evidenceRef: `${options.evidenceRef}:command:${item.id}`, attribution: 'reconstructed',
-        basis: `${exact ? 'Successful native GitHub command identifies PR' : 'Explicit time-bounded worktree-to-PR binding'}; native operation timestamps; model is invoking Codex model; exit ${item.exit_code}; shell-operation token attribution unknown` },
+        basis: `${exact ? 'Successful native GitHub command identifies PR' : turnBinding ? 'Explicit session-and-turn PR binding' : 'Explicit time-bounded worktree-to-PR binding'}; native operation timestamps; model is invoking Codex model; exit ${item.exit_code}; shell-operation token attribution unknown` },
       observedAt: p.completed_at_ms,
     })
   }

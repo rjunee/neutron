@@ -27,6 +27,7 @@ import { join } from 'node:path'
 import { readRegistryState, registryConversationScopeMatches } from './persistent/repl-registry.ts'
 import { beginBootAdoption } from './persistent/boot-adoption.ts'
 import { supervisedBySessionKey } from './persistent/pool-state.ts'
+import { rearmReplCap } from './persistent/operator-cap-rearm.ts'
 import { authFingerprintFor } from './persistent/repl-session.ts'
 import { readStartupRepl, recoverStartupRepl, type StartupRecoveryOutcome } from './persistent/startup-recovery.ts'
 import type { ReplSpawnProfile } from './persistent/spawn.ts'
@@ -500,6 +501,15 @@ export async function recoverExistingClaudeRepl(
     startModelUpdateWatchdogForInstance(p)
   }
   return outcome
+}
+
+/** Operator-only release; does not adopt, register supervision, or start a turn. */
+export function rearmExistingClaudeReplCap(options: ClaudeCodeSubstrateOptions,
+  request: import('./persistent/operator-cap-rearm.ts').CapRearmRequest, authorized: () => boolean): boolean {
+  const { p, resolved } = prepareClaudeCodeOptions(options)
+  if (resolved.home === undefined) return false
+  applySupervisionPaths(p, deriveReplSupervisionPaths(resolved.home))
+  return rearmReplCap(p, request, authorized)
 }
 
 function applySupervisionPaths(p: PersistentReplSubstrateOptions, paths: ReplSupervisionPaths): void {

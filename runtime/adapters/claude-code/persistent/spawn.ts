@@ -15,6 +15,8 @@ import type { AgentSpec } from '../../../substrate.ts'
 import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-turn-watcher.ts'
 import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
 import { supportsAutocompact } from './autocompact-support.ts'
+import { prepareNativeParentLaunch } from './native-parent-launch-evidence.ts'
+import { prepareNativeRequestRelay } from './native-request-relay.ts'
 import { buildSettings } from './build-settings.ts'
 import { configuredPtyHost } from './configured-pty-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
@@ -93,11 +95,17 @@ function assertFailedSpawnReaped(sessionKey: string): void {
   if (failedSpawnSetups.get(sessionKey) === failed) failedSpawnSetups.delete(sessionKey)
 }
 
+interface DisposableSpawnLifecycle {
+  onChild(session: ReplSession): void
+  checkpoint(): void
+}
+
 async function spawnSession(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
   spec: ReplSpawnProfile,
   resume?: ResumeDirective,
+  disposableLifecycle?: DisposableSpawnLifecycle,
 ): Promise<ReplSession> {
   assertFailedSpawnReaped(sessionKey)
   const cwd = requireReplCwd(options.cwd)
@@ -395,6 +403,7 @@ async function spawnSession(
   // it is stable for the session's whole lifetime). The `/tool-call` sink reads
   // it to bind the active project into a tool dispatch — see `ReplSession.projectId`.
   session.projectId = options.project_id
+  session.bindToolProjectScope(options)
   // P0-1 — stamp the bridge attachment so the reuse guard can refuse a
   // bridge-mismatched turn (matches the `requestedToolBridge` computation).
   session.toolBridgeActive = toolBridgeActive
@@ -571,9 +580,16 @@ async function spawnSession(
     let startupResumeRejected = false
     let child: Awaited<ReturnType<typeof ptyHost.spawn>>
     try {
-      child = await ptyHost.spawn(argv, {
+      const relay = prepareNativeRequestRelay(childEnv)
+      const launchEnv = relay?.env ?? childEnv
+      const launch = options.project_id !== undefined && options.conversationProjectId !== null
+        ? await prepareNativeParentLaunch({ sessionId, childGeneration, projectId: options.project_id,
+          argv, tools: toolSurface, cwd, env: launchEnv })
+        : undefined
+      disposableLifecycle?.checkpoint()
+      child = await ptyHost.spawn(launch?.argv ?? argv, {
       cwd,
-      env: childEnv,
+      env: launch?.env ?? launchEnv,
       ...(options.repl_pane_label !== undefined ? { label: options.repl_pane_label } : {}),
       ...(options.projectPlacement !== undefined ? { projectPlacement: options.projectPlacement } : {}),
       // SNAPSHOT-REPLACE, not append — on either backend. Each delivery is the child's
@@ -614,6 +630,10 @@ async function spawnSession(
     })
     scanChild = child
     session.attachChild(child)
+    disposableLifecycle?.onChild(session)
+    // No first chat can run until the exact native process has an authenticated route.
+    await relay?.register(session)
+    launch?.record(session)
     recordMcpServiceOwner({ sessionKey, childGeneration, channelName, pid: child.pid }, serviceMarkers)
     // Synchronous handle mirror so a respawn can detect alive-but-wedged without
     // awaiting the pool promise (Argus r3 BLOCKER 1). Newest spawn wins the key.
@@ -730,6 +750,7 @@ async function spawnSession(
       throw e
     }
 
+    disposableLifecycle?.checkpoint()
     // Post-spawn assertion: child alive → /channel-ready (transport attached) →
     // HTTP /health → /channel-bound (MCP handshake complete).
     const assertion = await assertReplAlive(
@@ -749,6 +770,7 @@ async function spawnSession(
       },
       options.assertConfig ?? {},
     )
+    disposableLifecycle?.checkpoint()
     if (startupResumeRejected) {
       if (childByKey.get(sessionKey) === child) childByKey.delete(sessionKey)
       sink.unregisterIf(sessionId, session)
@@ -1112,6 +1134,7 @@ export async function spawnWithChannelWedgeRespawn(
   options: PersistentReplSubstrateOptions,
   spec: ReplSpawnProfile,
   resume?: ResumeDirective,
+  disposableLifecycle?: DisposableSpawnLifecycle,
 ): Promise<ReplSession> {
   const alert =
     options.postWedgeAlert ??
@@ -1119,7 +1142,8 @@ export async function spawnWithChannelWedgeRespawn(
   const result = await runBoundedChannelWedgeRespawn<ReplSession>({
     attempt: async (n) => {
       try {
-        return { ok: true, value: await spawnSession(sessionKey, options, spec, resume) }
+        disposableLifecycle?.checkpoint()
+        return { ok: true, value: await spawnSession(sessionKey, options, spec, resume, disposableLifecycle) }
       } catch (e) {
         const wedged = e instanceof ChannelWedgedSpawnError
         if (wedged && n < MAX_FLEET_RESPAWNS) {

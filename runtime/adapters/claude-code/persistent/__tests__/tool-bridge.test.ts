@@ -138,8 +138,18 @@ async function drain(handle: SessionHandle): Promise<string> {
 }
 
 /** A fake bridge advertising one tool whose dispatch echoes its args. */
+// These routing tests isolate the sink; durable admission is exercised with the
+// real ledger by gateway/claude-mcp-handler-drain.test.ts and project-build E2E.
+const routingAdmission: NonNullable<ReplToolBridge['claudeHandlerAdmission']> = {
+  dispatch: async (_identity, _id, _binding, current, handler) => {
+    if (!current()) throw new Error('revoked')
+    return await handler()
+  },
+}
+
 function fakeBridge(calls: Array<{ tool_name: string; args: unknown }>): ReplToolBridge {
   return {
+    claudeHandlerAdmission: routingAdmission,
     listToolSchemas: () => [
       {
         name: 'doc_search',
@@ -248,6 +258,7 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
     const session = new ReplSession('k', 'gen', LIVE_SESSION_ID, 'chan', '/tmp')
     session.toolBridgeActive = true
     if (projectId !== undefined) session.projectId = projectId
+    session.bindToolProjectScope({ conversationProjectId: projectId ?? null })
     sink.register(LIVE_SESSION_ID, session)
     liveCredential = sink.credentialFor(session)
     return session
@@ -358,6 +369,7 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
       it(`${route} bridge grant: ${enabled ? 'granted dispatch succeeds' : 'ungranted dispatch is refused'}`, async () => {
         const calls: unknown[] = []
         setReplToolBridge({
+          claudeHandlerAdmission: routingAdmission,
           listToolSchemas: () => [{ name: 'note', description: 'write', input_schema: { type: 'object' } }],
           dispatch: async (input) => {
             calls.push(input)
@@ -415,6 +427,7 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
     // A bridge that records the project_id it was dispatched with.
     const seen: Array<string | null | undefined> = []
     setReplToolBridge({
+      claudeHandlerAdmission: routingAdmission,
       listToolSchemas: () => [
         { name: 'work_board_add', description: 'add', input_schema: { type: 'object', properties: {} } },
       ],

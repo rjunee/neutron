@@ -107,6 +107,11 @@ test('the live-chat family alone carries the Chat placement, resolved per dispat
   const others = captured.slice(before)
   expect(others.length).toBeGreaterThanOrEqual(5)
   for (const options of others) {
+    if (options.substrate_instance_id === 'cc-compose-owner') {
+      expect(options.projectPlacement).toMatchObject({ projectId: 'p-one', role: 'worker', taskLabel: 'Compose · project documents' })
+      expect(options.ptyHost).toBe(host)
+      continue
+    }
     expect(options.projectPlacement).toBeUndefined()
     expect(options.ptyHost).toBeUndefined()
   }

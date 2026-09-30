@@ -103,8 +103,12 @@ spans carry unknown tokens unless a provider actually attributed usage.
       controls in `trident/build-timeline.test.ts`,
       `trident/build-timeline-html.test.ts` and the popover consuming tests.
 - [ ] Native direct command spans use recorded start/end, explicit time-scoped PR
-      mapping and invoking model context; absent context stays unknown. Explicit
-      forward phase records support planning, building, fixing, review, tests,
+      mapping and invoking model context; absent context stays unknown. Exact
+      session/turn ownership also attributes nested local test commands,
+      without charging the task's usage twice. Foreign turns and conflicting or
+      ambiguous checkout mappings refuse that attribution. Verify the authenticated
+      API and refusal controls in `scripts/build-timeline-codex-import.test.ts`.
+      Explicit forward phase records support planning, building, fixing, review, tests,
       CI and deploy without reconstructing invented history.
       GitHub CI snapshots may revise the recorded start for the same check-run
       identity; the newest observation supplies timing without rewriting earlier
@@ -139,8 +143,8 @@ spans carry unknown tokens unless a provider actually attributed usage.
       snapshot leave that snapshot valid; the next scan sees new bytes. An
       empty newly created rollout reports incomplete coverage until it grows.
       Discovery alone does not attribute
-      command or task phases: ordinary commands need explicit time-scoped PR
-      binding (or exact successful GitHub PR evidence), and completed tasks need
+      command or task phases: test commands need explicit time-scoped checkout or
+      exact session/turn PR binding (or exact successful GitHub PR evidence), and completed tasks need
       exact session/turn PR and phase bindings.
       Verify: `bun test scripts/build-timeline-codex-discover.test.ts`.
 - [ ] Explicit registered sources can be collected without reading unrelated

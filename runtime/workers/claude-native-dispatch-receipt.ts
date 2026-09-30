@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
 import type { ProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
+import type { NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
 
 export interface NativeDispatchLease {
   scope: { ownerHandle: string; projectId: string | null }
@@ -18,6 +19,8 @@ export interface NativeDispatchParent {
   childGeneration: string
   pid: number
   processIdentity: ProcessIdentity | null
+  /** Original host-observed launch inputs, signed before child dispatch. */
+  launch?: NativeParentLaunchEvidence
 }
 export type NativeDispatchEvidence =
   | { kind: 'parent-bound'; parent: NativeDispatchParent }
@@ -32,6 +35,10 @@ interface RecordBody {
   phase: Phase
   parent: NativeDispatchParent | null
   nativeAgentId: string | null
+  /** Host-selected original dispatch budget; absent historical receipts cannot actuate. */
+  deadlineMs?: number
+  /** Original enclosing host checkpoint, supplied only by the admitted review scope. */
+  parentStepId?: string
 }
 export interface SignedNativeDispatchRecord { body: RecordBody; publicKey: string; signature: string }
 export interface NativeDispatchAuthority {
@@ -53,13 +60,16 @@ export function createNativeDispatchSigner() {
   const begun = new Set<string>()
   return {
     keyDigest,
-    begin(lease: NativeDispatchLease, request: BoundedWorkRequest): NativeDispatchAuthority {
+    begin(lease: NativeDispatchLease, request: BoundedWorkRequest, deadlineMs?: number, parentStepId?: string): NativeDispatchAuthority {
       if (!lease.producer.endsWith(`:${keyDigest}`) || lease.reason !== 'liveChild'
         || lease.workRef !== JSON.stringify([request.run_id, request.step_id]) || begun.has(lease.token)) {
         throw new Error('Native dispatch signing authority does not match a fresh lease')
       }
       begun.add(lease.token)
-      const body: RecordBody = structuredClone({ version: 1, lease, request, phase: 'prepared', parent: null, nativeAgentId: null })
+      if (deadlineMs !== undefined && (!Number.isSafeInteger(deadlineMs) || deadlineMs <= 0)) throw new Error('Invalid original dispatch deadline')
+      if (parentStepId !== undefined && (typeof parentStepId !== 'string' || !parentStepId.trim())) throw new Error('Invalid original enclosing step')
+      const body: RecordBody = structuredClone({ version: 1, lease, request, phase: 'prepared', parent: null, nativeAgentId: null,
+        ...(deadlineMs === undefined ? {} : { deadlineMs }), ...(parentStepId === undefined ? {} : { parentStepId }) })
       let prepared = false
       const signed = (): SignedNativeDispatchRecord => {
         const snapshot = structuredClone(body)

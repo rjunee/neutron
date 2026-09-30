@@ -3,7 +3,7 @@ import { TRIDENT_SCRIPT_DIR } from '@neutronai/trident/script-dir.ts'
 import { createPersistentReplSubstrate, shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
-import { SUBAGENT_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
+import { SUBAGENT_TOOL_NAME, SUBAGENT_CONTINUATION_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
 import { REFLECTION_GUIDANCE_FRAMING, MAX_REFLECTION_GUIDANCE_CHARS } from '@neutronai/trident/reflection-guidance.ts'
 import { PLAN_SCHEMA, FORGE_SCHEMA, VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
@@ -33,6 +33,7 @@ import { createProductionHostEffects } from '@neutronai/trident/production-host-
 import type { ProjectBuildHostOptions } from '@neutronai/trident/project-build-host.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
+const PROJECT_TOOL_NAMES = [...LIVE_AGENT_TOOL_NAMES, SUBAGENT_CONTINUATION_TOOL_NAME]
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 
 type CompletionShape = 'valid' | 'pending' | 'wrong-stage' | 'wrong-head'
@@ -483,7 +484,7 @@ test.each(['missing-launch', 'missing-session', 'pending-session', 'ambiguous', 
   const key = 'fixture-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
   let submissions = 0
-  const session = { sessionId: 'fixture-session', childGeneration: 'fixture-generation', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir,
+  const session = { sessionId: 'fixture-session', childGeneration: 'fixture-generation', toolSurface: PROJECT_TOOL_NAMES.join(','), cwd: f.dir,
     hasChildExited: () => state === 'exited', child: { pid: process.pid, submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key); supervisedBySessionKey.delete(key + '-other') })
   // Each scenario owns a fresh admission. Reusing an unknown request creates
@@ -577,7 +578,7 @@ test('acting turn lazily starts and retains a cold project session without redis
   const key = 'cold-project-launch'
   const config = { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] }
   let submissions = 0
-  const session = { sessionId: 'fixture-session', childGeneration: 'fixture-generation', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
+  const session = { sessionId: 'fixture-session', childGeneration: 'fixture-generation', toolSurface: PROJECT_TOOL_NAMES.join(','), cwd: f.dir, hasChildExited: () => false,
     child: { pid: process.pid, submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
   let spawns = 0
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
@@ -591,26 +592,28 @@ test('acting turn lazily starts and retains a cold project session without redis
   await mkdir(join(f.dir, 'state'), { recursive: true })
   await writeFile(request.result.path, '{}')
   expect((await captured.actingTurn(turn)).kind).toBe('turn-ended')
-  // Parent completion is not child completion: a repeat must reconcile the
-  // existing request before another admission can dispatch it.
-  expect(await captured.actingTurn(turn)).toMatchObject({ kind: 'unknown',
-    detail: 'Original native dispatch receipt cannot be exclusively established' })
+  // Parent completion is not child completion. Re-admitting the retained child
+  // cannot establish a unique independent workspace and must never submit again.
+  expect(await captured.actingTurn(turn)).toEqual({ kind: 'refused', reason: 'capability-unsupported',
+    detail: 'Native writer has no checked independent worktree admission.' })
   expect(spawns).toBe(1)
   expect(submissions).toBe(1)
 })
 
-for (const shape of ['missing', 'unlinked'] as const) test(`native admission refuses a ${shape} assigned worktree before submission`, async () => {
+for (const shape of ['missing', 'unlinked', 'wrong-cwd'] as const) test(`native admission refuses a ${shape} assigned worktree before submission`, async () => {
   const f = await fixture()
   const options = await f.prepare()
   const captured = f.captured()
   if (shape === 'unlinked') {
     expect((await spawnCapture(['git', 'init', '--initial-branch=change', options.production.worktree])).ok).toBe(true)
   }
+  if (shape === 'wrong-cwd') await prepareNativeWorktree(f, options)
   f.context.runHost = spawnCapture
-  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false }
+  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.input.run.id, step_id: 'fixture-step', role: 'build', needs_approval_decision: false,
+    ...(shape === 'wrong-cwd' ? { cwd: f.dir } : {}) }
   let submissions = 0
   const key = `invalid-worktree-${shape}`
-  const session = { sessionId: 'fixture-session', childGeneration: 'fixture-generation', toolSurface: LIVE_AGENT_TOOL_NAMES.join(','), cwd: f.dir,
+  const session = { sessionId: 'fixture-session', childGeneration: 'fixture-generation', toolSurface: PROJECT_TOOL_NAMES.join(','), cwd: f.dir,
     hasChildExited: () => false, child: { pid: process.pid, submitLine: async () => { submissions += 1 } }, acquireTurn: async () => () => {} }
   cleanup.push(() => { pool.delete(key); supervisedBySessionKey.delete(key) })
   supervisedBySessionKey.set(key, { substrate_instance_id: 'cc-agent-fixture', project_id: f.context.projectId, skip_permissions: true, extra_dirs: [f.dir] })
@@ -1070,7 +1073,7 @@ test('the acting-turn conversation requests the real project tool surface, not a
   expect(names).toContain(SUBAGENT_TOOL_NAME)
   // And it must match the surface the working wake turns use, or the reuse guard
   // respawns the session out from under the dispatch.
-  expect(names).toEqual([...LIVE_AGENT_TOOL_NAMES])
+  expect(names).toEqual(PROJECT_TOOL_NAMES)
 })
 
 // #1112 BLOCKER 1. The prewarm and the dispatch must request the SAME surface:
@@ -1090,7 +1093,7 @@ test('the dispatch requests the shared project surface, by identity', async () =
   const names = (tools as ReadonlyArray<{ name: string }>).map(t => t.name)
   expect(names.length).toBeGreaterThan(0)
   expect(names).toContain(SUBAGENT_TOOL_NAME)
-  expect(names).toEqual([...LIVE_AGENT_TOOL_NAMES])
+  expect(names).toEqual(PROJECT_TOOL_NAMES)
 })
 
 // The prewarm half. THIS IS A SOURCE-LEVEL GUARD, not a behavioural one, and a
@@ -1149,7 +1152,7 @@ test('project dispatch reuses the wake REPL without a tools-less respawn', async
     .toBe(`seen=0 got=${wake}`)
   expect(spawnCount()).toBe(1)
   // Positive control: a real spawn requested the live tools, including Agent.
-  expect(spawnArgv[0]![spawnArgv[0]!.indexOf('--tools') + 1]).toBe(LIVE_AGENT_TOOL_NAMES.join(','))
+  expect(spawnArgv[0]![spawnArgv[0]!.indexOf('--tools') + 1]).toBe(PROJECT_TOOL_NAMES.join(','))
 
   const dispatch = 'Dispatch project build: fixture-step'
   const reply = await turn({ ...f.captured().conversation.spec, prompt: dispatch, model_preference: ['claude-sonnet-4-6'] })
@@ -1161,4 +1164,13 @@ test('project dispatch reuses the wake REPL without a tools-less respawn', async
   expect(spawnArgv.filter(argv => argv.some((arg, i) => arg === '--tools' && argv[i + 1] === ''))).toEqual([])
   expect(spawnCount()).toBe(1)
   expect(reply).toBe(`seen=1 got=${dispatch}`)
+
+  // Negative control: removing continuation changes the actual launch profile.
+  // The real pool must replace the warm parent rather than reuse stale tools.
+  const changed = 'Wake with the continuation tool removed'
+  expect(await turn({ ...f.captured().conversation.spec, prompt: changed,
+    tools: PROJECT_REPL_TOOL_DEFS.filter(tool => tool.name !== SUBAGENT_CONTINUATION_TOOL_NAME),
+    model_preference: ['claude-sonnet-4-6'] })).toBe(`seen=0 got=${changed}`)
+  expect(spawnCount()).toBe(2)
+  expect(spawnArgv[1]![spawnArgv[1]!.indexOf('--tools') + 1]).toBe(LIVE_AGENT_TOOL_NAMES.join(','))
 }, 20_000)

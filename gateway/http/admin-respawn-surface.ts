@@ -23,12 +23,17 @@ import {
   type AdminRespawnRateState,
 } from '@neutronai/runtime/adapters/claude-code/persistent/admin-respawn-session.ts'
 import type { RespawnOutcome } from '@neutronai/runtime/adapters/claude-code/persistent/session-respawn.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface AdminRespawnSurfaceInput {
   /** Expected operator token — request must present it in `X-Gateway-Token`. */
   gatewayToken: string
   /** Force-recover actuation. Boot wires `respawnSupervisedSession(path, key)`. */
   respawn: (sessionKey: string) => RespawnOutcome
+  /** Explicit operator cap release; ordinary recovery remains a separate actor. */
+  rearmCap?: (authorization: unknown) => Promise<boolean>
+  /** Independent signature verification, before consuming any operator rate budget. */
+  authorizeCapRearm?: (authorization: unknown) => boolean
   /** Override the default 5-req/60s rate limit. */
   rateLimit?: AdminRespawnRateLimitConfig
   /** DI clock (tests). */
@@ -40,6 +45,23 @@ export interface AdminRespawnSurface {
   handler: (req: Request) => Promise<Response | null>
 }
 
+async function readCapAuthorization(req: Request): Promise<unknown> {
+  const reader = req.body?.getReader()
+  if (!reader) throw new Error('Missing authorization')
+  const chunks: Uint8Array[] = []
+  let length = 0
+  try {
+    while (true) {
+      const next = await reader.read()
+      if (next.done) break
+      length += next.value.byteLength
+      if (length > 65_536) throw new Error('Authorization too large')
+      chunks.push(next.value)
+    }
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } finally { fireAndForget('admin-respawn-surface.cancel-authorization-reader', reader.cancel()); reader.releaseLock() }
+}
+
 export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): AdminRespawnSurface {
   // Per-surface rate-limit bucket: two instance gateways mounting this route in the
   // same process must not share a window (Codex P2).
@@ -47,6 +69,22 @@ export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): Admi
   return {
     handler: async (req: Request): Promise<Response | null> => {
       const url = new URL(req.url)
+      if (url.pathname === '/admin/rearm-session-cap' && req.method === 'POST') {
+        // Browser/owner credentials confer NO cap-release authority. The callback
+        // must authenticate the independent operator signature before acting.
+        let request: unknown
+        try { request = await readCapAuthorization(req) } catch { return Response.json({ ok: false }, { status: 403 }) }
+        if (input.authorizeCapRearm?.(request) !== true) return Response.json({ ok: false }, { status: 403 })
+        const now = (input.now ?? Date.now)()
+        const limit = input.rateLimit ?? { windowMs: 60_000, maxRequests: 5 }
+        rateState.hits = rateState.hits.filter(t => now - t < limit.windowMs)
+        if (rateState.hits.length >= limit.maxRequests) return Response.json({ ok: false }, { status: 429 })
+        rateState.hits.push(now)
+        try {
+          const rearmed = await input.rearmCap?.(request) === true
+          return Response.json({ ok: rearmed, status: rearmed ? 'rearmed' : 'refused' }, { status: rearmed ? 200 : 409 })
+        } catch { return Response.json({ ok: false, status: 'refused' }, { status: 409 }) }
+      }
       if (url.pathname !== '/admin/respawn-session') return null
       if (req.method !== 'POST') return null
       return handleAdminRespawnSessionRequest(req, {

@@ -11,6 +11,7 @@ import { claudeChildRateLimited } from './claude-child-rate-limit.ts'
 import { observeClaudeChildUsage } from './claude-child-observation.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { projectTrailerStep, type ProjectActingTurn } from './project-runners.ts'
+import { ClaudeDispatchBudget, waitForClaudeDeadline } from './claude-dispatch-budget.ts'
 import { bindNativeChildWorkspace, nativeChildCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
 
 export type ClaudeNativeDispatchEvidence = { kind: 'submission-started' | 'not-submitted' } |
@@ -31,6 +32,7 @@ export interface ClaudeActingSession {
   /** Ends the chat-only preparation exemption immediately before the first
    * possible submission; it does not release the durable child lease. */
   onDispatchSubmitted?: () => void
+  onQueueWait?: (started_at: number, ended_at: number) => Promise<void>
   /** Synchronous durable writer bound by composition to the original request,
    * session and generation. A failed write must prevent subsequent actuation. */
   onNativeDispatchEvidence?: (event: ClaudeNativeDispatchEvidence) => void
@@ -198,8 +200,10 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
   const child = session.child
   const transcript = sessionJsonlPath(session.sessionId, session.cwd, binding.projects_dir)
   const subagents = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
-  const actingTurn: ProjectActingTurn = async ({ conversation, request, spec, timeout_ms, deadline_ms, signal }) => {
+  const actingTurn: ProjectActingTurn = async ({ conversation, request, spec, timeout_ms, deadline_ms, dispatchBudget, signal }) => {
     let submitted = false
+    let queueStartedAt: number | undefined
+    let queueEndedAt: number | undefined
     try {
     const refuse = (detail: string) => ({ kind: 'refused' as const, reason: 'capability-unsupported' as const, detail })
     if (requiresPlannerWork(request) && (session.plannerRole !== PLANNER_ROLE || !binding.plannerCapability)) return refuse('Native session lacks the registered closed planner role.')
@@ -232,7 +236,10 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
       return refuse(`Claude session cannot create a subagent: its tool surface (${session.toolSurface || '<empty>'}) does not carry ${SUBAGENT_TOOL_NAME}.`)
     }
 
-    const deadline = Math.min(deadline_ms ?? Infinity, clock.now() + Math.min(timeout_ms, request.budget.wall_ms))
+    let deadline = Math.min(deadline_ms ?? Infinity, clock.now() + Math.min(timeout_ms, request.budget.wall_ms))
+    const budget = dispatchBudget ?? new ClaudeDispatchBudget(deadline, clock.now)
+    const initialDeadline = deadline
+    const timerDeadline = Date.now() + Math.max(1, deadline - clock.now())
     const timer = new AbortController()
     const stopped = AbortSignal.any([signal, timer.signal])
     const expired = () => stopped.aborted || clock.now() >= deadline
@@ -259,9 +266,15 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
       if (workspace && !ownsNativeChildWorkspace(workspace, session, request)) {
         return refuse('Native child workspace ownership is unavailable; reconcile existing admitted children first.')
       }
+      queueStartedAt = clock.now()
+      const queueDeadline = budget.deadline_ms
+      const endQueue = budget.beginQueue(stopped)
       const release = await session.acquireTurn(readOnly || workspace ? yieldSlot => { yieldDispatch = yieldSlot } : undefined, workspace)
       releaseTurn = release
       try {
+        endQueue()
+        queueEndedAt = clock.now()
+        deadline += budget.deadline_ms - queueDeadline
         if (expired()) return beforeDispatchExpired()
         // Sibling admissions acquire their durable lease before asynchronously
         // measuring the worktree. Wait for those local proofs under the original
@@ -290,9 +303,9 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         const boundary = await transcriptBoundary(transcript)
         if (expired()) return beforeDispatchExpired()
         const markSubmitted = () => {
-          binding.onDispatchSubmitted?.()
           submitted = true
           binding.onNativeDispatchEvidence?.({ kind: 'submission-started' })
+          binding.onDispatchSubmitted?.()
         }
         if (child.paneHandle !== undefined) {
           // Externally addressable panes can contain input from another client.
@@ -406,7 +419,7 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
       }
       return await Promise.race([
         observation,
-        delay(Math.max(1, deadline - clock.now()), undefined, { signal: stopped }).then(interrupted, () => {
+        waitForClaudeDeadline(() => timerDeadline + deadline - initialDeadline, stopped).then(interrupted, () => {
           if (signal.aborted) return interrupted()
           throw new Error('Claude trailer wait interrupted')
         }),
@@ -418,6 +431,11 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
       // The inner deadline controller is aborted first. A late acquisition can
       // only release its slot; it cannot submit after this receipt is written.
       if (!submitted) binding.onNativeDispatchEvidence?.({ kind: 'not-submitted' })
+      if (queueStartedAt !== undefined) {
+        // Telemetry cannot authorize or veto dispatch. A stopped queued observer
+        // records its own boundary, not a future holder's late acquisition.
+        try { await binding.onQueueWait?.(queueStartedAt, queueEndedAt ?? clock.now()) } catch { /* Advisory only. */ }
+      }
     }
   }
   actingTurn.observeUsage = request => observeClaudeChildUsage(subagents, session.sessionId, request)

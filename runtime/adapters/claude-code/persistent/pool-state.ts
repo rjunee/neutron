@@ -58,6 +58,7 @@ export const retiringSessionKeys = new Set<string>()
 // ---------------------------------------------------------------------------
 
 export interface ReplToolBridge {
+  claudeHandlerAdmission?: import('./tool-handler-generation.ts').ClaudeToolHandlerAdmission
   /** Discovery half — the per-session tools manifest the bridge advertises. */
   listToolSchemas(): { name: string; description: string; input_schema: unknown }[]
   /** Invocation half — dispatch a tool call against the in-process registry.
@@ -485,6 +486,11 @@ export class ReplSink {
     if (this.byCredential.get(credential) === session) this.byCredential.delete(credential)
   }
 
+  private toolGeneration(session: ReplSession): import('./tool-handler-generation.ts').ClaudeToolGeneration {
+    return { sessionId: session.sessionId, childGeneration: session.childGeneration,
+      projectId: session.toolProjectId, admissionGeneration: session.admissionGeneration, adopted: session.adopted }
+  }
+
   unregister(sessionId: string): void {
     const session = this.sessions.get(sessionId)
     if (session !== undefined) this.deleteCredentialIf(session)
@@ -589,6 +595,9 @@ export class ReplSink {
         return Response.json({ tools: replToolBridgeRef.current?.listToolSchemas() ?? [] })
       }
       if (url.pathname === '/tool-call') {
+        if (credential === null || this.byCredential.get(credential) !== session) {
+          return Response.json({ ok: false, error: 'tool generation authorization revoked' }, { status: 401 })
+        }
         // A live child credential also serves the dev-channel; it does not grant
         // access to the tool bridge. Enforce the spawn-time attachment here.
         if (!session.toolBridgeActive) {
@@ -611,18 +620,26 @@ export class ReplSink {
         // scope — thread it in so a per-project tool (`work_board_*`, the trident
         // build-dispatch tools) scopes to the composing turn's project. There is no
         // longer an unregistered-session case to degrade: the guard above refused it.
-        const toolProjectId = session.projectId ?? null
+        const toolProjectId = session.toolProjectId
         try {
-          if (toolName === PLANNER_TOOL) {
-            if (session.plannerRole !== PLANNER_ROLE) throw new Error('Planner role was not registered for this native session')
-            return Response.json({ ok: true, result: await dispatchPlannerWork(session, body['args']) })
-          }
-          const result = await bridge.dispatch({
-            tool_name: toolName,
-            args: body['args'] ?? {},
-            call_id: callId,
-            project_id: toolProjectId,
-          })
+          if (toolProjectId === undefined) throw new Error('Claude MCP handler project scope is unknown')
+          if (!bridge.claudeHandlerAdmission) throw new Error('Durable Claude MCP handler admission unavailable')
+          const identity = this.toolGeneration(session)
+          const result = await bridge.claudeHandlerAdmission.dispatch(identity, callId,
+            JSON.stringify([toolName, body['args'] ?? {}]),
+            () => this.byCredential.get(credential) === session && replToolBridgeRef.current === bridge
+              && session.toolBridgeActive && session.sessionId === identity.sessionId
+              && session.childGeneration === identity.childGeneration
+              && session.toolProjectId === identity.projectId
+              && session.admissionGeneration === identity.admissionGeneration,
+            async () => {
+              if (toolName === PLANNER_TOOL) {
+                if (session.plannerRole !== PLANNER_ROLE) throw new Error('Planner role was not registered for this native session')
+                return await dispatchPlannerWork(session, body['args'])
+              }
+              return await bridge.dispatch({ tool_name: toolName, args: body['args'] ?? {},
+                call_id: callId, project_id: toolProjectId })
+            })
           return Response.json({ ok: true, result })
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e)

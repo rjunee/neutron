@@ -17,6 +17,29 @@ import type { RespawnOutcome } from '@neutronai/runtime/adapters/claude-code/per
 
 beforeEach(() => resetAdminRespawnRateLimitForTest())
 
+test('cap rearm uses its independent authority callback, never the browser bearer', async () => {
+  let releases = 0
+  const surface = createAdminRespawnSurface({ gatewayToken: 'operator-secret',
+    respawn: () => { throw new Error('cap rearm must not respawn') },
+    authorizeCapRearm: value => (value as { signature?: string }).signature === 'operator-proof',
+    rearmCap: async value => { if ((value as { signature?: string }).signature !== 'operator-proof') return false
+      releases++; return true }, rateLimit: { windowMs: 60000, maxRequests: 1 } })
+  const handler = composeHttpHandler({ adminRespawn: surface, defaultHandler })
+  const body = { projectId: null, sessionKey: 'key', sessionId: 'session', childGeneration: 'generation', cappedAt: 100 }
+  const call = (value: unknown, token?: string) => handler.fetch(new Request('http://x/admin/rearm-session-cap', {
+    method: 'POST', headers: token ? { 'X-Gateway-Token': token } : {}, body: JSON.stringify(value),
+  }), {} as never)
+  expect((await call(body)).status).toBe(403)
+  expect((await call(body, 'operator-secret')).status).toBe(403)
+  expect((await call({ signature: 'operator-proof', padding: 'x'.repeat(65_536) })).status).toBe(403)
+  expect(releases).toBe(0)
+  expect((await call({ body, signature: 'operator-proof' })).status).toBe(200)
+  expect(releases).toBe(1)
+  expect((await call(body, 'operator-secret')).status).toBe(403)
+  expect((await call({ body, signature: 'operator-proof' })).status).toBe(429)
+  expect(releases).toBe(1)
+})
+
 const defaultHandler = (): Response => new Response('default', { status: 200 })
 const ok = (sessionKey: string): RespawnOutcome => ({ ok: true, sessionKey, sessionId: 'uuid-x', initiatedAt: 1 })
 

@@ -51,7 +51,7 @@ import {
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 import type { BoardBoundBuildRejectionCode } from '@neutronai/trident/board-dispatch.ts'
-import type { TridentPhase, TridentRun } from '@neutronai/trident/store.ts'
+import type { TridentPhase, TridentRun, TridentStageEvent } from '@neutronai/trident/store.ts'
 import type { RunWorkerObservation } from '@neutronai/trident/worker-observation.ts'
 import { resolveScopeSegment } from './scope-segment.ts'
 
@@ -65,6 +65,7 @@ import { resolveScopeSegment } from './scope-segment.ts'
 export interface TridentRunAccess {
   get(id: string): TridentRun | null
   latestHeartbeatAt?(id: string): string | null
+  quotaWaitEvents?(id: string): readonly TridentStageEvent[]
   update(id: string, patch: { phase: TridentPhase }): Promise<unknown>
   /**
    * §F6a — the terminal-write CHOKEPOINT. Deleting a board card bound to a LIVE
@@ -251,6 +252,7 @@ export function createWorkBoardSurface(opts: WorkBoardSurfaceOptions): WorkBoard
         when,
         repoWebUrls !== undefined ? (p: string) => repoWebUrls.peek(p) : undefined,
         trident_runs.latestHeartbeatAt?.bind(trident_runs),
+        trident_runs.quotaWaitEvents?.bind(trident_runs),
       )
       return progress === null ? it : { ...it, run_progress: progress }
     })

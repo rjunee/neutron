@@ -173,7 +173,7 @@ describe('the executable bridge handler uses this mapping', () => {
           session_id: 'test-session',
           tool_name: 'test_tool',
           args: { value: 7 },
-          call_id: 'test-session:test_tool',
+          call_id: expect.stringMatching(/^[a-f0-9-]{36}$/),
         },
       }])
       expect(result.isError).toBe(fixture.isError)
@@ -221,4 +221,17 @@ describe('interpretSinkToolResponse — a dispatched call is unchanged', () => {
     expect(r.isError).toBeUndefined()
     expect(JSON.parse(textOf(r)).error).toContain('No Plan item')
   })
+})
+
+it('distinct native invocations of the same tool never share an admission identity', async () => {
+  const ids: string[] = []
+  const handler = createToolCallHandler({ port: 12345, token: 'fixture', sessionId: 'parent' },
+    (async (_url: unknown, init: RequestInit) => {
+      ids.push(JSON.parse(String(init.body)).call_id)
+      return Response.json({ ok: true, result: 'done' })
+    }) as typeof fetch)
+  const request = { method: 'tools/call' as const, params: { name: 'same_tool', arguments: {} } }
+  await handler(request); await handler(request)
+  expect(ids).toHaveLength(2)
+  expect(ids[0]).not.toBe(ids[1])
 })

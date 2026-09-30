@@ -35,6 +35,24 @@ pieces live. Keep this short; deep detail belongs in `docs/AS_BUILT.md` (and the
 archived history in `docs/research/AS-BUILT-archive-2026-07.md`) and the
 per-module headers.
 
+## Native Claude request relay
+
+For a host-registered transport, `native-request-relay.ts` injects the native
+CLI's Unix socket and an OAuth placeholder. `spawn.ts` registers the exact
+parent process before first chat; warm reuse fingerprints the host route rather
+than the account selected behind it. Unregistered self-hosts retain native
+authentication. A registered route failure refuses locally.
+
+`claude-capacity-client.ts` joins the original signed child receipt to that
+scope and verifies signed host observations of actual native requests plus a
+separate fresh capacity result. `claude-native-continuation.ts` preserves the
+original lease, launch checks, result harvest and permanent pre-input claim.
+Launch-time file-auth reconstruction and alias pinning are removed. The host
+owns actual request authentication and quota rotation; Open never builds native
+provider prompts. The decision and deployment alternatives are recorded in
+SPEC.md on 2026-09-30. Outstanding repeated-episode and live acceptance are in
+`docs/spec-items/claude-same-agent-continuation.md`.
+
 ## The spine — how to reach the rest of this file
 
 Added 2026-08-31. This file is ~8,900 lines. Reading it end to end costs more than the orientation

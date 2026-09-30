@@ -5,7 +5,7 @@ import type {
 } from './project-admission-store.ts';
 import type { DispatchAdmission } from '@neutronai/trident/dispatch-admission.ts';
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts';
-import { createNativeDispatchSigner, verifyNativeDispatchNotSubmitted,
+import { createNativeDispatchSigner, verifyNativeDispatchNotSubmitted, verifyNativeDispatchChildBound,
   type NativeDispatchAuthority, type NativeDispatchLease } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts';
 
 /** A participating producer's admission. `release` binds the exact lease
@@ -38,11 +38,18 @@ export interface NativeChildAdmission {
   /** Ends only this process's pre-dispatch exemption, not the durable lease. */
   finishPreparing?(lease: AdmissionLease): void
   /** Original actor only; the signing key remains private to this admission process. */
-  dispatchAuthority?(lease: AdmissionLease, request: BoundedWorkRequest): NativeDispatchAuthority
+  dispatchAuthority?(lease: AdmissionLease, request: BoundedWorkRequest, deadlineMs?: number, parentStepId?: string): NativeDispatchAuthority
   /** Exact signed pre-input refusal, not run termination or a worker-written flag. */
   releaseUnsubmitted?(request: BoundedWorkRequest, receipt: unknown): Promise<boolean>
   /** Exact-scope census. Unreadable identities throw; never infer an empty scope. */
   pending?(): readonly { runId: string; stepId: string; generation: number }[]
+  /** Authenticated original child only; continuation never acquires another lease. */
+  continuation?(request: BoundedWorkRequest, receipt: unknown): {
+    lease: NativeDispatchLease
+    current(): boolean
+    read(): string | undefined
+    claim(episodeId: string, preparation: string): Promise<boolean>
+  } | undefined
 }
 
 export interface ProjectAdmissionOptions {
@@ -175,14 +182,24 @@ export class ProjectAdmission {
    */
   forNativeChild(projectId: string | null): NativeChildAdmission {
     return {
-      dispatchAuthority: (lease, request) => {
+      continuation: (request, receipt) => {
+        const rows = this.listLeases('liveChild').filter(row => row.scope.projectId === projectId
+          && row.workRef === JSON.stringify([request.run_id, request.step_id]));
+        if (rows.length !== 1) return undefined;
+        const row = rows[0]!;
+        const lease = { ...row, reason: 'liveChild' as const };
+        if (!verifyNativeDispatchChildBound(receipt, request, lease)) return undefined;
+        return { lease, current: () => this.store.nativeContinuationCurrent(row), read: () => this.store.readNativeContinuation(row),
+          claim: (episodeId, preparation) => this.store.claimNativeContinuation(row, episodeId, preparation) };
+      },
+      dispatchAuthority: (lease, request, deadlineMs, parentStepId) => {
         const row = this.listLeases('liveChild').find(row => row.token === lease.token);
         if (!row || row.scope.ownerHandle !== lease.scope.ownerHandle || row.scope.projectId !== projectId
           || lease.scope.projectId !== projectId || row.generation !== lease.generation
           || row.producer !== this.producerFor('native-child')
           || !this.preparingNativeChildTokens.has(row.token)
           || row.workRef !== JSON.stringify([request.run_id, request.step_id])) throw new Error('Original native child admission is unavailable');
-        return this.nativeDispatchSigner.begin({ ...row, reason: 'liveChild' }, request);
+        return this.nativeDispatchSigner.begin({ ...row, reason: 'liveChild' }, request, deadlineMs, parentStepId);
       },
       releaseUnsubmitted: async (request, receipt) => {
         // Check against authoritative stored rows, never select authority from the

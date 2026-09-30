@@ -1311,20 +1311,36 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
 
   /** A wired bridge and tap, so nothing below is refused merely because the gateway had
    *  nothing to dispatch to — a 503 "unwired" would make these cases pass vacuously. */
-  function wireBridgeAndTap(): { dispatched: string[]; tapped: string[] } {
+  function wireBridgeAndTap(): { dispatched: string[]; tapped: string[]; projects: Array<string | null | undefined> } {
     const dispatched: string[] = []
     const tapped: string[] = []
+    const projects: Array<string | null | undefined> = []
     setReplToolBridge({
+      // These tests isolate credential routing; durable admission is exercised
+      // with the real ledger in the consuming project-build suite.
+      claudeHandlerAdmission: { dispatch: async (_identity, _id, _binding, current, handler) => {
+        if (!current()) throw new Error('revoked')
+        return await handler()
+      } },
       listToolSchemas: () => [
         { name: 'note', description: 'write a note', input_schema: { type: 'object' } },
       ],
       dispatch: async (input) => {
         dispatched.push(input.tool_name)
+        projects.push(input.project_id)
         return { ok: true }
       },
     })
     setReplActivityTap((row) => void tapped.push(row.tool_name))
-    return { dispatched, tapped }
+    return { dispatched, tapped, projects }
+  }
+
+  function scopedSession(generation: string, sessionId: string, dir: string, projectId: string | null = null): ReplSession {
+    const session = new ReplSession('key', generation, sessionId, 'chan', dir)
+    session.toolBridgeActive = true
+    session.projectId = projectId ?? 'general'
+    session.bindToolProjectScope({ conversationProjectId: projectId })
+    return session
   }
 
   const PRIVILEGED = ['/tool-call', '/activity', '/tools'] as const
@@ -1349,9 +1365,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     const { dispatched, tapped } = wireBridgeAndTap()
 
     const liveId = 'session-this-gateway-is-driving'
-    const live = new ReplSession('key', 'generation-of-the-live-child', liveId, 'chan', dir)
-    live.toolBridgeActive = true
-    live.projectId = 'acme'
+    const live = scopedSession('generation-of-the-live-child', liveId, dir, 'acme')
     s.register(liveId, live)
 
     // The orphan's OWN credential: minted for an incarnation that is gone.
@@ -1380,19 +1394,17 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     // generation case. Binding to the incarnation is what makes the old credential die.
     const dir = scratch()
     const s = await startSink({ port: freePort(), tokenPath: join(dir, SINK_TOKEN_FILENAME) })
-    wireBridgeAndTap()
+    const { dispatched } = wireBridgeAndTap()
 
     const sessionId = 'session-that-gets-respawned'
-    const first = new ReplSession('key', 'generation-1', sessionId, 'chan', dir)
-    first.toolBridgeActive = true
+    const first = scopedSession('generation-1', sessionId, dir)
     s.register(sessionId, first)
     const firstCredential = s.credentialFor(first)
     expect((await post(s.port, firstCredential, '/tool-call', bodyFor('/tool-call', sessionId))).status).toBe(200)
 
     // The respawn: same id, new incarnation. `unregisterIf` drops the old mapping, and
     // the replacement registers under the same id.
-    const second = new ReplSession('key', 'generation-2', sessionId, 'chan', dir)
-    second.toolBridgeActive = true
+    const second = scopedSession('generation-2', sessionId, dir)
     s.unregisterIf(sessionId, first)
     s.register(sessionId, second)
     const secondCredential = s.credentialFor(second)
@@ -1404,6 +1416,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     // …and the replacement works, or this test would pass against a sink that refuses
     // everything after a respawn.
     expect((await post(s.port, secondCredential, '/tool-call', bodyFor('/tool-call', sessionId))).status).toBe(200)
+    expect(dispatched).toEqual(['note', 'note'])
   })
 
   test('a replacement registered with NO unregister still revokes the displaced credential', async () => {
@@ -1414,18 +1427,16 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     // what it displaces, A's credential lives forever.
     const dir = scratch()
     const s = await startSink({ port: freePort(), tokenPath: join(dir, SINK_TOKEN_FILENAME) })
-    wireBridgeAndTap()
+    const { dispatched } = wireBridgeAndTap()
 
     const sessionId = 'session-replaced-without-an-unregister'
-    const first = new ReplSession('key', 'generation-1', sessionId, 'chan', dir)
-    first.toolBridgeActive = true
+    const first = scopedSession('generation-1', sessionId, dir)
     s.register(sessionId, first)
     const firstCredential = s.credentialFor(first)
     expect((await post(s.port, firstCredential, '/tool-call', bodyFor('/tool-call', sessionId))).status).toBe(200)
 
     // The replacement, with NO unregister of any kind in between.
-    const second = new ReplSession('key', 'generation-2', sessionId, 'chan', dir)
-    second.toolBridgeActive = true
+    const second = scopedSession('generation-2', sessionId, dir)
     s.register(sessionId, second)
     const secondCredential = s.credentialFor(second)
     expect(secondCredential).not.toBe(firstCredential)
@@ -1438,6 +1449,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     // The positive control: the replacement still works, so this cannot be satisfied by
     // a `register` that drops both credentials.
     expect((await post(s.port, secondCredential, '/tool-call', bodyFor('/tool-call', sessionId))).status).toBe(200)
+    expect(dispatched).toEqual(['note', 'note'])
   })
 
   test('the LEGITIMATE child still succeeds on every privileged route, with its scope', async () => {
@@ -1445,20 +1457,20 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     // refuses everything — and the PR would have traded a security hole for an outage.
     const dir = scratch()
     const s = await startSink({ port: freePort(), tokenPath: join(dir, SINK_TOKEN_FILENAME) })
-    const { dispatched, tapped } = wireBridgeAndTap()
+    const { dispatched, tapped, projects } = wireBridgeAndTap()
 
     const sessionId = 'session-this-gateway-is-driving'
-    const live = new ReplSession('key', 'generation-of-the-live-child', sessionId, 'chan', dir)
-    live.toolBridgeActive = true
-    live.projectId = 'acme'
+    const live = scopedSession('generation-of-the-live-child', sessionId, dir, 'acme')
     s.register(sessionId, live)
     const credential = s.credentialFor(live)
 
     for (const path of PRIVILEGED) {
       const res = await post(s.port, credential, path, bodyFor(path, sessionId))
       expect(res.status).toBe(200)
+      if (path === '/tool-call') expect(JSON.parse(res.body)).toEqual({ ok: true, result: { ok: true } })
     }
     expect(dispatched).toEqual(['note'])
+    expect(projects).toEqual(['acme'])
     expect(tapped).toEqual(['Bash'])
     // The credential also carries the SCOPE, because it resolved to the session: a
     // work-board write lands on that session's project, not the owner default.
@@ -1474,9 +1486,7 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     const dir = scratch()
     const s = await startSink({ port: freePort(), tokenPath: join(dir, SINK_TOKEN_FILENAME) })
     const { dispatched } = wireBridgeAndTap()
-    const live = new ReplSession('key', 'generation-x', 'the-real-id', 'chan', dir)
-    live.toolBridgeActive = true
-    live.projectId = 'acme'
+    const live = scopedSession('generation-x', 'the-real-id', dir, 'acme')
     s.register('the-real-id', live)
 
     const res = await post(s.port, s.credentialFor(live), '/tool-call', {
@@ -1486,16 +1496,40 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
       call_id: 'c9',
     })
     expect(res.status).toBe(200)
+    expect(JSON.parse(res.body).ok).toBe(true)
     expect(dispatched).toEqual(['note'])
+  })
+
+  test('a legacy label alone refuses tool dispatch until canonical scope is bound', async () => {
+    const dir = scratch()
+    const s = await startSink({ port: freePort(), tokenPath: join(dir, SINK_TOKEN_FILENAME) })
+    const { dispatched, projects } = wireBridgeAndTap()
+    const session = new ReplSession('key', 'legacy-generation', 'legacy-session', 'chan', dir)
+    session.toolBridgeActive = true
+    session.projectId = 'general'
+    s.register(session.sessionId, session)
+    const invoke = () => post(s.port, s.credentialFor(session), '/tool-call', bodyFor('/tool-call', session.sessionId))
+
+    const refused = await invoke()
+    expect(refused.status).toBe(200)
+    expect(JSON.parse(refused.body)).toEqual({ ok: false, error: 'Claude MCP handler project scope is unknown' })
+    expect(dispatched).toEqual([])
+
+    // The same credential and request succeed only after authenticated scope is known.
+    for (const projectId of [null, 'general', 'default'] as const) {
+      session.bindToolProjectScope({ conversationProjectId: projectId })
+      expect(JSON.parse((await invoke()).body).ok).toBe(true)
+    }
+    expect(dispatched).toEqual(['note', 'note', 'note'])
+    expect(projects).toEqual([null, 'general', 'default'])
   })
 
   test('unregistering a session revokes its credential immediately — the reap has teeth', async () => {
     const dir = scratch()
     const s = await startSink({ port: freePort(), tokenPath: join(dir, SINK_TOKEN_FILENAME) })
-    wireBridgeAndTap()
+    const { dispatched } = wireBridgeAndTap()
     const sessionId = 'session-about-to-be-evicted'
-    const session = new ReplSession('key', 'generation-1', sessionId, 'chan', dir)
-    session.toolBridgeActive = true
+    const session = scopedSession('generation-1', sessionId, dir)
     s.register(sessionId, session)
     const credential = s.credentialFor(session)
 
@@ -1504,7 +1538,9 @@ describe('a credential names WHICH session; a session id names nothing (#537)', 
     const after = await post(s.port, credential, '/tool-call', bodyFor('/tool-call', sessionId))
 
     expect(before.status).toBe(200)
+    expect(JSON.parse(before.body).ok).toBe(true)
     expect(after.status).toBe(401)
+    expect(dispatched).toEqual(['note'])
   })
 })
 

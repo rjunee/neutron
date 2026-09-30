@@ -20,6 +20,9 @@ import {
   type InlineEvidenceReader,
 } from '@neutronai/work-board/inline-activity.ts'
 import { inspectorScopeKey } from '@neutronai/open/activity-inspector.ts'
+import { TridentRunStore } from '@neutronai/trident/store.ts'
+import { quotaWaitEvents } from '@neutronai/trident/testing/quota-wait-events.ts'
+import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
 
 /** A minimal fake trident run for the surface's progress + cancel deps. */
 function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
@@ -184,6 +187,37 @@ describe('work-board HTTP surface', () => {
 
 describe('work-board HTTP surface — trident run integration (items 1 + 3)', () => {
   const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
+
+  test('HTTP and push projection consume bounded durable quota state and clear after restart', async () => {
+    const runs = new TridentRunStore(db)
+    const run = await runs.create({ id: 'quota-run', slug: 'quota', project_slug: SCOPE, repo_path: '/repo', task: 'build',
+      channel_kind: 'app_socket', branch: 'trident/quota' })
+    await runs.update(run.id, { worktree: '/worktree' })
+    const current = runs.get(run.id)!
+    const card = await store.create(SCOPE, { title: 'Waiting build', status: 'in_progress' })
+    await store.bindRun(SCOPE, card.id, run.id)
+    for (const event of quotaWaitEvents(current, 1_800_000_000_000))
+      await runs.recordStageEvent(run.id, event.stage, event.meta)
+    // Noise and foreign tuples do not evict the authoritative rows.
+    for (let i = 0; i < 30; i++) await runs.recordStageEvent(run.id, 'codex-exec-alive')
+    await runs.recordStageEvent(run.id, 'claude-quota-wait-ended', JSON.stringify({ stepId: `${run.id}:plan:0`, childId: 'foreign' }))
+    expect(runs.quotaWaitEvents(run.id)).toHaveLength(3)
+    const surface = createWorkBoardSurface({ store, auth, trident_runs: runs, now: () => 1_800_000_000_000 })
+    const read = async () => (await (await surface.handler(req('GET', '/api/app/projects/proj1/work-board')))!.json()) as {
+      items: Array<{ status: string; run_progress: { quota_wait: { retry_at: string | null } | null } }>
+    }
+    const pushed = () => runProgressForItem(store.get(SCOPE, card.id)!, id => runs.get(id), 1_800_000_000_000,
+      undefined, id => runs.latestHeartbeatAt(id), id => runs.quotaWaitEvents(id))
+    expect((await read()).items[0]?.run_progress.quota_wait).toEqual({ retry_at: '2027-01-15T08:00:00.000Z' })
+    expect((await read()).items[0]?.status).toBe('in_progress')
+    expect(pushed()?.quota_wait).toEqual((await read()).items[0]?.run_progress.quota_wait)
+    await runs.recordStageEvent(run.id, 'claude-quota-resumed', JSON.stringify({ stepId: `${run.id}:plan:0`, childId: 'native-child-current' }))
+    const restarted = new TridentRunStore(db)
+    expect(runProgressForItem(store.get(SCOPE, card.id)!, id => restarted.get(id), 0,
+      undefined, undefined, id => restarted.quotaWaitEvents(id))?.quota_wait).toBeNull()
+    expect((await read()).items[0]?.run_progress.quota_wait).toBeNull()
+    expect(pushed()?.quota_wait).toBeNull()
+  })
 
   test('GET enriches a bound item with its live run_progress (item 1)', async () => {
     const item = await store.create(SCOPE, { title: 'Building' })

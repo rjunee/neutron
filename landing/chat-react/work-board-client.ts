@@ -145,6 +145,7 @@ export type RunStepLabel = 'building' | 'reviewing' | 'fixing' | 'merging' | 're
 
 /** Item 1 — a bound run's live progress, as the tab consumes it. */
 export interface RunProgress {
+  quota_wait?: { retry_at: string | null } | null
   run_id: string
   phase_label: RunPhaseLabel
   /** M1 redesign — the inner-step label (building/reviewing/fixing/merging + terminal). */
@@ -502,6 +503,25 @@ export function resolveStepLabel(rp: {
 }
 
 /** Parse a raw `run_progress` object (item 1) off a live frame; null when absent/malformed. */
+function parseQuotaWait(raw: unknown): Exclude<RunProgress['quota_wait'], undefined> {
+  if (typeof raw !== 'object' || raw === null) return null
+  const retry = (raw as { retry_at?: unknown }).retry_at
+  if (retry !== null && (typeof retry !== 'string' || !Number.isFinite(Date.parse(retry)))) return null
+  return { retry_at: retry as string | null }
+}
+
+/** Current binding and active lane win over stale or terminal progress frames. */
+export function quotaWaitText(item: WorkBoardItem): string | null {
+  const rp = item.run_progress
+  if (item.status !== 'in_progress' || !item.linked_run_id || rp?.run_id !== item.linked_run_id
+    || ['merged', 'failed', 'cancelled'].includes(rp.phase_label) || !rp.quota_wait) return null
+  const reset = rp.quota_wait.retry_at
+  const known = typeof reset === 'string' && Number.isFinite(Date.parse(reset))
+  return known
+    ? `Waiting for Claude quota · Reset expected ${new Date(reset).toISOString()} · Resumes automatically`
+    : 'Waiting for Claude quota · Reset time unavailable · Resumes automatically'
+}
+
 function parseRunProgress(raw: unknown): RunProgress | null {
   if (typeof raw !== 'object' || raw === null) return null
   const r = raw as Record<string, unknown>
@@ -573,5 +593,6 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     failure_reason: typeof r['failure_reason'] === 'string' ? (r['failure_reason'] as string) : null,
     brief_alert: typeof r['brief_alert'] === 'string' ? (r['brief_alert'] as string) : null,
     resume_note: typeof r['resume_note'] === 'string' ? (r['resume_note'] as string) : null,
+    quota_wait: parseQuotaWait(r['quota_wait']),
   }
 }
