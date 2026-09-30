@@ -1028,6 +1028,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable' | 'restart' | 'repeated' | 'held-ack'
   nativeCapacity?: string
   nativeQueuedOrdinary?: boolean
+  nativeWriterQueue?: boolean
+  beforeNativeQuota?: () => Promise<void>
   verdictRepair?: WorkerWorld['verdictRepair']
   /** Real session ownership with only the model boundary held at a barrier. */
   reviewChild?: (request: BoundedWorkRequest, seat: string) => Promise<void>
@@ -1312,6 +1314,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await writeFile(childTranscript, JSON.stringify({ ...identity, type: 'user', message: { role: 'user', content: args.prompt } }) + '\n')
       const rejectQuota = () => appendFile(childTranscript, JSON.stringify({ ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [], stop_reason: 'stop_sequence' },
         isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-request' }) + '\n')
+      await options.beforeNativeQuota?.()
       if (options.nativeQueuedOrdinary) emitQuota = rejectQuota
       else await rejectQuota()
       if (options.nativeContinuation === 'restart') {
@@ -1332,7 +1335,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     } }, acquireTurn: async () => () => {}, acquireContinuationTurn: async () => () => {} }
 
   let registeredSession: typeof session | ReplSession = session
-  if (options.nativeQueuedOrdinary) {
+  if (options.nativeQueuedOrdinary || options.nativeWriterQueue) {
     const live = new ReplSession(key, 'e2e-generation', 'e2e-session', 'e2e-channel', dir)
     live.authFingerprint = session.authFingerprint
     live.toolSurface = session.toolSurface
@@ -1344,7 +1347,10 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     }) : undefined, workspace)
     live.attachChild({ ...session.child, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}) })
     registeredSession = live
-    fixtureCleanup(async () => { await quotaEmission; await ordinaryTurn; expect(ordinaryAcquired).toBe(true); expect(live.turnSlotHeld).toBe(0) })
+    fixtureCleanup(async () => {
+      await quotaEmission; await ordinaryTurn
+      if (options.nativeQueuedOrdinary) { expect(ordinaryAcquired).toBe(true); expect(live.turnSlotHeld).toBe(0) }
+    })
   }
   if (options.reviewChild || options.nativeChild) {
     const live = new ReplSession(key, 'e2e-generation', 'e2e-session', 'e2e-channel', dir)
@@ -7531,6 +7537,66 @@ test.each(['fresh', 'queued', 'alias', 'restart'] as const)('native same-ID cont
   expect(f.github.prs[0]!.state).toBe('MERGED')
 }, 30_000)
 
+test.each(['available', 'spent execution'] as const)('native writer queue credit bounds authenticated same-child continuation beyond the prequeue wall: %s', async capacity => {
+  let originalWall = 0
+  let queuedRequest!: BoundedWorkRequest
+  let signedDeadline = 0
+  let capacityTimer: ReturnType<typeof setTimeout> | undefined
+  cleanups.push(() => { clearTimeout(capacityTimer) })
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeWriterQueue: true,
+    nativeCapacity: capacity === 'spent execution' ? 'all-full' : 'available',
+    beforeNativeQuota: async () => {
+      const dispatch = readClaudeNativeDispatchReceipt(join(f.context.stateRoot, f.row.id), queuedRequest) as SignedNativeDispatchRecord
+      expect(dispatch.body.phase).toBe('submission-started')
+      signedDeadline = dispatch.body.deadlineMs!
+      expect(signedDeadline).toBeGreaterThan(originalWall + 1_000)
+      // Capacity returning after the actual execution allowance is spent must
+      // not turn queue credit into another recovery budget.
+      if (capacity === 'spent execution') capacityTimer = setTimeout(() => f.capacity!.setMode('available'), Math.max(1, originalWall + 1_700 - Date.now()))
+      await Bun.sleep(Math.max(1, originalWall + 100 - Date.now()))
+      expect(Date.now()).toBeGreaterThan(originalWall)
+    } })
+  f.capacity!.setRetryDelay(1)
+  const options = await f.prepare()
+  const runner = options.substrate.inRepl!, run = runner.run.bind(runner)
+  runner.run = async (request, placement, signal) => {
+    if (request.role !== 'synthesis') return run(request, placement, signal)
+    const release = await f.session.acquireTurn()
+    originalWall = Date.now() + 2_000
+    queuedRequest = { ...request, budget: { wall_ms: 2_000 } }
+    const running = run(queuedRequest, placement, signal)
+    try {
+      for (let n = 0; n < 200 && (f.session as ReplSession).turnSlotHeld < 2; n++) await Bun.sleep(5)
+      expect((f.session as ReplSession).turnSlotHeld).toBe(2)
+      await Bun.sleep(1_200)
+      release()
+      return await running
+    } finally { release(); await running }
+  }
+  const host = await createProjectBuildHost(options)
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  if (capacity === 'spent execution') {
+    expect(outcome.kind, why(f, outcome)).toBe('blocked')
+    expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(0)
+    expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(0)
+    expect(f.admission.listLeases('liveChild')).toHaveLength(1)
+    expect((f.session as ReplSession).turnSlotHeld).toBe(1)
+    expect(f.github.prs[0]!.state).toBe('OPEN')
+    return
+  }
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(1)
+  expect(f.nativeInputs.filter(line => line.includes('synthesis:'))).toHaveLength(1)
+  expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(1)
+  const preparation = JSON.parse(f.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations')!.preparation)
+  expect(preparation.intent.deadlineMs).toBe(signedDeadline)
+  const dispatch = readClaudeNativeDispatchReceipt(join(f.context.stateRoot, f.row.id), queuedRequest) as SignedNativeDispatchRecord
+  expect(dispatch.body.deadlineMs).toBe(signedDeadline)
+  expect(f.admission.listLeases('liveChild')).toEqual([])
+  expect((f.session as ReplSession).turnSlotHeld).toBe(0)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 30_000)
+
 test('repeated native quota episodes wait visibly and resume the same child through the original merge gates', async () => {
   const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'repeated', nativeCapacity: 'all-full' })
   f.capacity!.setRetryDelay(1)
@@ -9002,6 +9068,30 @@ test('native queued writer execution expiry preserves exact child recovery witho
     expect(f.admission.listLeases('liveChild')).toEqual([])
   } finally { release(); releaseChild(); await running }
 }, 10_000)
+
+test.each(['expired', 'cancelled'] as const)('native writer queue %s admission cannot buy a dispatch deadline', async mode => {
+  let children = 0
+  const f = await fixture({ nativeChild: async () => { children++ } })
+  const options = await f.prepare(), controller = new AbortController()
+  const release = await f.session.acquireTurn()
+  const request: BoundedWorkRequest = { ...options.workers.build.request, run_id: f.row.id,
+    step_id: `${f.row.id}:queued-admission`, role: 'build', needs_approval_decision: false, budget: { wall_ms: 500 } }
+  const running = options.substrate.inRepl!.run(request, 'in-repl', controller.signal)
+  try {
+    for (let n = 0; n < 80 && (f.session as ReplSession).turnSlotHeld < 2; n++) await Bun.sleep(5)
+    expect((f.session as ReplSession).turnSlotHeld).toBe(2)
+    if (mode === 'cancelled') controller.abort()
+    expect(['unknown', 'refused']).toContain((await running).kind)
+    release()
+    for (let n = 0; n < 100 && f.admission.listLeases('liveChild').length; n++) await Bun.sleep(5)
+    expect(children).toBe(0)
+    expect(f.admission.listLeases('liveChild')).toEqual([])
+    const receipt = readClaudeNativeDispatchReceipt(join(f.context.stateRoot, f.row.id), request) as SignedNativeDispatchRecord
+    expect(receipt.body.phase).toBe('not-submitted')
+    expect((await options.substrate.inRepl!.recover!(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+    expect(children).toBe(0)
+  } finally { release(); await running }
+}, 5_000)
 
 test('native planner retains execution time after measured real REPL writer queue wait', async () => {
   const f = await fixture()

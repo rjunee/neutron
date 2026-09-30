@@ -606,18 +606,30 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       let authority: NativeDispatchAuthority | undefined
       let actorEntered = false
       let notSubmitted = false
+      let parent: Extract<NativeDispatchEvidence, { kind: 'parent-bound' }> | undefined
+      const enclosingStep = nativeReviewScope.getStore()
       const evidence = (event: NativeDispatchEvidence) => {
+        // The bounded writer wait is measured before original submission. Select
+        // and sign its one execution deadline here, before any input can escape;
+        // no post-submission event or recovery may establish another authority.
+        if (event.kind === 'parent-bound') {
+          if (parent || receipt) throw new Error('Original native parent is already bound')
+          parent = structuredClone(event)
+          return
+        }
+        if (!receipt && (event.kind === 'submission-started' || event.kind === 'not-submitted')) {
+          authority = context.nativeChildAdmission.dispatchAuthority?.(child.lease, turn.request,
+            turn.dispatchBudget?.deadline_ms ?? originalDeadline,
+            enclosingStep === turn.request.step_id ? undefined : enclosingStep)
+          if (!authority) throw new Error('Original native dispatch signing authority is unavailable')
+          receipt = createClaudeNativeDispatchReceipt(state, turn.request, authority)
+          if (parent) receipt.record(parent)
+        }
         if (!receipt) throw new Error('Original native dispatch receipt is unavailable')
         receipt.record(event)
         if (event.kind === 'not-submitted') notSubmitted = true
       }
       try {
-        const enclosingStep = nativeReviewScope.getStore()
-        authority = context.nativeChildAdmission.dispatchAuthority?.(child.lease, turn.request, originalDeadline,
-          enclosingStep === turn.request.step_id ? undefined : enclosingStep)
-        if (!authority) return { kind: 'unknown', detail: 'Original native dispatch signing authority is unavailable' }
-        try { receipt = createClaudeNativeDispatchReceipt(state, turn.request, authority) }
-        catch { return { kind: 'unknown', detail: 'Original native dispatch receipt cannot be exclusively established' } }
         outcome = await nativeChildTurn({ ...turn, deadline_ms: originalDeadline }, child.generation, () => context.nativeChildAdmission.finishPreparing?.(child.lease),
           evidence, () => { actorEntered = true })
         return outcome
@@ -628,7 +640,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         // No acting invocation was entered: even an acquisition timeout is a
         // positive pre-input refusal. Once entered, only the original actor's
         // terminal callback may prove that; unknown submit acknowledgements stay held.
-        if (receipt && !actorEntered) {
+        if (!actorEntered) {
           try { evidence({ kind: 'not-submitted' }) } catch { /* Incomplete durable evidence keeps the lease. */ }
         }
         receipt?.close()
@@ -798,10 +810,15 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       }
     }
     const finish: typeof runner.run = async (...args) => {
-      const deadline = Date.now() + args[0].budget.wall_ms
-      const stopped = AbortSignal.any([args[2], AbortSignal.timeout(Math.max(1, args[0].budget.wall_ms))])
+      let deadline = Date.now() + args[0].budget.wall_ms
       let outcome = await runner.run(...args)
       if (outcome.kind === 'blocked' || outcome.kind === 'unknown') {
+        const receipt = readClaudeNativeDispatchReceipt(state, args[0])
+        if (context.nativeChildAdmission.continuation?.(args[0], receipt)) {
+          const original = (receipt as SignedNativeDispatchRecord).body.deadlineMs
+          if (Number.isSafeInteger(original)) deadline = original!
+        }
+        const stopped = AbortSignal.any([args[2], AbortSignal.timeout(Math.max(1, deadline - Date.now()))])
         const continued = await continuation(args[0], stopped, deadline)
         if (continued === 'submitted' && runner.recover) outcome = await recoverContinuing(args[0], args[1], stopped, deadline)
         else if (continued && continued !== 'submitted') outcome = outcome.kind === 'blocked' && continued.kind === 'unknown'

@@ -303,9 +303,9 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
         const boundary = await transcriptBoundary(transcript)
         if (expired()) return beforeDispatchExpired()
         const markSubmitted = () => {
-          binding.onDispatchSubmitted?.()
           submitted = true
           binding.onNativeDispatchEvidence?.({ kind: 'submission-started' })
+          binding.onDispatchSubmitted?.()
         }
         if (child.paneHandle !== undefined) {
           // Externally addressable panes can contain input from another client.
