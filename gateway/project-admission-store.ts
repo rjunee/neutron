@@ -41,7 +41,7 @@ export class ProjectAdmissionStore {
   constructor(private readonly db: ProjectDb) {}
 
   readNativeContinuation(lease: AdmissionLeaseRow): string | undefined {
-    return this.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations WHERE lease_token = ?', [lease.token])?.preparation;
+    return this.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations WHERE lease_token = ? ORDER BY rowid DESC LIMIT 1', [lease.token])?.preparation;
   }
 
   /** Recheck the original authorization epoch before capacity and parent input. */
@@ -55,8 +55,9 @@ export class ProjectAdmissionStore {
     [lease.token, key, lease.generation, lease.producer, lease.workRef]));
   }
 
-  /** Claim before any parent input. An existing claim is observation-only forever. */
-  async claimNativeContinuation(lease: AdmissionLeaseRow, preparation: string): Promise<boolean> {
+  /** Each episode remains spent forever, including after its successor is claimed. */
+  async claimNativeContinuation(lease: AdmissionLeaseRow, episodeId: string, preparation: string): Promise<boolean> {
+    if (!/^[a-f0-9]{64}$/.test(episodeId)) return false;
     return this.db.transaction(async tx => {
       const key = scopeKey(lease.scope);
       await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
@@ -67,8 +68,8 @@ export class ProjectAdmissionStore {
         AND generation = ? AND reason = 'liveChild' AND producer = ? AND work_ref = ?`,
       [lease.token, key, lease.generation, lease.producer, lease.workRef]);
       if (!exact) return false;
-      return tx.runSync('INSERT OR IGNORE INTO claude_native_continuations (lease_token, preparation) VALUES (?, ?)',
-        [lease.token, preparation]).changes === 1;
+      return tx.runSync('INSERT OR IGNORE INTO claude_native_continuations (lease_token, authenticated_episode_id, preparation) VALUES (?, ?, ?)',
+        [lease.token, episodeId, preparation]).changes === 1;
     });
   }
 

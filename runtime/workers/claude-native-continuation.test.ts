@@ -20,7 +20,7 @@ const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
 
 async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' | 'wrong-digest' | 'wrong-version' | 'adopted' | 'adopted-unavailable' = 'valid',
-  witness?: 'legacy' | 'reboot' | 'changed-start') {
+  witness?: 'legacy' | 'reboot' | 'changed-start' | 'missing-budget' | 'expired-budget') {
   const capacity = await capacityFixture()
   cleanup.push(() => capacity.close())
   const dir = await mkdtemp(join(tmpdir(), 'native-continuation-'))
@@ -61,7 +61,8 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
   const signer = createNativeDispatchSigner()
   const lease: NativeDispatchLease = { scope: { ownerHandle: 'owner', projectId: 'project' }, generation: 0, token: 'lease',
     reason: 'liveChild', producer: `native-child:boot:${signer.keyDigest}`, workRef: JSON.stringify(['run', 'build:0']) }
-  const authority = signer.begin(lease, request)
+  const authority = signer.begin(lease, request, witness === 'missing-budget' ? undefined
+    : witness === 'expired-budget' ? Date.now() - 1 : Date.now() + request.budget.wall_ms)
   authority.prepare()
   const originalLaunch = structuredClone(readNativeParentLaunchEvidence(session))
   const originalIdentity = readProcessIdentity(process.pid)!
@@ -84,16 +85,20 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
       error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-event' },
   ].map(row => JSON.stringify(row)).join('\n') + '\n')
   let saved: string | undefined
+  const claims = new Map<string, string>()
   const options: ClaudeContinuationOptions = { request, receipt, stateDir, session, workspace, projectsDir,
-    capacity: { acquire: capacity.acquire },
-    authority: { lease, current: () => true, read: () => saved, claim: async value => { if (saved !== undefined) return false; saved = value; return true } },
+    capacity: { acquire: capacity.acquire, control: capacity.control },
+    authority: { lease, current: () => true, read: () => saved, claim: async (episode, value) => { if (claims.has(episode)) return false; claims.set(episode, value); saved = value; return true } },
     signal: new AbortController().signal, deadline: Date.now() + 5000,
     decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, { schemas: new Map([['fixture', result => result === 'done']]), metadata: () => undefined }) }
   const invoke = (input = options) => continueClaudeNativeChild(input)
-  const recordInvocation = async (to = 'child', decorations: Record<string, unknown> = {}) => {
+  const recordInvocation = async (to = 'child', decorations: Record<string, unknown> = {}, toolUseId = 'exact-tool') => {
     const prepared = JSON.parse(saved!)
     await appendFile(transcript, JSON.stringify({ sessionId: 'parent', type: 'assistant', message: { role: 'assistant',
-      content: [{ type: 'tool_use', name: 'SendMessage', id: 'exact-tool', input: { ...prepared.args, to, ...decorations } }] } }) + '\n')
+      content: [{ type: 'tool_use', name: 'SendMessage', id: toolUseId, input: { ...prepared.args, to, ...decorations } }] } }) + '\n')
+    const result = { success: true, resumedAgentId: to }
+    await appendFile(transcript, JSON.stringify({ sessionId: 'parent', type: 'user', toolUseResult: result, message: { role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: toolUseId, content: [{ type: 'text', text: JSON.stringify(result) }] }] } }) + '\n')
   }
   const restore = async (observe = true, generation = 'restored-generation') => {
     const restored = new ReplSession('key', 'restored-generation', 'parent', 'channel', cwd)
@@ -104,7 +109,7 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
     cleanup.push(async () => completeNativeChildWorkspace(workspace))
     return { ...options, session: restored, workspace }
   }
-  return { options, session, request, inputs, invoke, restore, childPath, transcript, recordInvocation, capacity, saved: () => saved }
+  return { options, session, request, inputs, invoke, restore, childPath, transcript, recordInvocation, capacity, claims, saved: () => saved }
 }
 
 test('all-full retains the original claim opportunity until fresh signed capacity permits that same child', async () => {
@@ -121,6 +126,9 @@ test('all-full retains the original claim opportunity until fresh signed capacit
     }
   }
   expect(await f.invoke()).toMatchObject({ kind: 'submitted' })
+  expect(states).toEqual(['waiting'])
+  await f.recordInvocation()
+  expect(await f.invoke()).toMatchObject({ kind: 'submitted', evidence: 'exact-tool-invocation' })
   expect(states).toEqual(['waiting', 'resumed'])
   expect(f.inputs).toHaveLength(1)
   expect(JSON.parse(f.saved()!).capacity.body).toMatchObject({ childId: 'child', capacity: { accountGeneration: 'a'.repeat(64), modelId: f.request.model_id } })
@@ -169,6 +177,128 @@ test('a unique exact native invocation reconciles the original spent opportunity
   expect(await f.invoke()).toEqual({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
   await f.recordInvocation()
   expect(await f.invoke()).toEqual({ kind: 'submitted', evidence: 'exact-tool-invocation' })
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('two authenticated quota episodes retain one lease, two immutable claims and the original deadline', async () => {
+  const f = await fixture()
+  const states: string[] = []
+  f.options.onQuotaState = async state => { states.push(state.kind); if (state.kind === 'waiting') f.capacity.setMode('available') }
+  f.capacity.setRetryDelay(1)
+  f.capacity.setMode('all-full')
+  expect(await f.invoke()).toMatchObject({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
+  const original = f.saved()!, first = JSON.parse(original)
+  expect(f.capacity.requests.find(row => row.kind === 'claude-native-prepare-continuation')).toMatchObject({
+    episodeId: first.intent.episodeId, intentId: first.nonce, hostMessage: first.args.message })
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
+  await f.recordInvocation('child', {}, 'first-tool')
+  f.capacity.advanceEpisode('first-tool', first.nonce)
+  f.capacity.setMode('all-full')
+  expect(await f.invoke({ ...f.options, deadline: Date.now() + 60_000 })).toMatchObject({ kind: 'submitted' })
+  const second = JSON.parse(f.saved()!)
+  expect(second.intent.deadlineMs).toBe(first.intent.deadlineMs)
+  expect(second.intent.episodeId).not.toBe(first.intent.episodeId)
+  expect(second.lease).toEqual(first.lease)
+  expect(f.claims.get(first.intent.episodeId)).toBe(original)
+  expect(f.claims.size).toBe(2)
+  expect(states.filter(state => state === 'waiting')).toHaveLength(2)
+  expect(states.at(-1)).toBe('waiting')
+  await f.recordInvocation('child', {}, 'second-tool')
+  expect(await f.invoke()).toMatchObject({ kind: 'submitted', evidence: 'exact-tool-invocation' })
+  expect(states.at(-1)).toBe('resumed')
+  expect(f.inputs).toHaveLength(2)
+  await writeFile(f.request.result.path, JSON.stringify({ schema: 'fixture', run_id: 'run', step_id: 'build:0', kind: 'completed', result: 'done' }))
+  expect(await f.invoke()).toMatchObject({ kind: 'result', outcome: { kind: 'completed' } })
+})
+
+test.each(['missing', 'wrong-link', 'failed', 'wrong-child', 'wrong-session'] as const)('native promotion requires linked successful tool result: %s', async mode => {
+  const f = await fixture()
+  await f.invoke()
+  const saved = JSON.parse(f.saved()!)
+  const result = { success: mode !== 'failed', resumedAgentId: mode === 'wrong-child' ? 'foreign' : 'child' }
+  await appendFile(f.transcript, JSON.stringify({ sessionId: 'parent', type: 'assistant', message: { role: 'assistant',
+    content: [{ type: 'tool_use', name: 'SendMessage', id: 'tool', input: saved.args }] } }) + '\n')
+  if (mode !== 'missing') await appendFile(f.transcript, JSON.stringify({ sessionId: mode === 'wrong-session' ? 'foreign' : 'parent', type: 'user',
+    toolUseResult: result, message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: mode === 'wrong-link' ? 'foreign' : 'tool',
+      content: [{ type: 'text', text: JSON.stringify(result) }] }] } }) + '\n')
+  expect(await f.invoke()).toEqual({ kind: 'unknown', reason: 'submission-unknown' })
+  expect(f.capacity.requests.filter(row => row.kind === 'claude-native-promote-continuation')).toHaveLength(0)
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('a restarted pending intent promotes only after exact reconciliation and never re-prepares or resends', async () => {
+  const f = await fixture()
+  f.session.child.submitLine = async line => { f.inputs.push(line); throw Error('lost acknowledgement') }
+  await f.invoke()
+  await f.recordInvocation()
+  const restarted = await f.restore(false)
+  expect(await f.invoke(restarted)).toMatchObject({ kind: 'submitted', evidence: 'exact-tool-invocation' })
+  expect(f.capacity.requests.filter(row => row.kind === 'claude-native-prepare-continuation')).toHaveLength(1)
+  expect(f.capacity.requests.filter(row => row.kind === 'claude-native-promote-continuation')).toHaveLength(1)
+  expect(f.inputs).toHaveLength(1)
+})
+
+test('promotion rechecks current original authorization and the persisted original deadline', async () => {
+  const f = await fixture()
+  await f.invoke(); await f.recordInvocation()
+  const before = f.capacity.requests.length
+  expect(await f.invoke({ ...f.options, authority: { ...f.options.authority, current: () => false } })).toMatchObject({ kind: 'unknown' })
+  expect(await f.invoke({ ...f.options, deadline: Date.now() - 1 })).toMatchObject({ kind: 'unknown' })
+  expect(f.capacity.requests).toHaveLength(before)
+  expect(f.inputs).toHaveLength(1)
+})
+
+test.each(['foreign-predecessor', 'foreign-intent', 'late-old-episode'] as const)('new signed quota cannot overwrite verified episode lineage: %s', async mode => {
+  const f = await fixture()
+  await f.invoke(); await f.recordInvocation('child', {}, 'first-tool')
+  const first = JSON.parse(f.saved()!)
+  f.capacity.advanceEpisode(mode === 'foreign-predecessor' ? 'foreign-tool' : 'first-tool', mode === 'foreign-intent' ? 'foreign-intent' : first.nonce)
+  if (mode === 'late-old-episode') {
+    await f.invoke(); await f.recordInvocation('child', {}, 'second-tool')
+    // An authenticated but delayed predecessor observation is not the newest
+    // logical child turn and cannot spend another continuation opportunity.
+    f.capacity.advanceEpisode(null, null)
+  }
+  const saved = f.saved(), count = f.inputs.length
+  expect(await f.invoke()).toMatchObject({ kind: 'unknown', reason: 'identity-unknown' })
+  expect(f.saved()).toBe(saved)
+  expect(f.inputs).toHaveLength(count)
+})
+
+test('a retry with changed body metadata in the same authenticated episode never spends a successor', async () => {
+  const f = await fixture()
+  await f.invoke(); await f.recordInvocation()
+  const original = f.saved()
+  f.capacity.setBodyDigest('d'.repeat(64))
+  expect(await f.invoke()).toMatchObject({ kind: 'submitted', evidence: 'exact-tool-invocation' })
+  expect(f.saved()).toBe(original)
+  expect(f.claims.size).toBe(1)
+  expect(f.inputs).toHaveLength(1)
+})
+
+test.each(['missing-budget', 'expired-budget'] as const)('restart before its first claim cannot extend an original %s, but can harvest its result', async budget => {
+  const f = await fixture('valid', budget)
+  const restarted = await f.restore(false)
+  expect(await f.invoke({ ...restarted, deadline: Date.now() + 60_000 })).toEqual({ kind: 'unknown', reason: 'budget-expired' })
+  expect(f.saved()).toBeUndefined()
+  expect(f.capacity.requests.filter(row => row.kind !== 'claude-native-register')).toHaveLength(0)
+  expect(f.inputs).toHaveLength(0)
+  await writeFile(f.request.result.path, JSON.stringify({ schema: 'fixture', run_id: 'run', step_id: 'build:0', kind: 'completed', result: 'done' }))
+  expect(await f.invoke(restarted)).toMatchObject({ kind: 'result', outcome: { kind: 'completed' } })
+})
+
+test.each(['active', 'restart'] as const)('work cancellation after acknowledgement tombstones the newest intent without refunding its claim: %s', async mode => {
+  const f = await fixture(), cancelled = new AbortController()
+  if (mode === 'active') f.options.signal = cancelled.signal
+  expect(await f.invoke()).toMatchObject({ kind: 'submitted', evidence: 'terminal-acknowledgement' })
+  const saved = f.saved()!, preparation = JSON.parse(saved)
+  cancelled.abort()
+  if (mode === 'restart') await f.invoke({ ...await f.restore(false), signal: cancelled.signal })
+  const until = Date.now() + 1000
+  while (!f.capacity.requests.some(row => row.kind === 'claude-native-cancel-continuation') && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 5))
+  expect(f.capacity.requests.find(row => row.kind === 'claude-native-cancel-continuation')).toMatchObject(preparation.intent)
+  expect(f.saved()).toBe(saved)
+  expect(f.claims.size).toBe(1)
   expect(f.inputs).toHaveLength(1)
 })
 

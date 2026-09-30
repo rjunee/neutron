@@ -61,30 +61,63 @@ parent without the original scope remains unavailable even if its executable and
 argv are independently measured. Current admission authorization, workspace and
 parent identity are checked before capacity and again before input.
 
-The durable continuation claim is committed before Enter. A timeout, lost
-acknowledgement or restart never refunds it. Exact invocation reconciliation
+The durable continuation claim is committed before the host registers its pending
+intent, and both complete before Enter. A timeout, lost acknowledgement or restart
+never refunds the claim. Exact invocation reconciliation
 requires the parent session, unchanged original transcript prefix, post-claim
 boundary, native recipient and nonce-bound structured input. Conflicting
 same-nonce invocations, replaced/truncated transcripts or unknown input preserve
 UNKNOWN. Prefixes above 64 MiB and tails above 4 MiB refuse reconciliation.
-Terminal acknowledgement proves parent input only; invocation proves invocation
-only. The original result validator decides completion, and completed work is
+Terminal acknowledgement proves parent input only. Promotion additionally requires
+the linked native `tool_result` to report success and the original `resumedAgentId`,
+consistent with the native result metadata. The original result validator decides completion, and completed work is
 harvested first even when current parent or capacity evidence is unavailable.
 Both result readers require bounded stable regular files; links, FIFOs and
 changing snapshots refuse safely.
 
-The current permanent claim remains one per original child lease. Repeated quota
-episodes are an outstanding requirement: a new timestamp, request-body digest,
-account generation or SDK retry does not prove a later logical child turn.
-Additional claims require authenticated continuation lineage and a reconciled
-predecessor; an unresolved prior claim must stay fenced. Until that producer
-exists, repeated-episode automatic recovery is UNKNOWN rather than a reason to
-weaken the existing ambiguity fence. All-full retains the original child and
-claim opportunity, emits durable scoped waiting stages, and polls within the
-original deadline. Retry hints determine a bounded one-to-thirty-second capacity
-cadence; original-result harvesting continues each second without holding parent
-input. Unknown capacity ends observation without sending. UI projection and
-repeated-episode recovery remain separate release acceptance.
+Each authenticated episode has one permanent claim under the original lease.
+The initial episode derives from that lease and signed original receipt digest;
+a successor derives from the same lease and the verified predecessor native
+`SendMessage` tool-use ID. A new timestamp, request-body digest, account generation
+or SDK retry cannot create a successor. The signed observation must bind the
+predecessor and immutable intent as well as the original child, session and scope.
+An unresolved claim remains observation-only. A recovered pending claim may be
+promoted after exact reconciliation, but cannot be re-prepared or resent.
+
+The pending host intent binds the complete nonce-bearing generic HostMessage,
+original request, receipt digest, parent scope, child and lease. Its signed budget
+and fence digests are correlation fields; the original Open admission authority
+and live host authorization still decide whether work may proceed. Matching native
+HTTP is quarantined without forwarding provider bytes until verified promotion.
+The newest exact structured user message must contain the pinned native delivery
+wrapper around the complete HostMessage. Missing, compacted, marker-only, foreign
+or delayed old markers cannot advance episodes. SDK retries retaining the newest
+exact marker remain in that episode even when body metadata changes. Promotion
+and forwarding recheck cancellation, deadline and current authorization.
+Work cancellation tombstones that work's immutable intent without revoking the
+whole parent scope, refunding the claim or creating an episode. Its cancellation
+control uses a separate bounded signal and may run after the original deadline;
+expired authority cannot promote or forward a model request.
+
+The original host-selected dispatch deadline is signed before dispatch and binds
+the first observation and every successor. Recovery never starts a fresh budget;
+missing signed budget authority permits passive original-result harvesting only.
+All-full retains the original child and claim opportunity, emits durable scoped
+waiting stages, and polls within that deadline. Retry hints determine a bounded
+one-to-thirty-second capacity cadence; original-result harvesting continues each
+second without holding parent input. Passive recovery and pending-intent
+reconciliation proceed together so quarantined HTTP cannot deadlock promotion.
+Unknown capacity cannot authorize another input. The existing waiting projections
+consume the same durable stages across repeated episodes.
+The resumed stage is emitted only after verified promotion or validated original
+result settlement. A terminal input acknowledgement retains the waiting notice
+while HTTP remains quarantined. Episode-bound resume events cannot clear a newer
+wait on the same child; restart reconstructs the current durable waiting state.
+For nested review and synthesis, the original signed dispatch also binds the
+enclosing host review checkpoint supplied by the orchestration scope. The durable
+child binding retains the actual child step and that explicit parent step, so the
+board can display its wait without guessing from step-name prefixes or whichever
+checkpoint happens to be current at recovery time.
 
 ## Acceptance
 

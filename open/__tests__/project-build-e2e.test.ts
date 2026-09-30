@@ -50,14 +50,14 @@
  * Everything this does NOT cover is enumerated at the bottom of this file.
  */
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
-import { recordNativeParentLaunchEvidence } from '@neutronai/runtime/adapters/claude-code/persistent/native-parent-launch-evidence.ts'
+import { readNativeParentLaunchEvidence, recordNativeParentLaunchEvidence } from '@neutronai/runtime/adapters/claude-code/persistent/native-parent-launch-evidence.ts'
 import { prepareAdoptedNativeParentLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/adopted-native-parent-launch.ts'
 import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
 import { CLAUDE_CONTINUATION_PROFILE } from '@neutronai/runtime/workers/claude-native-continuation.ts'
 import { capacityFixture } from '@neutronai/runtime/workers/claude-capacity-client.test-support.ts'
 import { getBestModel, setBestModelOverride } from '@neutronai/runtime/models.ts'
 import { reserveTrailerSlot } from '@neutronai/runtime/workers/trailer-slot.ts'
-import { createClaudeNativeDispatchReceipt } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
+import { createClaudeNativeDispatchReceipt, readClaudeNativeDispatchReceipt, type SignedNativeDispatchRecord } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { PLANNER_ROLE, dispatchPlannerWork, requiresPlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
 import { routeCodegenCancel } from '@neutronai/gateway/codegen-cancel-router.ts'
 import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/codegen-core'
@@ -83,6 +83,7 @@ import { decodeLedger } from '../../tests/fixtures/trident-ledger-delta/decode.t
 // eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
 import { compareLedgerDelta } from '../../tests/fixtures/trident-ledger-delta/compare.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { deriveQuotaWait } from '@neutronai/trident/run-progress.ts'
 import { reconcileClaudeNativeUsage } from '../wiring/claude-native-usage-reconcile.ts'
 import { retryModeSource, readBuildRetrySource } from '@neutronai/trident/build-mode-state.ts'
 import { WorkBoardStore, workBoardProjectIdForKey } from '@neutronai/work-board/store.ts'
@@ -1024,7 +1025,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
-  nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable' | 'restart'
+  nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable' | 'restart' | 'repeated' | 'held-ack'
   nativeCapacity?: string
   nativeQueuedOrdinary?: boolean
   verdictRepair?: WorkerWorld['verdictRepair']
@@ -1251,6 +1252,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   let emitQuota: (() => Promise<void>) | undefined
   let quotaEmission: Promise<void> | undefined
   let quotaDispatch = ''
+  let releaseNativeContinuation: (() => Promise<void>) | undefined
   const session = { sessionId: 'e2e-session', childGeneration: 'e2e-generation', plannerRole: PLANNER_ROLE, authFingerprint: options.nativeContinuation ? '' : 'fixture-spawned-credential',
     toolSurface: PROJECT_REPL_TOOL_DEFS.map(tool => tool.name).filter(name => !['unavailable', 'adopted-unavailable'].includes(options.nativeContinuation ?? '') || name !== 'SendMessage').join(','), cwd: dir, hasChildExited: () => false,
     child: { pid: process.pid, submitLine: async (line: string) => {
@@ -1260,10 +1262,19 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
         const args = JSON.parse(line.slice(line.indexOf('{')))
         expect(args.to).toBe('quota')
         const transcript = join(projectsDir, dir.replace(/\//g, '-'), 'e2e-session.jsonl')
+        const toolUseId = `continuation-tool-${nativeInputs.filter(line => line.startsWith('Invoke SendMessage')).length}`
         await appendFile(transcript, JSON.stringify({ sessionId: 'e2e-session', type: 'assistant', message: { role: 'assistant',
-          content: [{ type: 'tool_use', id: 'continuation-tool', name: 'SendMessage', input: args }] } }) + '\n')
+          content: [{ type: 'tool_use', id: toolUseId, name: 'SendMessage', input: args }] } }) + '\n')
         if (options.nativeContinuation === 'lost-ack') throw new Error('Lost continuation acknowledgement')
-        return worker(quotaDispatch)
+        const result = { success: true, resumedAgentId: 'quota' }
+        const complete = () => appendFile(transcript, JSON.stringify({ sessionId: 'e2e-session', type: 'user', toolUseResult: result,
+          message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId,
+            content: [{ type: 'text', text: JSON.stringify(result) }] }] } }) + '\n')
+        if (options.nativeContinuation === 'held-ack') releaseNativeContinuation = complete
+        else await complete()
+        // The native child request is quarantined until the broker receives the
+        // exact verified promotion. A terminal acknowledgement writes no result.
+        return
       }
       const spec = JSON.parse(line.slice(line.indexOf('{')))
       const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
@@ -1378,6 +1389,14 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     fixtureCleanup(() => setBestModelOverride(previous))
   }
   const relay = await capacity?.register(registeredSession.sessionId)
+  capacity?.onPromotion(async (toolUseId, intentId) => {
+    if (options.nativeContinuation === 'repeated' && toolUseId === 'continuation-tool-1') {
+      capacity.advanceEpisode(toolUseId, intentId)
+      capacity.setMode('all-full')
+      return
+    }
+    await worker(quotaDispatch)
+  })
   if (options.nativeCapacity === 'native-success') capacity!.setNativeStatus('available')
   if (options.nativeCapacity === 'native-unknown') capacity!.setNativeStatus('unknown')
   if (options.nativeContinuation === 'adopted' || options.nativeContinuation === 'adopted-unavailable') {
@@ -1435,7 +1454,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     },
     // #1237 — the REAL native-child admission over the fixture's own database.
     nativeChildAdmission: admission.forNativeChild(options.nativeContinuation ? 'e2e-project' : null),
-    ...(capacity ? { acquireClaudeCapacity: capacity.acquire } : {}),
+    ...(capacity ? { acquireClaudeCapacity: capacity.acquire, controlClaudeContinuation: capacity.control } : {}),
   }
 
   const input: InnerLoopInput = {
@@ -1471,6 +1490,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
 
   return { dir, repo, origin, baseSha, db, store, row, input, context, prepare, github, commands, world,
     register, key, codexCalls, admission, session: registeredSession, nativeInputs, capacity,
+    releaseNativeContinuation: () => releaseNativeContinuation?.(),
     finishNativeQuota: () => worker(quotaDispatch) }
 }
 
@@ -1700,6 +1720,34 @@ test.each(['late-original', 'symlink', 'fifo', 'invalid'] as const)('native cont
   expect(f.admission.listLeases('liveChild')).toHaveLength(shape === 'late-original' ? 0 : 1)
   expect(f.nativeInputs).toHaveLength(0)
   expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(0)
+}, 10_000)
+
+test.each(['expired', 'missing'] as const)('restart before the first quota claim refuses a %s signed original budget and still harvests completed work', async budget => {
+  const f = await fixture({ nativeContinuation: 'available' })
+  const prepared = await f.prepare()
+  const request: BoundedWorkRequest = { ...prepared.workers.build.request, run_id: f.row.id,
+    step_id: `${f.row.id}:original-budget`, role: 'build', needs_approval_decision: false, budget: { wall_ms: 300 } }
+  const state = join(f.context.stateRoot, f.row.id)
+  const key = createHash('sha256').update(JSON.stringify([request.run_id, request.step_id])).digest('hex')
+  await reserveTrailerSlot(join(state, `claude-step-${key}.json`), JSON.stringify(request), request.result.path)
+  const admitted = await f.context.nativeChildAdmission.admit(request.run_id, request.step_id)
+  if (admitted.status !== 'admitted') throw Error('Missing original child lease')
+  const authority = f.context.nativeChildAdmission.dispatchAuthority!(admitted.lease, request, budget === 'expired' ? Date.now() - 1 : undefined)
+  const writer = createClaudeNativeDispatchReceipt(state, request, authority)
+  writer.record({ kind: 'parent-bound', parent: { sessionId: f.session.sessionId, childGeneration: f.session.childGeneration,
+    pid: process.pid, processIdentity: readProcessIdentity(process.pid)!, launch: readNativeParentLaunchEvidence(f.session)! } })
+  writer.record({ kind: 'submission-started' })
+  writer.record({ kind: 'child-bound', nativeAgentId: 'original-child' })
+  f.context.nativeChildAdmission.finishPreparing?.(admitted.lease)
+  const restarted = await f.prepare()
+  expect((await restarted.substrate.inRepl!.recover!(request, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+  expect(f.nativeInputs).toHaveLength(0)
+  expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(0)
+  expect(f.capacity!.requests.filter(row => row.kind !== 'claude-native-register')).toHaveLength(0)
+  await writeFile(request.result.path, JSON.stringify({ schema: request.result.schema, run_id: request.run_id, step_id: request.step_id,
+    kind: 'blocked', on: 'The original child completed its bounded task.' }))
+  expect((await restarted.substrate.inRepl!.recover!(request, 'in-repl', new AbortController().signal)).kind).toBe('blocked')
+  expect(f.admission.listLeases('liveChild')).toHaveLength(0)
 }, 10_000)
 
 test.each(['run', 'recover'] as const)('native child %s refuses changed request and path before releasing original ownership', async method => {
@@ -7481,6 +7529,80 @@ test.each(['fresh', 'queued', 'alias', 'restart'] as const)('native same-ID cont
   if (parent === 'alias') expect(JSON.parse(saved.preparation).request.model_id).toBe('fable')
   expect(f.admission.listLeases('liveChild')).toHaveLength(0)
   expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 30_000)
+
+test('repeated native quota episodes wait visibly and resume the same child through the original merge gates', async () => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'repeated', nativeCapacity: 'all-full' })
+  f.capacity!.setRetryDelay(1)
+  const record = f.store.recordStageEvent.bind(f.store)
+  f.store.recordStageEvent = async (id, stage, meta) => {
+    await record(id, stage, meta)
+    if (stage === 'claude-quota-waiting') f.capacity!.setMode('available')
+  }
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(2)
+  expect(f.nativeInputs.filter(line => line.includes('synthesis:'))).toHaveLength(1)
+  const claims = f.db.all<{ preparation: string }>('SELECT preparation FROM claude_native_continuations ORDER BY rowid').map(row => JSON.parse(row.preparation))
+  expect(claims).toHaveLength(2)
+  expect(claims[1].lease).toEqual(claims[0].lease)
+  expect(claims[1].request).toEqual(claims[0].request)
+  expect(claims[1].intent.deadlineMs).toBe(claims[0].intent.deadlineMs)
+  expect(claims[1].intent.episodeId).not.toBe(claims[0].intent.episodeId)
+  expect(f.store.stageEvents(f.row.id).filter(event => event.stage.startsWith('claude-quota-')).map(event => event.stage))
+    .toEqual(['claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-waiting', 'claude-quota-resumed'])
+  expect(f.capacity!.requests.filter(row => row.kind === 'claude-native-prepare-continuation')).toHaveLength(2)
+  expect(f.capacity!.requests.filter(row => row.kind === 'claude-native-promote-continuation').map(row => row.toolUseId))
+    .toEqual(expect.arrayContaining(['continuation-tool-1', 'continuation-tool-2']))
+  expect(f.admission.listLeases('liveChild')).toHaveLength(0)
+  expect(f.github.prs[0]!.state).toBe('MERGED')
+}, 30_000)
+
+test('terminal acknowledgement retains durable quota waiting while native HTTP is quarantined, verified promotion clears it', async () => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'held-ack', nativeCapacity: 'all-full' })
+  f.capacity!.setRetryDelay(1)
+  const record = f.store.recordStageEvent.bind(f.store)
+  let promotionClearedProjection = false
+  f.store.recordStageEvent = async (id, stage, meta) => {
+    await record(id, stage, meta)
+    if (stage === 'claude-quota-waiting') f.capacity!.setMode('available')
+    if (stage === 'claude-quota-resumed') {
+      expect(deriveQuotaWait(f.store.get(id)!, f.store.quotaWaitEvents(id))).toBeNull()
+      promotionClearedProjection = true
+    }
+  }
+  const running = drive(f)
+  const until = Date.now() + 10_000
+  while (!f.nativeInputs.some(line => line.startsWith('Invoke SendMessage')) && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 10))
+  expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(1)
+  await new Promise(resolve => setTimeout(resolve, 150))
+  const restartedStore = new TridentRunStore(f.db)
+  let outcome: ProjectBuildOutcome
+  try {
+    const waitingBinding = restartedStore.stageEvents(f.row.id).filter(row => row.stage === 'claude-native-child-bound').at(-1)!
+    const binding = JSON.parse(waitingBinding.meta!)
+    const checkpoint = JSON.parse(restartedStore.stageEvents(f.row.id).filter(row => row.stage === 'build-mode-state').at(-1)!.meta!).checkpoint
+    expect(binding.parentStepId).toBe(checkpoint.pending.step_id)
+    expect(binding.stepId).not.toBe(binding.parentStepId)
+    const preparation = JSON.parse(f.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations')!.preparation)
+    const dispatch = readClaudeNativeDispatchReceipt(join(f.context.stateRoot, f.row.id), preparation.request) as SignedNativeDispatchRecord
+    expect(dispatch.body.parentStepId).toBe(binding.parentStepId)
+    const selected = restartedStore.quotaWaitEvents(f.row.id)
+    expect(selected).toHaveLength(3)
+    expect(deriveQuotaWait(restartedStore.get(f.row.id)!, selected)).not.toBeNull()
+    expect(restartedStore.stageEvents(f.row.id).filter(row => row.stage.startsWith('claude-quota-')).at(-1)?.stage).toBe('claude-quota-waiting')
+    expect(f.store.stageEvents(f.row.id).filter(row => row.stage === 'claude-quota-resumed')).toHaveLength(0)
+    expect(f.capacity!.requests.filter(row => row.kind === 'claude-native-promote-continuation')).toHaveLength(0)
+    expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(1)
+  } finally {
+    await f.releaseNativeContinuation()
+    outcome = await running
+  }
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(promotionClearedProjection).toBe(true)
+  expect(f.store.stageEvents(f.row.id).filter(row => row.stage.startsWith('claude-quota-')).map(row => row.stage))
+    .toEqual(['claude-quota-waiting', 'claude-quota-resumed'])
+  expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(1)
 }, 30_000)
 
 for (const mode of ['unavailable', 'foreign-launch', 'lost-ack', 'adopted', 'adopted-unavailable'] as const) test(`native same-ID continuation refuses ${mode} without a replacement Agent or merge`, async () => {

@@ -525,8 +525,10 @@ CREATE TABLE claude_mcp_handler_generations (
 
 [table] claude_native_continuations (tbl=claude_native_continuations)
 CREATE TABLE claude_native_continuations (
-  lease_token TEXT PRIMARY KEY,
-  preparation TEXT NOT NULL
+  lease_token TEXT NOT NULL,
+  authenticated_episode_id TEXT NOT NULL,
+  preparation TEXT NOT NULL,
+  PRIMARY KEY (lease_token, authenticated_episode_id)
 )
 
 [table] code_ritual_runs (tbl=code_ritual_runs)

@@ -14,11 +14,12 @@ import { verifyNativeDispatchChildBound, type NativeDispatchLease, type SignedNa
 import { readArmedTrailerReservation } from './trailer-slot.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
 import { nativeChildContinuationCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
-import { acquireClaudeCapacity, nativeRelayScopeCurrent, type AcquireClaudeCapacity, type ClaudeCapacityReceipt } from './claude-capacity-client.ts'
+import { acquireClaudeCapacity, controlClaudeContinuation, nativeQuotaEpisodeId, nativeRelayScopeCurrent,
+  type AcquireClaudeCapacity, type ClaudeCapacityInput, type ClaudeCapacityReceipt, type ClaudeContinuationIntent, type ControlClaudeContinuation } from './claude-capacity-client.ts'
 
 type Boundary = { offset: number; dev: number; ino: number; prefixDigest: string }
 interface Preparation {
-  version: 1
+  version: 2
   request: BoundedWorkRequest
   lease: NativeDispatchLease
   receiptSignature: string
@@ -30,16 +31,19 @@ interface Preparation {
   args: { to: string; message: string }
   boundary: Boundary
   capacity: ClaudeCapacityReceipt
+  intent: ClaudeContinuationIntent
 }
 export type ClaudeContinuationOutcome = { kind: 'result'; outcome: BoundedWorkOutcome }
   | { kind: 'not-eligible' }
   | { kind: 'submitted'; evidence: 'terminal-acknowledgement' | 'exact-tool-invocation' }
   | { kind: 'unknown'; reason: 'tool-unavailable' | 'launch-unknown' | 'identity-unknown' | 'submission-unknown' | 'budget-expired' | 'capacity-unavailable' | 'capacity-waiting' }
+export type ClaudeQuotaState = { kind: 'waiting'; childId: string; retryAtMs: number | null; episodeId: string }
+  | { kind: 'resumed' | 'ended'; childId: string; episodeId?: string }
 
 export interface ClaudeContinuationOptions {
   request: BoundedWorkRequest
   receipt: unknown
-  authority: { lease: NativeDispatchLease; current(): boolean; read(): string | undefined; claim(preparation: string): Promise<boolean> }
+  authority: { lease: NativeDispatchLease; current(): boolean; read(): string | undefined; claim(episodeId: string, preparation: string): Promise<boolean> }
   stateDir: string
   session: Pick<ReplSession, 'sessionId' | 'childGeneration' | 'cwd' | 'child' | 'toolSurface' | 'acquireContinuationTurn' | 'hasChildExited'>
   workspace: NativeChildWorkspace
@@ -47,11 +51,42 @@ export interface ClaudeContinuationOptions {
   deadline: number
   signal: AbortSignal
   decodeTrailer(bytes: string, request: BoundedWorkRequest): ProjectTrailerOutcome
-  capacity?: { acquire?: AcquireClaudeCapacity }
-  onQuotaState?(state: { kind: 'waiting'; childId: string; retryAtMs: number | null } | { kind: 'resumed' | 'ended'; childId: string }): Promise<void>
+  capacity?: { acquire?: AcquireClaudeCapacity; control?: ControlClaudeContinuation }
+  onQuotaState?(state: ClaudeQuotaState): Promise<void>
 }
 
 const message = (nonce: string) => `Continue the original bounded task with its original request, brief, worktree and result contract. Preserve completed work and write the original result. Continuation receipt: ${nonce}`
+const cancellationWatches = new WeakMap<AbortSignal, Map<string, () => void>>()
+
+/** Work cancellation outlives one observation call. It tombstones the newest
+ * immutable intent; it never revokes unrelated work in the same parent. */
+function watchCancellation(options: ClaudeContinuationOptions, workSignal: AbortSignal, common: ClaudeCapacityInput,
+  control: ControlClaudeContinuation): () => void {
+  let watched = cancellationWatches.get(workSignal)
+  if (!watched) { watched = new Map(); cancellationWatches.set(workSignal, watched) }
+  const existing = watched.get(common.leaseId)
+  if (existing) return existing
+  const cancel = () => {
+    clearTimeout(expiry); workSignal.removeEventListener('abort', cancel)
+    try {
+      const raw = options.authority.read()
+      if (!raw) return
+      const saved: Preparation = JSON.parse(raw)
+      if (saved.version !== 2 || !isDeepStrictEqual(saved.request, options.request)
+        || !isDeepStrictEqual(saved.lease, options.authority.lease)
+        || saved.receiptSignature !== (options.receipt as SignedNativeDispatchRecord).signature) return
+      // The work signal is already aborted; cancellation has a separate bounded
+      // control exchange and cannot enable any model request.
+      void control({ ...common, ...saved.intent, action: 'cancel', signal: AbortSignal.timeout(1000), deadline: Date.now() + 1000 }).catch(() => {})
+    } catch { /* A missing cancellation acknowledgement grants no new input. */ }
+  }
+  const expiry = setTimeout(cancel, Math.max(1, common.deadlineMs - Date.now()))
+  expiry.unref()
+  watched.set(common.leaseId, cancel)
+  workSignal.addEventListener('abort', cancel, { once: true })
+  if (workSignal.aborted) cancel()
+  return cancel
+}
 
 /** Launch-input compatibility pin, NOT a served catalog or account witness.
  * Upgrading this profile requires the same native continuation controls. */
@@ -93,6 +128,19 @@ export async function readClaudeContinuationResult(options: Pick<ClaudeContinuat
  * grants capacity, changes credentials, releases admission or validates a result
  * differently. A claim surviving any interruption permanently forbids resending. */
 export async function continueClaudeNativeChild(options: ClaudeContinuationOptions): Promise<ClaudeContinuationOutcome> {
+  // A restarted observer may receive an already-cancelled work signal. Restoring
+  // cancellation of a signed spent intent grants no model-input authority.
+  try {
+    const receipt = options.receipt as SignedNativeDispatchRecord, relay = receipt.body.parent?.launch?.relay
+    if (relay && Number.isSafeInteger(receipt.body.deadlineMs) && options.authority.read() !== undefined
+      && verifyNativeDispatchChildBound(receipt, options.request, options.authority.lease)) {
+      watchCancellation(options, options.signal, { request: options.request, leaseId: options.authority.lease.token,
+        childId: receipt.body.nativeAgentId!, relay, eventDigest: createHash('sha256').update(receipt.signature).digest('hex'),
+        deadlineMs: receipt.body.deadlineMs!, budgetDigest: createHash('sha256').update(JSON.stringify(options.request.budget)).digest('hex'),
+        fenceDigest: createHash('sha256').update(JSON.stringify(options.authority.lease)).digest('hex'),
+        signal: options.signal, deadline: options.deadline }, options.capacity?.control ?? controlClaudeContinuation)
+    }
+  } catch { /* Malformed retained evidence cannot authorize a cancellation. */ }
   const timer = new AbortController()
   const signal = AbortSignal.any([options.signal, timer.signal])
   let onAbort!: () => void
@@ -103,22 +151,35 @@ export async function continueClaudeNativeChild(options: ClaudeContinuationOptio
   })
   const timeout = setTimeout(() => timer.abort(), Math.max(1, options.deadline - Date.now()))
   let waitingChild: string | undefined
+  let waitingEpisode: string | undefined
+  const promotedEpisodes = new Set<string>()
+  const onQuotaState = async (state: ClaudeQuotaState) => {
+    if (state.kind === 'resumed' && state.episodeId) {
+      if (promotedEpisodes.has(state.episodeId)) return
+      promotedEpisodes.add(state.episodeId)
+    }
+    await options.onQuotaState?.(state)
+  }
   const run = async (): Promise<ClaudeContinuationOutcome> => {
     while (!signal.aborted && Date.now() < options.deadline) {
-      const outcome = await continuationAttempt({ ...options, signal })
+      const outcome = await continuationAttempt({ ...options, signal, onQuotaState }, options.signal)
       if (outcome.kind !== 'waiting') {
         if (waitingChild) {
-          await options.onQuotaState?.({ kind: outcome.kind === 'submitted' || outcome.kind === 'result' ? 'resumed' : 'ended', childId: waitingChild })
+          // Acknowledging parent input leaves the durable wait visible while
+          // HTTP is quarantined. Only verified promotion (below) resumes it.
+          if (outcome.kind !== 'submitted') await options.onQuotaState?.({ kind: outcome.kind === 'result' ? 'resumed' : 'ended', childId: waitingChild,
+            ...(outcome.kind === 'result' || !waitingEpisode ? {} : { episodeId: waitingEpisode }) })
           waitingChild = undefined
         }
         return outcome
       }
       waitingChild = outcome.childId
+      waitingEpisode = outcome.episodeId
       await options.onQuotaState?.(outcome)
       // Retry hints inform capacity cadence (at most once per second, at least
       // every 30 seconds to observe newly authorized accounts). Result harvesting
       // continues each second and never holds the parent's input slot while idle.
-      const nextProbe = Math.min(options.deadline, Date.now() + Math.max(1000, Math.min(30_000,
+      const nextProbe = Math.min(options.deadline, outcome.deadline, Date.now() + Math.max(1000, Math.min(30_000,
         outcome.retryAtMs === null ? 5000 : outcome.retryAtMs - Date.now())))
       while (!signal.aborted && Date.now() < nextProbe) {
         await new Promise<void>(resolve => {
@@ -148,12 +209,12 @@ export async function continueClaudeNativeChild(options: ClaudeContinuationOptio
     clearTimeout(timeout); timer.abort(); signal.removeEventListener('abort', onAbort)
     if (waitingChild) {
       const childId = waitingChild; waitingChild = undefined
-      try { await options.onQuotaState?.({ kind: 'ended', childId }) } catch { /* Waiting stays visible when its durable writer is unavailable. */ }
+      try { await options.onQuotaState?.({ kind: 'ended', childId, ...(waitingEpisode ? { episodeId: waitingEpisode } : {}) }) } catch { /* Waiting stays visible when its durable writer is unavailable. */ }
     }
   }
 }
 
-async function continuationAttempt(options: ClaudeContinuationOptions): Promise<ClaudeContinuationOutcome | { kind: 'waiting'; childId: string; retryAtMs: number | null }> {
+async function continuationAttempt(options: ClaudeContinuationOptions, workSignal: AbortSignal): Promise<ClaudeContinuationOutcome | { kind: 'waiting'; childId: string; retryAtMs: number | null; deadline: number; episodeId: string }> {
   const { request, session, authority, signal } = options
   const unknown = (reason: Extract<ClaudeContinuationOutcome, { kind: 'unknown' }>['reason']): ClaudeContinuationOutcome => ({ kind: 'unknown', reason })
   const expired = () => signal.aborted || Date.now() >= options.deadline || session.hasChildExited()
@@ -167,17 +228,26 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
     if (expired()) return unknown('budget-expired')
     if (!verifyNativeDispatchChildBound(options.receipt, request, authority.lease)) return unknown('identity-unknown')
     const receipt = options.receipt as SignedNativeDispatchRecord
+    if (!Number.isSafeInteger(receipt.body.deadlineMs)) return unknown('budget-expired')
+    options.deadline = Math.min(options.deadline, receipt.body.deadlineMs!)
+    if (expired()) return unknown('budget-expired')
     const agentId = receipt.body.nativeAgentId!
     if (receipt.body.parent?.sessionId !== session.sessionId || !/^[A-Za-z0-9_-]+$/.test(agentId)
       || !ownsNativeChildWorkspace(options.workspace, session, request) || !nativeChildContinuationCensusKnown(options.workspace)) return unknown('identity-unknown')
     const transcript = sessionJsonlPath(session.sessionId, session.cwd, options.projectsDir)
     const existing = authority.read()
-    if (existing !== undefined) {
-      const saved: Preparation = JSON.parse(existing)
-      if (saved.version !== 1 || !isDeepStrictEqual(saved.request, request) || !isDeepStrictEqual(saved.lease, authority.lease)
+    const saved: Preparation | undefined = existing === undefined ? undefined : JSON.parse(existing)
+    if (saved) {
+      if (!Number.isSafeInteger(saved.intent?.deadlineMs)) return unknown('identity-unknown')
+      // Retain the original deadline across successor claims and gateway restart.
+      options.deadline = Math.min(options.deadline, saved.intent.deadlineMs)
+      if (expired()) return unknown('budget-expired')
+      if (saved.version !== 2 || !isDeepStrictEqual(saved.request, request) || !isDeepStrictEqual(saved.lease, authority.lease)
         || saved.receiptSignature !== receipt.signature || saved.sessionId !== session.sessionId || saved.agentId !== agentId
-        || !saved.nonce || !isDeepStrictEqual(saved.args, { to: agentId, message: message(saved.nonce) })) return unknown('identity-unknown')
-      return await exactInvocation(transcript, saved) ? { kind: 'submitted', evidence: 'exact-tool-invocation' } : unknown('submission-unknown')
+        || !saved.nonce || !isDeepStrictEqual(saved.args, { to: agentId, message: message(saved.nonce) })
+        || saved.intent.hostMessage !== saved.args.message || saved.intent.intentId !== saved.nonce || saved.intent.deadlineMs !== receipt.body.deadlineMs
+        || saved.intent.budgetDigest !== createHash('sha256').update(JSON.stringify(request.budget)).digest('hex')
+        || saved.intent.fenceDigest !== createHash('sha256').update(JSON.stringify(authority.lease)).digest('hex')) return unknown('identity-unknown')
     }
     const arrived = await result()
     if (arrived) return arrived
@@ -210,10 +280,39 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
       const auth = { current: () => authority.current() && exactSurvivor() && !!relay && nativeRelayScopeCurrent(relay)
         && relay.registration.body.parentSessionId === session.sessionId && relay.registration.body.parentPid === session.child.pid }
       if (!relay || !auth.current()) return unknown('capacity-unavailable')
-      const capacity = await (options.capacity?.acquire ?? acquireClaudeCapacity)({ request, leaseId: authority.lease.token,
-        relay, childId: agentId, eventDigest: createHash('sha256').update(receipt.signature).digest('hex'), signal, deadline: options.deadline })
+      const common = { request, leaseId: authority.lease.token, relay, childId: agentId,
+        eventDigest: createHash('sha256').update(receipt.signature).digest('hex'), signal, deadline: options.deadline,
+        deadlineMs: receipt.body.deadlineMs!, budgetDigest: createHash('sha256').update(JSON.stringify(request.budget)).digest('hex'),
+        fenceDigest: createHash('sha256').update(JSON.stringify(authority.lease)).digest('hex') }
+      const control = options.capacity?.control ?? controlClaudeContinuation
+      if (saved) watchCancellation(options, workSignal, common, control)
+      const toolUseId = saved ? await exactInvocation(transcript, saved) : undefined
+      if (saved && (!toolUseId || expired() || !auth.current()
+        || !await control({ ...common, ...saved.intent, action: 'promote', toolUseId, resumedAgentId: agentId })
+        || expired() || !auth.current())) return unknown('submission-unknown')
+      if (saved) await options.onQuotaState?.({ kind: 'resumed', childId: agentId, episodeId: saved.intent.episodeId })
+      const afterPromotion = await result()
+      if (afterPromotion) return afterPromotion
+      const capacity = await (options.capacity?.acquire ?? acquireClaudeCapacity)(common)
+      // A reconciled send can now run; absent a later authenticated quota there is
+      // no successor input to spend, only passive original-result observation.
+      if (saved && capacity.kind === 'unknown') return { kind: 'submitted', evidence: 'exact-tool-invocation' }
+      if (capacity.kind !== 'unknown') {
+        const observed = capacity.receipt.body.observations.at(-1)!
+        const expectedEpisode = nativeQuotaEpisodeId(authority.lease.token, common.eventDigest, toolUseId ?? null)
+        if (saved && observed.episodeId === saved.intent.episodeId) {
+          if (capacity.kind === 'available') capacity.release()
+          return { kind: 'submitted', evidence: 'exact-tool-invocation' }
+        }
+        if (observed.episodeId !== expectedEpisode || observed.predecessorToolUseId !== (toolUseId ?? null)
+          || observed.intentId !== (saved?.nonce ?? null)) {
+          if (capacity.kind === 'available') capacity.release()
+          return unknown('identity-unknown')
+        }
+      }
       if (capacity.kind !== 'available') return capacity.kind === 'waiting'
-        ? { kind: 'waiting', childId: agentId, retryAtMs: capacity.receipt.body.capacity.retryAtMs } : unknown('capacity-unavailable')
+        ? { kind: 'waiting', childId: agentId, retryAtMs: capacity.receipt.body.capacity.retryAtMs, deadline: options.deadline,
+          episodeId: capacity.receipt.body.observations.at(-1)!.episodeId } : unknown('capacity-unavailable')
       try {
       const afterCapacity = await result()
       if (afterCapacity) return afterCapacity
@@ -224,14 +323,22 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
       if (!boundary) return unknown('submission-unknown')
       const nonce = randomUUID()
       const args = { to: agentId, message: message(nonce) }
-      const preparation: Preparation = { version: 1, request, lease: authority.lease, receiptSignature: receipt.signature,
-        sessionId: session.sessionId, childGeneration: session.childGeneration, agentId, quota, nonce, args, boundary, capacity: capacity.receipt }
+      const intent: ClaudeContinuationIntent = { episodeId: observed.episodeId, intentId: nonce, hostMessage: args.message,
+        deadlineMs: common.deadlineMs, budgetDigest: common.budgetDigest, fenceDigest: common.fenceDigest }
+      const preparation: Preparation = { version: 2, request, lease: authority.lease, receiptSignature: receipt.signature,
+        sessionId: session.sessionId, childGeneration: session.childGeneration, agentId, quota, nonce, args, boundary, capacity: capacity.receipt, intent }
       const line = `Invoke ${SUBAGENT_CONTINUATION_TOOL_NAME} exactly once with these JSON arguments, then end this parent turn: ${JSON.stringify(args)}`
       const before = async () => {
         if (expired() || !currentParentKnown() || !auth.current() || !capacity.current()) throw new Error('Continuation budget, capacity or parent identity unavailable')
         if (session.child.paneHandle !== undefined && (!session.child.readScreen || !claudeComposerEmpty(await session.child.readScreen()))) throw new Error('Composer unavailable')
         // Commit before Enter. Failure, timeout or restart never refunds this claim.
-        if (expired() || !auth.current() || !capacity.current() || !await authority.claim(JSON.stringify(preparation)) || expired() || !auth.current() || !capacity.current()) throw new Error('Continuation already claimed, fenced or expired')
+        if (expired() || !auth.current() || !capacity.current() || !await authority.claim(intent.episodeId, JSON.stringify(preparation))
+          || expired() || !auth.current() || !capacity.current()) throw new Error('Continuation already claimed, fenced or expired')
+        const cancel = watchCancellation(options, workSignal, common, control)
+        if (!await control({ ...common, ...intent, action: 'prepare' }) || expired() || !auth.current() || !capacity.current()) {
+          cancel()
+          throw new Error('Continuation intent unavailable')
+        }
       }
       const timeout = AbortSignal.timeout(Math.max(1, options.deadline - Date.now()))
       const stopped = AbortSignal.any([signal, timeout])
@@ -288,34 +395,50 @@ function exactNativeMessageInput(input: unknown, args: Preparation['args']): boo
 }
 
 /** Parent text, tool-name mentions and another recipient are not consumption. */
-async function exactInvocation(path: string, saved: Preparation): Promise<boolean> {
+async function exactInvocation(path: string, saved: Preparation): Promise<string | undefined> {
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW)
   try {
     const info = await file.stat()
     const boundary = saved.boundary
     if (!info.isFile() || !Number.isSafeInteger(boundary.offset) || boundary.offset < 0
-      || info.dev !== boundary.dev || info.ino !== boundary.ino || info.size < boundary.offset || info.size - boundary.offset > 4 * 1024 * 1024) return false
-    if (typeof boundary.prefixDigest !== 'string' || await digestPrefix(file, boundary.offset) !== boundary.prefixDigest) return false
+      || info.dev !== boundary.dev || info.ino !== boundary.ino || info.size < boundary.offset || info.size - boundary.offset > 4 * 1024 * 1024) return undefined
+    if (typeof boundary.prefixDigest !== 'string' || await digestPrefix(file, boundary.offset) !== boundary.prefixDigest) return undefined
     const bytes = Buffer.alloc(info.size - boundary.offset)
     const { bytesRead } = await file.read(bytes, 0, bytes.length, boundary.offset)
     const after = await file.stat()
-    if (bytesRead !== bytes.length || info.size !== after.size || info.mtimeMs !== after.mtimeMs || info.ctimeMs !== after.ctimeMs) return false
+    if (bytesRead !== bytes.length || info.size !== after.size || info.mtimeMs !== after.mtimeMs || info.ctimeMs !== after.ctimeMs) return undefined
     const text = bytes.toString('utf8')
     const matches: string[] = []
+    const results: { id: string; valid: boolean }[] = []
     for (const line of text.slice(0, text.lastIndexOf('\n') + 1).split('\n')) {
       if (!line) continue
       const row = JSON.parse(line)
-      if (row.sessionId !== saved.sessionId || row.type !== 'assistant' || row.message?.role !== 'assistant' || !Array.isArray(row.message.content)) continue
+      if (row.sessionId !== saved.sessionId || !Array.isArray(row.message?.content)) continue
+      if (row.type === 'user' && row.message.role === 'user') {
+        for (const block of row.message.content) {
+          if (block.type !== 'tool_result' || typeof block.tool_use_id !== 'string') continue
+          const content = block.content
+          let result: unknown
+          try { result = JSON.parse(typeof content === 'string' ? content : content.length === 1 && content[0].type === 'text' ? content[0].text : '') } catch { /* Invalid native result. */ }
+          results.push({ id: block.tool_use_id, valid: block.is_error !== true && matches.includes(block.tool_use_id)
+            && !!result && typeof result === 'object' && (result as { success?: unknown }).success === true
+            && (result as { resumedAgentId?: unknown }).resumedAgentId === saved.agentId
+            && row.toolUseResult?.success === true && row.toolUseResult.resumedAgentId === saved.agentId })
+        }
+        continue
+      }
+      if (row.type !== 'assistant' || row.message.role !== 'assistant') continue
       for (const block of row.message.content) {
         // A copied receipt nonce with altered recipient or message is a
         // conflicting actuation, not unrelated conversation to skip past.
         if (block.type === 'tool_use' && block.name === SUBAGENT_CONTINUATION_TOOL_NAME
           && typeof block.input?.message === 'string' && block.input.message.includes(saved.nonce)
-          && !exactNativeMessageInput(block.input, saved.args)) return false
+          && !exactNativeMessageInput(block.input, saved.args)) return undefined
         if (block.type === 'tool_use' && block.name === SUBAGENT_CONTINUATION_TOOL_NAME
           && typeof block.id === 'string' && exactNativeMessageInput(block.input, saved.args)) matches.push(block.id)
       }
     }
-    return new Set(matches).size === 1
+    const ids = [...new Set(matches)], linked = results.filter(result => result.id === ids[0])
+    return ids.length === 1 && linked.length > 0 && linked.every(result => result.valid) ? ids[0] : undefined
   } finally { await file.close() }
 }

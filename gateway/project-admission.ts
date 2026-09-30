@@ -38,7 +38,7 @@ export interface NativeChildAdmission {
   /** Ends only this process's pre-dispatch exemption, not the durable lease. */
   finishPreparing?(lease: AdmissionLease): void
   /** Original actor only; the signing key remains private to this admission process. */
-  dispatchAuthority?(lease: AdmissionLease, request: BoundedWorkRequest): NativeDispatchAuthority
+  dispatchAuthority?(lease: AdmissionLease, request: BoundedWorkRequest, deadlineMs?: number, parentStepId?: string): NativeDispatchAuthority
   /** Exact signed pre-input refusal, not run termination or a worker-written flag. */
   releaseUnsubmitted?(request: BoundedWorkRequest, receipt: unknown): Promise<boolean>
   /** Exact-scope census. Unreadable identities throw; never infer an empty scope. */
@@ -48,7 +48,7 @@ export interface NativeChildAdmission {
     lease: NativeDispatchLease
     current(): boolean
     read(): string | undefined
-    claim(preparation: string): Promise<boolean>
+    claim(episodeId: string, preparation: string): Promise<boolean>
   } | undefined
 }
 
@@ -190,16 +190,16 @@ export class ProjectAdmission {
         const lease = { ...row, reason: 'liveChild' as const };
         if (!verifyNativeDispatchChildBound(receipt, request, lease)) return undefined;
         return { lease, current: () => this.store.nativeContinuationCurrent(row), read: () => this.store.readNativeContinuation(row),
-          claim: preparation => this.store.claimNativeContinuation(row, preparation) };
+          claim: (episodeId, preparation) => this.store.claimNativeContinuation(row, episodeId, preparation) };
       },
-      dispatchAuthority: (lease, request) => {
+      dispatchAuthority: (lease, request, deadlineMs, parentStepId) => {
         const row = this.listLeases('liveChild').find(row => row.token === lease.token);
         if (!row || row.scope.ownerHandle !== lease.scope.ownerHandle || row.scope.projectId !== projectId
           || lease.scope.projectId !== projectId || row.generation !== lease.generation
           || row.producer !== this.producerFor('native-child')
           || !this.preparingNativeChildTokens.has(row.token)
           || row.workRef !== JSON.stringify([request.run_id, request.step_id])) throw new Error('Original native child admission is unavailable');
-        return this.nativeDispatchSigner.begin({ ...row, reason: 'liveChild' }, request);
+        return this.nativeDispatchSigner.begin({ ...row, reason: 'liveChild' }, request, deadlineMs, parentStepId);
       },
       releaseUnsubmitted: async (request, receipt) => {
         // Check against authoritative stored rows, never select authority from the

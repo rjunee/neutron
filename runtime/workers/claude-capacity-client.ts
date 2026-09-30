@@ -18,8 +18,10 @@ export interface NativeRelayObservation {
   scopeDigest: string; sessionId: string; nativeAgentId: string; parentAgentId: string | null
   modelId: string; bodyDigest: string; status: 'available' | 'all-full' | 'unknown'
   accountGeneration: string | null; observedAtMs: number; retryAtMs: number | null
+  episodeId: string; predecessorToolUseId: string | null; intentId: string | null
 }
-interface Correlations { nativeAgentId: string; childId: string; requestDigest: string; leaseId: string; eventDigest: string }
+interface Correlations { nativeAgentId: string; childId: string; requestDigest: string; leaseId: string; eventDigest: string
+  deadlineMs: number; budgetDigest: string; fenceDigest: string }
 export interface ClaudeCapacityReceipt {
   body: RelayIdentity & Correlations & { kind: 'claude-native-observation'; observations: NativeRelayObservation[]
     capacity: { status: 'available' | 'all-full' | 'unknown'; modelId: string | null; accountGeneration: string | null; observedAtMs: number; retryAtMs: number | null } }
@@ -27,11 +29,22 @@ export interface ClaudeCapacityReceipt {
 }
 export interface ClaudeCapacityInput {
   request: BoundedWorkRequest; leaseId: string; childId: string; eventDigest: string; relay: NativeRelayScope
+  deadlineMs: number; budgetDigest: string; fenceDigest: string
   signal: AbortSignal; deadline: number
 }
 export type ClaudeCapacityOutcome = { kind: 'available'; receipt: ClaudeCapacityReceipt; current(): boolean; release(): void }
   | { kind: 'waiting'; receipt: ClaudeCapacityReceipt } | { kind: 'unknown' }
 export type AcquireClaudeCapacity = (input: ClaudeCapacityInput) => Promise<ClaudeCapacityOutcome>
+export interface ClaudeContinuationIntent {
+  episodeId: string; intentId: string; hostMessage: string; deadlineMs: number; budgetDigest: string; fenceDigest: string
+}
+export type ClaudeContinuationControlInput = ClaudeCapacityInput & ClaudeContinuationIntent &
+  ({ action: 'prepare' | 'cancel' } | { action: 'promote'; toolUseId: string; resumedAgentId: string })
+export type ControlClaudeContinuation = (input: ClaudeContinuationControlInput) => Promise<boolean>
+export function nativeQuotaEpisodeId(leaseId: string, eventDigest: string, predecessorToolUseId: string | null): string {
+  return hash(JSON.stringify(['native-quota-episode-v1', leaseId,
+    predecessorToolUseId === null ? ['original', eventDigest] : ['send-message', predecessorToolUseId]]))
+}
 export class NativeRelayUnavailable extends Error { readonly substrateErrorClass = 'repl_unreconciled' as const }
 const text = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(v)
 const digest = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v)
@@ -146,10 +159,12 @@ export async function registerClaudeNativeRelay(pin: ClaudeCapacityPin, parent: 
 
 export async function connectClaudeCapacity(pin: ClaudeCapacityPin, input: ClaudeCapacityInput): Promise<ClaudeCapacityOutcome> {
   try {
-    if (!validPin(pin) || !verifiedScope(pin, input.relay) || !text(input.leaseId) || !text(input.childId) || !digest(input.eventDigest)) return { kind: 'unknown' }
+    if (!validPin(pin) || !verifiedScope(pin, input.relay) || !text(input.leaseId) || !text(input.childId) || !digest(input.eventDigest)
+      || !Number.isSafeInteger(input.deadlineMs) || Date.now() >= input.deadlineMs || !digest(input.budgetDigest) || !digest(input.fenceDigest)) return { kind: 'unknown' }
     const parent = input.relay.registration.body
     const correlations: Correlations = { nativeAgentId: input.childId, childId: input.childId,
-      requestDigest: hash(JSON.stringify(input.request)), leaseId: input.leaseId, eventDigest: input.eventDigest }
+      requestDigest: hash(JSON.stringify(input.request)), leaseId: input.leaseId, eventDigest: input.eventDigest,
+      deadlineMs: input.deadlineMs, budgetDigest: input.budgetDigest, fenceDigest: input.fenceDigest }
     const base = { version: 2, instanceId: pin.instanceId, scopeToken: input.relay.scopeToken, ...correlations }
     const expected = { version: 2, instanceId: pin.instanceId, hostId: pin.hostId, scopeDigest: parent.scopeDigest,
       parentSessionId: parent.parentSessionId, parentPid: parent.parentPid, parentStartTicks: parent.parentStartTicks, bootId: parent.bootId, ...correlations }
@@ -163,11 +178,15 @@ export async function connectClaudeCapacity(pin: ClaudeCapacityPin, input: Claud
       if (kind !== 'claude-native-observe') continue
       if (!Array.isArray(body.observations) || !body.observations.length || !object(body.capacity)) return { kind: 'unknown' }
       for (const row of body.observations) {
-        if (!object(row) || !exactKeys(row, ['scopeDigest', 'sessionId', 'nativeAgentId', 'parentAgentId', 'modelId', 'bodyDigest', 'status', 'accountGeneration', 'observedAtMs', 'retryAtMs'])
+        if (!object(row) || !exactKeys(row, ['scopeDigest', 'sessionId', 'nativeAgentId', 'parentAgentId', 'modelId', 'bodyDigest', 'status', 'accountGeneration', 'observedAtMs', 'retryAtMs', 'episodeId', 'predecessorToolUseId', 'intentId'])
           || row.scopeDigest !== parent.scopeDigest || row.sessionId !== parent.parentSessionId || row.nativeAgentId !== input.childId
           || row.parentAgentId !== null || !/^claude-[a-z0-9][a-z0-9.-]{1,119}$/.test(row.modelId) || !digest(row.bodyDigest)
           || !['available', 'all-full', 'unknown'].includes(row.status) || !Number.isSafeInteger(row.observedAtMs) || row.observedAtMs > Date.now()
           || row.accountGeneration !== null && !digest(row.accountGeneration)
+          || row.predecessorToolUseId !== null && !text(row.predecessorToolUseId)
+          || row.intentId !== null && !text(row.intentId)
+          || (row.predecessorToolUseId === null) !== (row.intentId === null)
+          || row.episodeId !== nativeQuotaEpisodeId(input.leaseId, input.eventDigest, row.predecessorToolUseId)
           || row.retryAtMs !== null && (!Number.isSafeInteger(row.retryAtMs) || row.retryAtMs <= row.observedAtMs)) return { kind: 'unknown' }
       }
       const latest = body.observations.at(-1)!, capacity = body.capacity
@@ -188,4 +207,38 @@ export async function connectClaudeCapacity(pin: ClaudeCapacityPin, input: Claud
 export const acquireClaudeCapacity: AcquireClaudeCapacity = async input => {
   try { const pin = loadClaudeCapacityPin(); return pin ? await connectClaudeCapacity(pin, input) : { kind: 'unknown' } }
   catch { return { kind: 'unknown' } }
+}
+
+/** The signed broker echo binds an immutable intent; Open owns transcript verification. */
+export async function connectClaudeContinuation(pin: ClaudeCapacityPin, input: ClaudeContinuationControlInput): Promise<boolean> {
+  try {
+    if (!verifiedScope(pin, input.relay) || !digest(input.episodeId) || !text(input.intentId)
+      || !digest(input.budgetDigest) || !digest(input.fenceDigest) || !input.hostMessage
+      || !Number.isSafeInteger(input.deadlineMs)
+      || input.action !== 'cancel' && Date.now() >= input.deadlineMs || input.signal.aborted) return false
+    const parent = input.relay.registration.body
+    const fields = { nativeAgentId: input.childId, childId: input.childId, requestDigest: hash(JSON.stringify(input.request)),
+      leaseId: input.leaseId, eventDigest: input.eventDigest, episodeId: input.episodeId, intentId: input.intentId,
+      hostMessage: input.hostMessage, deadlineMs: input.deadlineMs, budgetDigest: input.budgetDigest, fenceDigest: input.fenceDigest }
+    const challenge = randomBytes(24).toString('base64url')
+    const promotion = input.action === 'promote' ? { toolUseId: input.toolUseId, resumedAgentId: input.resumedAgentId } : {}
+    if (input.action === 'promote' && (!text(input.toolUseId) || input.resumedAgentId !== input.childId)) return false
+    const request = { version: 2, kind: `claude-native-${input.action}-continuation`, instanceId: pin.instanceId,
+      scopeToken: input.relay.scopeToken, challenge, ...fields, ...promotion }
+    const envelope = await exchange(pin, request, input.signal,
+      input.action === 'cancel' ? input.deadline : Math.min(input.deadline, input.deadlineMs)) as { body: Record<string, unknown> }
+    const expected = { version: 2, instanceId: pin.instanceId, hostId: pin.hostId, scopeDigest: parent.scopeDigest,
+      parentSessionId: parent.parentSessionId, parentPid: parent.parentPid, parentStartTicks: parent.parentStartTicks,
+      bootId: parent.bootId, challenge, ...fields, ...promotion,
+      kind: `claude-native-continuation-${input.action === 'prepare' ? 'prepared' : input.action === 'cancel' ? 'cancelled' : 'promoted'}`,
+      state: input.action === 'prepare' ? 'pending' : input.action === 'cancel' ? 'cancelled' : 'promoted', ...(input.action === 'promote' ? {
+        previousEpisodeId: input.episodeId, episodeId: nativeQuotaEpisodeId(input.leaseId, input.eventDigest, input.toolUseId) } : {}) }
+    return exactKeys(envelope.body, Object.keys(expected))
+      && Object.entries(expected).every(([key, value]) => envelope.body[key] === value)
+      && nativeRelayScopeCurrent(input.relay) && !input.signal.aborted && (input.action === 'cancel' || Date.now() < input.deadlineMs)
+  } catch { return false }
+}
+export const controlClaudeContinuation: ControlClaudeContinuation = async input => {
+  try { const pin = loadClaudeCapacityPin(); return !!pin && await connectClaudeContinuation(pin, input) }
+  catch { return false }
 }

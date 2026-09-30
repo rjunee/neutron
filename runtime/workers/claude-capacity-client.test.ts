@@ -1,6 +1,6 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
-import type { ClaudeCapacityInput } from './claude-capacity-client.ts'
+import { nativeQuotaEpisodeId, type ClaudeCapacityInput, type ClaudeContinuationControlInput } from './claude-capacity-client.ts'
 import { capacityFixture } from './claude-capacity-client.test-support.ts'
 
 const cleanup: (() => Promise<void>)[] = []
@@ -9,6 +9,7 @@ async function fixture(mode = 'available') {
   const server = await capacityFixture(mode); cleanup.push(server.close)
   const input: ClaudeCapacityInput = { request: { model_id: 'fable' } as BoundedWorkRequest,
     leaseId: 'original-lease', childId: 'original-child', eventDigest: 'b'.repeat(64),
+    deadlineMs: Date.now() + 1000, budgetDigest: 'c'.repeat(64), fenceDigest: 'd'.repeat(64),
     relay: await server.register(), signal: new AbortController().signal, deadline: Date.now() + 1000 }
   return { ...server, input, run: () => server.acquire(input) }
 }
@@ -57,4 +58,34 @@ test('deadline and cancellation refuse; a completed control socket is not held a
   const result = await g.run(); expect(result.kind).toBe('available')
   if (result.kind !== 'available') throw Error('Missing positive control')
   controller.abort(); expect(result.current()).toBe(false)
+})
+
+test('prepare and exact promotion echo the complete immutable intent and derive the successor from its native tool ID', async () => {
+  const f = await fixture()
+  const intent: ClaudeContinuationControlInput = { ...f.input, action: 'prepare',
+    episodeId: nativeQuotaEpisodeId(f.input.leaseId, f.input.eventDigest, null), intentId: 'nonce', hostMessage: 'Complete original work. Receipt: nonce',
+    deadlineMs: f.input.deadline, budgetDigest: 'c'.repeat(64), fenceDigest: 'd'.repeat(64) }
+  expect(await f.control(intent)).toBe(true)
+  const promote: ClaudeContinuationControlInput = { ...intent, action: 'promote', toolUseId: 'native-tool', resumedAgentId: f.input.childId }
+  expect(await f.control(promote)).toBe(true)
+  expect(await f.control(promote)).toBe(true)
+  expect(await f.control({ ...promote, hostMessage: 'Altered message' })).toBe(false)
+  expect(await f.control({ ...promote, deadlineMs: Date.now() - 1 })).toBe(false)
+  expect(await f.control({ ...promote, resumedAgentId: 'foreign' })).toBe(false)
+})
+
+test.each(['episodeId', 'intentId', 'hostMessage', 'deadlineMs', 'budgetDigest', 'fenceDigest', 'state', 'requestDigest', 'leaseId', 'scopeDigest', 'challenge'])('signed continuation control rejects mismatched %s', async field => {
+  const f = await fixture(`control-wrong-${field}`)
+  expect(await f.control({ ...f.input, action: 'prepare', episodeId: nativeQuotaEpisodeId(f.input.leaseId, f.input.eventDigest, null),
+    intentId: 'nonce', hostMessage: 'Original host message', deadlineMs: f.input.deadline, budgetDigest: 'c'.repeat(64), fenceDigest: 'd'.repeat(64) })).toBe(false)
+})
+
+test('an expired original deadline permits only a bounded cancellation control', async () => {
+  const f = await fixture()
+  const intent = { ...f.input, episodeId: nativeQuotaEpisodeId(f.input.leaseId, f.input.eventDigest, null),
+    intentId: 'nonce', hostMessage: 'Original host message', deadlineMs: Date.now() + 30 }
+  expect(await f.control({ ...intent, action: 'prepare' })).toBe(true)
+  await new Promise(resolve => setTimeout(resolve, 35))
+  expect(await f.control({ ...intent, action: 'promote', toolUseId: 'tool', resumedAgentId: f.input.childId })).toBe(false)
+  expect(await f.control({ ...intent, action: 'cancel', signal: AbortSignal.timeout(1000), deadline: Date.now() + 1000 })).toBe(true)
 })

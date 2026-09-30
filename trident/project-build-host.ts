@@ -2,7 +2,7 @@ import { lstat, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { placementFor, type Provider, type WorkerRunner } from '@neutronai/runtime/bounded-work.ts'
-import type { BuildRunInput, BuildRunOutcome, BuildSnapshot } from './build-run.ts'
+import type { BuildRunInput, BuildRunOutcome, BuildSnapshot, BuildRunDeps } from './build-run.ts'
 import { createBuildHost, type BuildHostOptions } from './build-host.ts'
 import { createProjectReviewSource, type ProjectReviewSourceOptions } from './project-review-source.ts'
 import { createProjectObservationSources, type ProjectSuiteOptions } from './project-observation-sources.ts'
@@ -50,6 +50,8 @@ export interface ProjectBuildHostOptions {
   testStrategies?: { full: string; intermediate: string | null }
   /** Host-measured dependency/toolchain/workspace identity; unknown forbids reuse. */
   suiteIdentity?: Parameters<typeof createProjectSuiteReceipts>[0]['identity']
+  /** Host-selected outer review request, scoped over its joined native children. */
+  reviewScope?: NonNullable<BuildRunDeps['timeReview']>
 }
 
 export type ProjectBuildOutcome = BuildRunOutcome & { cleanup: CleanupOutcome }
@@ -212,7 +214,7 @@ export async function createProjectBuildHost(options: ProjectBuildHostOptions) {
   host.deps.reviewReadiness = (...args) => timed('review-readiness-wait', () => readiness(...args))
   host.deps.timeReview = (identity, operation) => accounting.interval('review-and-synthesis', {
     run_id: config.runId, task_id: taskId(), ...identity,
-  }, operation)
+  }, () => options.reviewScope ? options.reviewScope(identity, operation) : operation())
   const publishGate = host.deps.publishGate
   host.deps.publishGate = (...args) => timed('publication-proof', () => publishGate(...args))
   const mergeGate = host.deps.mergeGate

@@ -7,10 +7,11 @@ import { mkdir, readFile, writeFile, lstat, open } from 'node:fs/promises'
 import { constants } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
-import { continueClaudeNativeChild, readClaudeContinuationResult } from '@neutronai/runtime/workers/claude-native-continuation.ts'
-import type { AcquireClaudeCapacity } from '@neutronai/runtime/workers/claude-capacity-client.ts'
+import { continueClaudeNativeChild, readClaudeContinuationResult, type ClaudeQuotaState } from '@neutronai/runtime/workers/claude-native-continuation.ts'
+import type { AcquireClaudeCapacity, ControlClaudeContinuation } from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { bindPlannerWork, releasePlannerWork, PLANNER_ROLE, requiresPlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
 import { readArmedTrailerReservation } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { workContextPath } from '@neutronai/trident/production-host-effects.ts'
@@ -124,6 +125,7 @@ const log = createLogger('project-build')
 export interface ProjectBuildContext {
   /** Host dependency seam. Production loads the independently provisioned public pin. */
   acquireClaudeCapacity?: AcquireClaudeCapacity
+  controlClaudeContinuation?: ControlClaudeContinuation
   /** Host filesystem measurement at the actual dependency-install boundary. */
   measureInstallAvailableBytes?: typeof projectInstallAvailableBytes
   store: ProjectBuildHostOptions['production']['store']
@@ -452,6 +454,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // (see the acting turn below). Resolves or spawns the project REPL and hands
   // the step to it as a native child.
   const nativeWorkspaces = new Map<string, NativeChildWorkspace>()
+  const nativeReviewScope = new AsyncLocalStorage<string>()
   const usageLocations = new Map<string, { session: string; directory: string }>()
   const nativeChildTurn = async (turn: Parameters<ProjectActingTurn>[0], generation: number, onDispatchSubmitted: () => void,
     evidence: (event: NativeDispatchEvidence) => void, enterActor: () => void): ReturnType<ProjectActingTurn> => {
@@ -590,6 +593,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       // spawned, so a fenced project never gains a child. The child joins the run's
       // `build` lease (it is that run draining); the Codex branch above takes none —
       // it is the cross-provider observed owner thread, not a child of this REPL.
+      const originalDeadline = turn.deadline_ms ?? Date.now() + Math.min(turn.timeout_ms, turn.request.budget.wall_ms)
       const child = await context.nativeChildAdmission.admit(run.id, turn.request.step_id)
       if (child.status !== 'admitted') {
         log.warn('native_child_refused', { run_id: run.id, step_id: turn.request.step_id, status: child.status })
@@ -606,11 +610,13 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         if (event.kind === 'not-submitted') notSubmitted = true
       }
       try {
-        authority = context.nativeChildAdmission.dispatchAuthority?.(child.lease, turn.request)
+        const enclosingStep = nativeReviewScope.getStore()
+        authority = context.nativeChildAdmission.dispatchAuthority?.(child.lease, turn.request, originalDeadline,
+          enclosingStep === turn.request.step_id ? undefined : enclosingStep)
         if (!authority) return { kind: 'unknown', detail: 'Original native dispatch signing authority is unavailable' }
         try { receipt = createClaudeNativeDispatchReceipt(state, turn.request, authority) }
         catch { return { kind: 'unknown', detail: 'Original native dispatch receipt cannot be exclusively established' } }
-        outcome = await nativeChildTurn(turn, child.generation, () => context.nativeChildAdmission.finishPreparing?.(child.lease),
+        outcome = await nativeChildTurn({ ...turn, deadline_ms: originalDeadline }, child.generation, () => context.nativeChildAdmission.finishPreparing?.(child.lease),
           evidence, () => { actorEntered = true })
         return outcome
       } catch {
@@ -681,6 +687,32 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   // Recovery uses the same request identity against the existing durable authority.
   if (context.provider === 'anthropic' && substrate.inRepl) {
     const runner = substrate.inRepl
+    const waitingEpisodes = new Map<string, string | null | false>()
+    const quotaState = async (request: Parameters<typeof runner.run>[0], state: ClaudeQuotaState, parentStepId?: string) => {
+      const key = JSON.stringify([request.step_id, state.childId])
+      if (!waitingEpisodes.has(key)) {
+        // Producer recovery uses its authenticated native request, including a
+        // panel child whose step differs from the enclosing host checkpoint.
+        const last = context.store.stageEvents(run.id).findLast(event => {
+          if (!['claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended'].includes(event.stage)) return false
+          try { const meta = JSON.parse(event.meta ?? 'null'); return meta?.stepId === request.step_id && meta.childId === state.childId }
+          catch { return false }
+        })
+        waitingEpisodes.set(key, last?.stage === 'claude-quota-waiting' ? JSON.parse(last.meta!).episodeId ?? null : false)
+      }
+      if (state.kind === 'waiting') {
+        if (waitingEpisodes.get(key) === false) await context.store.recordStageEvent(run.id, 'claude-native-child-bound', JSON.stringify({ stepId: request.step_id, childId: state.childId,
+          ...(parentStepId ? { parentStepId } : {}) }))
+        waitingEpisodes.set(key, state.episodeId)
+      } else {
+        if (waitingEpisodes.get(key) === false || state.episodeId !== undefined && waitingEpisodes.get(key) !== null && waitingEpisodes.get(key) !== state.episodeId) return
+        waitingEpisodes.set(key, false)
+      }
+      await context.store.recordStageEvent(run.id,
+        `claude-quota-${state.kind === 'waiting' ? 'waiting' : state.kind === 'resumed' ? 'resumed' : 'wait-ended'}`,
+        JSON.stringify({ stepId: request.step_id, childId: state.childId, ...(state.episodeId ? { episodeId: state.episodeId } : {}),
+          ...(state.kind === 'waiting' ? { retryAtMs: state.retryAtMs } : {}) }))
+    }
     const continuation = async (request: Parameters<typeof runner.run>[0], stopped: AbortSignal, deadline: number) => {
       if (request.run_id !== run.id) return { kind: 'unknown' as const, detail: 'Native continuation request belongs to another host run.' }
       const receipt = readClaudeNativeDispatchReceipt(state, request)
@@ -692,7 +724,10 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       const held = await readArmedTrailerReservation(join(state, `claude-step-${reservationKey}.json`), JSON.stringify(request), { signal: stopped, deadline })
       if (held.kind !== 'resume') return { kind: 'unknown' as const, detail: 'Native continuation original reservation is unavailable.' }
       const harvested = await readClaudeContinuationResult({ request, decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, trailer) })
-      if (harvested?.kind === 'result') return harvested.outcome
+      if (harvested?.kind === 'result') {
+        await quotaState(request, { kind: 'resumed', childId: (receipt as SignedNativeDispatchRecord).body.nativeAgentId! })
+        return harvested.outcome
+      }
       if (harvested) return { kind: 'unknown' as const, detail: 'Native continuation original result is unreadable.' }
       const candidates = liveProjectSessions(context.projectId)
       if (candidates.length !== 1) return { kind: 'unknown' as const, detail: 'Native continuation parent is missing or ambiguous.' }
@@ -717,18 +752,10 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
           nativeWorkspaces.set(request.step_id, workspace)
         } catch { return { kind: 'unknown' as const, detail: 'Native continuation workspace identity is unavailable.' } }
       }
-      let waitingChildBound = false
       const observed = await continueClaudeNativeChild({ request, receipt, authority, stateDir: state, session, workspace,
-        ...(context.acquireClaudeCapacity ? { capacity: { acquire: context.acquireClaudeCapacity } } : {}),
-        onQuotaState: async state => {
-          if (state.kind === 'waiting' && !waitingChildBound) {
-            await context.store.recordStageEvent(run.id, 'claude-native-child-bound', JSON.stringify({ stepId: request.step_id, childId: state.childId }))
-            waitingChildBound = true
-          }
-          await context.store.recordStageEvent(run.id,
-          `claude-quota-${state.kind === 'waiting' ? 'waiting' : state.kind === 'resumed' ? 'resumed' : 'wait-ended'}`,
-          JSON.stringify({ stepId: request.step_id, childId: state.childId,
-            ...(state.kind === 'waiting' ? { retryAtMs: state.retryAtMs } : {}) })) },
+        capacity: { ...(context.acquireClaudeCapacity ? { acquire: context.acquireClaudeCapacity } : {}),
+          ...(context.controlClaudeContinuation ? { control: context.controlClaudeContinuation } : {}) },
+        onQuotaState: state => quotaState(request, state, (receipt as SignedNativeDispatchRecord).body.parentStepId),
         projectsDir: resolveTranscriptProjectsDir(options), deadline, signal: stopped,
         decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, trailer) })
       if (observed.kind === 'result') return observed.outcome
@@ -736,13 +763,45 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       if (observed.kind === 'submitted') return 'submitted' as const
       return undefined
     }
+    // Native HTTP may arrive before SendMessage's tool result. Keep passive
+    // result harvesting alive while reconciling the pending intent; promotion
+    // unlocks that same HTTP request, and later signed quotas can spend successors.
+    const recoverContinuing = async (request: Parameters<typeof runner.run>[0], placement: Parameters<typeof runner.run>[1],
+      stopped: AbortSignal, deadline: number) => {
+      const receipt = readClaudeNativeDispatchReceipt(state, request)
+      if (context.nativeChildAdmission.continuation?.(request, receipt)) {
+        const original = (receipt as SignedNativeDispatchRecord).body.deadlineMs
+        if (Number.isSafeInteger(original)) deadline = Math.min(deadline, original!)
+      }
+      const done = new AbortController(), signal = AbortSignal.any([stopped, done.signal, AbortSignal.timeout(Math.max(1, deadline - Date.now()))])
+      const passive = runner.recover!(request, placement, signal)
+      const reconcile = async () => {
+        while (!signal.aborted && Date.now() < deadline) {
+          const next = await continuation(request, signal, deadline)
+          if (next && next !== 'submitted' && next.kind !== 'unknown') return next
+          await new Promise<void>(resolve => {
+            const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve() }
+            const timer = setTimeout(finish, 100)
+            signal.addEventListener('abort', finish, { once: true })
+            if (signal.aborted) finish()
+          })
+        }
+        return passive
+      }
+      try { return await Promise.race([passive, reconcile()]) }
+      finally {
+        done.abort()
+        if (context.nativeChildAdmission.continuation?.(request, receipt)) await quotaState(request,
+          { kind: 'ended', childId: (receipt as SignedNativeDispatchRecord).body.nativeAgentId! })
+      }
+    }
     const finish: typeof runner.run = async (...args) => {
       const deadline = Date.now() + args[0].budget.wall_ms
       const stopped = AbortSignal.any([args[2], AbortSignal.timeout(Math.max(1, args[0].budget.wall_ms))])
       let outcome = await runner.run(...args)
       if (outcome.kind === 'blocked' || outcome.kind === 'unknown') {
         const continued = await continuation(args[0], stopped, deadline)
-        if (continued === 'submitted' && runner.recover) outcome = await runner.recover(args[0], args[1], stopped)
+        if (continued === 'submitted' && runner.recover) outcome = await recoverContinuing(args[0], args[1], stopped, deadline)
         else if (continued && continued !== 'submitted') outcome = outcome.kind === 'blocked' && continued.kind === 'unknown'
           ? { kind: 'blocked', on: `${outcome.on} ${continued.detail}` } : continued
       }
@@ -780,7 +839,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       // Missing parents, preconditions and even a spent lost-ack claim must not
       // suppress the original runner's result polling during this recovery.
       const outcome = continued && continued !== 'submitted' && continued.kind !== 'unknown'
-        ? continued : await runner.recover!(args[0], args[1], stopped)
+        ? continued : await recoverContinuing(args[0], args[1], stopped, deadline)
       if (outcome.kind === 'completed' || outcome.kind === 'blocked') await releaseValidatedChild(args[0])
       return outcome
     } } : {}) }
@@ -1106,6 +1165,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
   }
   return {
     substrate, workers, requestedModels, attempts: context.attempts,
+    reviewScope: (identity, operation) => nativeReviewScope.run(identity.step_id, operation),
     suiteIdentity: snapshot => projectSuiteIdentityMeasurement(run.worktree, snapshot.head, fullSuiteCommand(input.test_strategy) ?? undefined),
     testStrategies: { full: input.test_strategy ?? '', intermediate: input.test_strategy_intermediate ?? null },
     production: { store: context.store, runId: run.id, projectSlug: run.project_slug,
