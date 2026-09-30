@@ -6,18 +6,15 @@ import { isDeepStrictEqual } from 'node:util'
 import type { BoundedWorkOutcome, BoundedWorkRequest } from '../bounded-work.ts'
 import type { ReplSession } from '../adapters/claude-code/persistent/repl-session.ts'
 import { sessionJsonlPath } from '../adapters/claude-code/persistent/jsonl-resumability.ts'
-import { readNativeParentLaunchEvidence, readNativeParentFileAuth, type NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
+import { readNativeParentLaunchEvidence, type NativeParentLaunchEvidence } from '../adapters/claude-code/persistent/native-parent-launch-evidence.ts'
 import { isProcessIdentity, readProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
 import { claudeComposerEmpty } from './claude-composer.ts'
-import { claudeChildQuotaEvent } from './claude-child-rate-limit.ts'
 import { SUBAGENT_CONTINUATION_TOOL_NAME } from './claude-tool-contract.ts'
 import { verifyNativeDispatchChildBound, type NativeDispatchLease, type SignedNativeDispatchRecord } from './claude-native-dispatch-receipt.ts'
 import { readArmedTrailerReservation } from './trailer-slot.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
 import { nativeChildContinuationCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
-import { acquireClaudeCapacity, type AcquireClaudeCapacity, type ClaudeCapacityReceipt } from './claude-capacity-client.ts'
-import { NATIVE_CONTINUATION_PROFILE, nativeModelPin } from '../adapters/claude-code/persistent/native-model-launch.ts'
-import { restoreNativeFileAuth } from '../adapters/claude-code/persistent/native-file-auth.ts'
+import { acquireClaudeCapacity, nativeRelayScopeCurrent, type AcquireClaudeCapacity, type ClaudeCapacityReceipt } from './claude-capacity-client.ts'
 
 type Boundary = { offset: number; dev: number; ino: number; prefixDigest: string }
 interface Preparation {
@@ -50,14 +47,16 @@ export interface ClaudeContinuationOptions {
   deadline: number
   signal: AbortSignal
   decodeTrailer(bytes: string, request: BoundedWorkRequest): ProjectTrailerOutcome
-  capacity?: { configDir: string; env: Record<string, string | undefined>; acquire?: AcquireClaudeCapacity }
+  capacity?: { acquire?: AcquireClaudeCapacity }
+  onQuotaState?(state: { kind: 'waiting'; childId: string; retryAtMs: number | null } | { kind: 'resumed' | 'ended'; childId: string }): Promise<void>
 }
 
 const message = (nonce: string) => `Continue the original bounded task with its original request, brief, worktree and result contract. Preserve completed work and write the original result. Continuation receipt: ${nonce}`
 
 /** Launch-input compatibility pin, NOT a served catalog or account witness.
  * Upgrading this profile requires the same native continuation controls. */
-export const CLAUDE_CONTINUATION_PROFILE = NATIVE_CONTINUATION_PROFILE
+export const CLAUDE_CONTINUATION_PROFILE = Object.freeze({ version: '2.1.285',
+  sha256: '33dad1ec615a2e08cc78b494f05c110e49916de2c79d78ec8799ebf46b233d29' })
 
 function knownLaunch(launch: NativeParentLaunchEvidence | undefined, sessionId: string, generation: string, projectId: string | null): boolean {
   if (!launch || launch.version !== 1 || launch.sessionId !== sessionId || launch.childGeneration !== generation
@@ -103,11 +102,58 @@ export async function continueClaudeNativeChild(options: ClaudeContinuationOptio
     if (signal.aborted) onAbort()
   })
   const timeout = setTimeout(() => timer.abort(), Math.max(1, options.deadline - Date.now()))
-  try { return await Promise.race([continuationAttempt({ ...options, signal }), cancelled]) }
-  finally { clearTimeout(timeout); timer.abort(); signal.removeEventListener('abort', onAbort) }
+  let waitingChild: string | undefined
+  const run = async (): Promise<ClaudeContinuationOutcome> => {
+    while (!signal.aborted && Date.now() < options.deadline) {
+      const outcome = await continuationAttempt({ ...options, signal })
+      if (outcome.kind !== 'waiting') {
+        if (waitingChild) {
+          await options.onQuotaState?.({ kind: outcome.kind === 'submitted' || outcome.kind === 'result' ? 'resumed' : 'ended', childId: waitingChild })
+          waitingChild = undefined
+        }
+        return outcome
+      }
+      waitingChild = outcome.childId
+      await options.onQuotaState?.(outcome)
+      // Retry hints inform capacity cadence (at most once per second, at least
+      // every 30 seconds to observe newly authorized accounts). Result harvesting
+      // continues each second and never holds the parent's input slot while idle.
+      const nextProbe = Math.min(options.deadline, Date.now() + Math.max(1000, Math.min(30_000,
+        outcome.retryAtMs === null ? 5000 : outcome.retryAtMs - Date.now())))
+      while (!signal.aborted && Date.now() < nextProbe) {
+        await new Promise<void>(resolve => {
+          const finish = () => { clearTimeout(timer); signal.removeEventListener('abort', finish); resolve() }
+          const timer = setTimeout(finish, Math.max(1, Math.min(1000, nextProbe - Date.now())))
+          signal.addEventListener('abort', finish, { once: true })
+          if (signal.aborted) finish()
+        })
+        if (signal.aborted) return { kind: 'unknown', reason: 'budget-expired' }
+        const harvested = await readClaudeContinuationResult(options)
+        if (harvested) {
+          await options.onQuotaState?.({ kind: harvested.kind === 'result' ? 'resumed' : 'ended', childId: waitingChild })
+          waitingChild = undefined
+          return harvested
+        }
+        const parent = (options.receipt as SignedNativeDispatchRecord).body.parent
+        if (!options.authority.current() || options.session.hasChildExited() || !parent?.launch?.relay
+          || !nativeRelayScopeCurrent(parent.launch.relay) || parent.pid !== options.session.child.pid
+          || parent.sessionId !== options.session.sessionId) return { kind: 'unknown', reason: 'capacity-unavailable' }
+      }
+    }
+    return { kind: 'unknown', reason: 'budget-expired' }
+  }
+  try { return await Promise.race([run(), cancelled]) }
+  catch { return { kind: 'unknown', reason: 'submission-unknown' } }
+  finally {
+    clearTimeout(timeout); timer.abort(); signal.removeEventListener('abort', onAbort)
+    if (waitingChild) {
+      const childId = waitingChild; waitingChild = undefined
+      try { await options.onQuotaState?.({ kind: 'ended', childId }) } catch { /* Waiting stays visible when its durable writer is unavailable. */ }
+    }
+  }
 }
 
-async function continuationAttempt(options: ClaudeContinuationOptions): Promise<ClaudeContinuationOutcome> {
+async function continuationAttempt(options: ClaudeContinuationOptions): Promise<ClaudeContinuationOutcome | { kind: 'waiting'; childId: string; retryAtMs: number | null }> {
   const { request, session, authority, signal } = options
   const unknown = (reason: Extract<ClaudeContinuationOutcome, { kind: 'unknown' }>['reason']): ClaudeContinuationOutcome => ({ kind: 'unknown', reason })
   const expired = () => signal.aborted || Date.now() >= options.deadline || session.hasChildExited()
@@ -125,7 +171,6 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
     if (receipt.body.parent?.sessionId !== session.sessionId || !/^[A-Za-z0-9_-]+$/.test(agentId)
       || !ownsNativeChildWorkspace(options.workspace, session, request) || !nativeChildContinuationCensusKnown(options.workspace)) return unknown('identity-unknown')
     const transcript = sessionJsonlPath(session.sessionId, session.cwd, options.projectsDir)
-    const childTranscript = join(transcript.slice(0, -'.jsonl'.length), 'subagents', `agent-${agentId}.jsonl`)
     const existing = authority.read()
     if (existing !== undefined) {
       const saved: Preparation = JSON.parse(existing)
@@ -134,8 +179,6 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
         || !saved.nonce || !isDeepStrictEqual(saved.args, { to: agentId, message: message(saved.nonce) })) return unknown('identity-unknown')
       return await exactInvocation(transcript, saved) ? { kind: 'submitted', evidence: 'exact-tool-invocation' } : unknown('submission-unknown')
     }
-    const quota = await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request)
-    if (!quota) return { kind: 'not-eligible' }
     const arrived = await result()
     if (arrived) return arrived
     if (!session.toolSurface.split(',').includes(SUBAGENT_CONTINUATION_TOOL_NAME)) return unknown('tool-unavailable')
@@ -159,38 +202,24 @@ async function continuationAttempt(options: ClaudeContinuationOptions): Promise<
       if (expired()) return unknown('budget-expired')
       const completed = await result()
       if (completed) return completed
-      if (!ownsNativeChildWorkspace(options.workspace, session, request) || !nativeChildContinuationCensusKnown(options.workspace)
-        || !isDeepStrictEqual(await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request), quota)) return unknown('identity-unknown')
+      if (!ownsNativeChildWorkspace(options.workspace, session, request) || !nativeChildContinuationCensusKnown(options.workspace)) return unknown('identity-unknown')
       if (!currentParentKnown()) return unknown('launch-unknown')
-      // A durable source descriptor is usable only under the authenticated
-      // original receipt/lease and exact surviving process, never a replacement.
-      const restored = !readNativeParentLaunchEvidence(session)?.fileAuth && exactSurvivor() && parent.launch?.fileAuth
-        ? restoreNativeFileAuth(parent.launch.fileAuth) : undefined
-      const observedAuth = readNativeParentFileAuth(session)
-      const sourceAuth = observedAuth ?? restored
-      const auth = sourceAuth && { evidence: sourceAuth.evidence,
-        current: () => authority.current() && sourceAuth.current() && (observedAuth !== undefined || exactSurvivor()) }
-      if (!options.capacity || !auth || !parent.launch?.fileAuth
-        || !auth.current()
-        || !isDeepStrictEqual(parent.launch.fileAuth, auth.evidence)
-        || options.capacity.configDir !== auth.evidence.configDir) return unknown('capacity-unavailable')
-      let modelId = request.model_id
-      if (!modelId.startsWith('claude-')) {
-        const model = parent.launch.model, current = readNativeParentLaunchEvidence(session)?.model ?? (exactSurvivor() ? model : undefined)
-        if (!model || model.selector !== modelId || !isDeepStrictEqual(nativeModelPin(model), model)
-          || !isDeepStrictEqual(current, model)
-          || parent.launch.argv.flatMap((arg, i) => arg === '--model' ? [parent.launch!.argv[i + 1]] : []).join() !== model.modelId) return unknown('capacity-unavailable')
-        modelId = model.modelId
-      }
-      const capacity = await (options.capacity.acquire ?? acquireClaudeCapacity)({ request, leaseId: authority.lease.token,
-        modelId,
-        childId: agentId, eventDigest: quota.digest, configDir: options.capacity.configDir, env: options.capacity.env,
-        signal, deadline: options.deadline })
-      if (capacity.kind !== 'available') return unknown(capacity.kind === 'waiting' ? 'capacity-waiting' : 'capacity-unavailable')
+      // The original signed scope survives a gateway restart, never a parent
+      // replacement. Account and model facts come only from native HTTP at the host.
+      const relay = parent.launch?.relay
+      const auth = { current: () => authority.current() && exactSurvivor() && !!relay && nativeRelayScopeCurrent(relay)
+        && relay.registration.body.parentSessionId === session.sessionId && relay.registration.body.parentPid === session.child.pid }
+      if (!relay || !auth.current()) return unknown('capacity-unavailable')
+      const capacity = await (options.capacity?.acquire ?? acquireClaudeCapacity)({ request, leaseId: authority.lease.token,
+        relay, childId: agentId, eventDigest: createHash('sha256').update(receipt.signature).digest('hex'), signal, deadline: options.deadline })
+      if (capacity.kind !== 'available') return capacity.kind === 'waiting'
+        ? { kind: 'waiting', childId: agentId, retryAtMs: capacity.receipt.body.capacity.retryAtMs } : unknown('capacity-unavailable')
       try {
       const afterCapacity = await result()
       if (afterCapacity) return afterCapacity
-      if (!auth.current() || !capacity.current() || !isDeepStrictEqual(await claudeChildQuotaEvent(childTranscript, agentId, session.sessionId, request), quota)) return unknown('capacity-unavailable')
+      if (!auth.current() || !capacity.current()) return unknown('capacity-unavailable')
+      const observed = capacity.receipt.body.observations.at(-1)!
+      const quota = { requestId: observed.bodyDigest, digest: createHash('sha256').update(JSON.stringify(observed)).digest('hex') }
       const boundary = await readBoundary(transcript)
       if (!boundary) return unknown('submission-unknown')
       const nonce = randomUUID()
@@ -243,6 +272,21 @@ async function digestPrefix(file: FileHandle, size: number): Promise<string | un
   return digest.digest('hex')
 }
 
+/** The pinned native tool retains exact arguments and adds presentation fields.
+ * Decorations never replace the full recipient/message authority. */
+function exactNativeMessageInput(input: unknown, args: Preparation['args']): boolean {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return false
+  const value = input as Record<string, unknown>, keys = Object.keys(value).sort().join(',')
+  if (value.to !== args.to || value.message !== args.message) return false
+  if (keys === 'message,to') return true
+  if (keys !== 'content,message,recipient,to,type' || value.type !== 'message' || value.recipient !== args.to
+    || typeof value.content !== 'string') return false
+  // Pinned native evidence covers this host's long ASCII continuation template;
+  // do not generalize its preview transform to short or Unicode messages.
+  return /^[\x20-\x7e]+$/.test(args.message) && args.message.length > 49
+    && value.content === args.message.slice(0, 49) + '…'
+}
+
 /** Parent text, tool-name mentions and another recipient are not consumption. */
 async function exactInvocation(path: string, saved: Preparation): Promise<boolean> {
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW)
@@ -267,9 +311,9 @@ async function exactInvocation(path: string, saved: Preparation): Promise<boolea
         // conflicting actuation, not unrelated conversation to skip past.
         if (block.type === 'tool_use' && block.name === SUBAGENT_CONTINUATION_TOOL_NAME
           && typeof block.input?.message === 'string' && block.input.message.includes(saved.nonce)
-          && !isDeepStrictEqual(block.input, saved.args)) return false
+          && !exactNativeMessageInput(block.input, saved.args)) return false
         if (block.type === 'tool_use' && block.name === SUBAGENT_CONTINUATION_TOOL_NAME
-          && typeof block.id === 'string' && isDeepStrictEqual(block.input, saved.args)) matches.push(block.id)
+          && typeof block.id === 'string' && exactNativeMessageInput(block.input, saved.args)) matches.push(block.id)
       }
     }
     return new Set(matches).size === 1

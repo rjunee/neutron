@@ -10,6 +10,15 @@ Multi-turn continuity is delegated to Claude Code's `--session-id` flag — the 
 
 Cross-refs: `docs/engineering-plan.md § B.P1`, internal design notes (canonical subprocess invocation), `docs/plans/2026-05-26-001-feat-cli-subprocess-substrate-plan.md` (this swap).
 
+The native host relay (SPEC Decisions Log 2026-09-30) supersedes the direct
+authentication wiring above for a provisioned route: the persistent CLI uses its
+supported Unix transport with an OAuth placeholder, registers its exact parent
+before first chat, and lets the host authenticate each native request. Open does
+not assemble provider prompts or requests. Self-host installations without that
+registration retain the existing native authentication contract. A present broken
+route refuses; it cannot fall back to direct authentication. Warm reuse keys the
+registered transport identity, so rotating host accounts does not respawn a REPL.
+
 ## 2026-06-07 — Substrate lift Sprints 1–3: persistent interactive REPL is the SOLE substrate
 
 S1 introduced the persistent interactive `claude` REPL (Bun-native PTY + dev-channel, `persistent/`; `docs/SYSTEM-OVERVIEW.md` § 4.05) — **herdr step 2b (#538) replaced that PTY as the wired backend with a herdr pane; `bun-terminal-host.ts` survives as an injectable option rather than being deleted — see the container note above for what the swap changes and where the two backends diverge.** S2 made it self-healing (watchdog/respawn/wedge/heartbeat, respawn-is-always-resume; § 4.05.2). **S3 (RIP-REPLACE, Sam DECISION OVERRIDE 2026-06-07)** re-keyed the warm pool per `(substrate_instance_id, user_id, project_id, credential_identity)` (#104), made reply-correlation stateless turn-id-echo (#107), added replay-redelivery (#106), ported the `--tools` default-deny restriction into the REPL spawn (Codex-r1-P1), and then **HARD-DELETED** the `NEUTRON_PERSISTENT_REPL` flag, `cli-transport.ts`, `cancel.ts`, and the `claude -p` warm-router (`warm-router-process.ts` + `build-warm-router-client.ts` + the `NEUTRON_ROUTER_WARM_REUSE` flag). The persistent REPL is now the ONE unconditional substrate; `createClaudeCodeSubstrateAuto` has no flag and no fallback. The reply→`completion` bridge keeps the `Event` union + every drain call site unchanged. The only rollback is `git revert` (acceptable pre-launch). The router runs on its own persistent REPL keyed `cc-llm-router-{instance}` (warm reuse inherent to the substrate). **[K9 correction, 2026-07: the `MAX_THINKING_TOKENS=0` via `extra_env` router-hang guard this line originally claimed was never wired — no production caller sets `extra_env`, and the `router-thinking-budget` module was deleted. See the K9 entry in `docs/AS_BUILT.md`.]** Merge gate: a live E2E turn through `createClaudeCodeSubstrateAuto` (`scripts/proof/persistent-repl-roundtrip.ts`).

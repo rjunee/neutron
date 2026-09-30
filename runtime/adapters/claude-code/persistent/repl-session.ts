@@ -18,6 +18,7 @@ import { CHILD_KILL_GRACE_MS, ZERO_USAGE, defaultIsPidAlive } from './signatures
 import type { ActiveTurn } from './types.ts'
 import { defaultSinkTokenPath, loadOrCreateSinkToken } from './sink-coordinates.ts'
 import { independentNativeChildren, markNativeChildWorkspaceAmbiguous, nativeChildWorkspaceAmbiguous, nativeChildWorkspaceCompletion, sameNativeChildWorkspace, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
+import { nativeRelayRouteFingerprint } from '../../../workers/claude-capacity-client.ts'
 
 // ---------------------------------------------------------------------------
 // ReplSession — one warm REPL + its dev-channel + its turn serialization.
@@ -899,6 +900,8 @@ export function authFingerprintFor(
   env: Record<string, string | undefined> | undefined,
   tokenPath?: string,
 ): string {
+  const relay = nativeRelayRouteFingerprint()
+  if (relay) return relay
   if (env === undefined) return ''
   const secret = env['CLAUDE_CODE_OAUTH_TOKEN'] ?? env['ANTHROPIC_AUTH_TOKEN'] ?? env['ANTHROPIC_API_KEY']
   if (typeof secret !== 'string' || secret.length === 0) return ''

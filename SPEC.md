@@ -171,7 +171,11 @@ is API scoping, not process isolation (Decisions Log 2026-09-16, #515).
 Claude judgment turns run as spawned `claude` CLI processes over stdio (not an
 in-process API client in the parent). A persistent REPL pool keeps warm
 sessions; the credential pool threads each spawn's auth into that child's
-environment only, never the parent. The contract is **one reply per turn**. The
+environment only, never the parent. A host-registered Claude transport instead
+routes the native CLI's HTTP requests over its authenticated local Unix relay;
+the host owns account selection per actual request model. Native self-host
+authentication remains supported when no host route is registered (Decisions Log
+2026-09-30, native quota relay). The contract is **one reply per turn**. The
 substrate is swappable behind the `Substrate`/`Event` seam: Claude Code is the
 default/primary adapter, and an opt-in OpenAI GPT conversational adapter is also
 production-wired (BYO `OPENAI_API_KEY`, selected by env); autonomous builds
@@ -337,6 +341,28 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-09-30 — Native Claude requests use the registered host quota relay.
+
+A provisioned host route makes the existing native Claude CLI send requests over
+one Unix socket. Open registers a random parent scope after observing its PID,
+kernel start ticks, boot and native session, before first chat. The host selects
+an authorized account using the actual native HTTP model and records signed
+request observations. A genuine pre-stream quota rejection may select another
+account for that same request; ambiguous or partially streamed work cannot be
+replayed. Local route failures remain visible unknowns and never become synthetic
+credential quota errors. No account rotation creates a parent or child.
+
+This deliberately supports two authentication deployments: the registered host
+relay and ordinary self-host native authentication where no route is provisioned.
+A registered route cannot fall back to self-host authentication when unavailable.
+The native OAuth environment placeholder carries no account credential; account
+credentials stay with the host. Launch-time file-source and model-alias
+reconstruction do not prove what a warm native process consumed and are removed.
+The boundary is authenticated host service scoping, not hostile process isolation.
+Original signed child admission, launch/tool checks, result validation and spent
+continuation ambiguity fences remain binding. Acceptance and outstanding live
+evidence are in `docs/spec-items/claude-same-agent-continuation.md`.
 
 ### 2026-09-28 — Offline Codex custody reconciliation requires separate maintenance authority.
 

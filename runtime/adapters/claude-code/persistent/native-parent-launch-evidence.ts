@@ -1,10 +1,8 @@
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createReadStream, realpathSync, statSync } from 'node:fs'
-import { isDeepStrictEqual } from 'node:util'
-import { observeNativeFileAuth, type NativeFileAuthEvidence, type NativeFileAuthObservation } from './native-file-auth.ts'
-import { readProcessIdentity } from './process-identity.ts'
-import { prepareNativeModelLaunch, protectedNativeLauncher, type NativeModelLaunchEvidence } from './native-model-launch.ts'
+import { readNativeRequestRelay } from './native-request-relay.ts'
+import type { NativeRelayScope } from '../../../workers/claude-capacity-client.ts'
 
 /** Host-observed launch inputs, not a catalog or proof of a tool invocation.
  * Copy into the original signed dispatch receipt before worker submission to
@@ -17,18 +15,11 @@ export interface NativeParentLaunchEvidence {
   readonly executable: { readonly realPath: string; readonly sha256: string; readonly version: string }
   readonly argv: readonly string[]
   readonly tools: readonly string[]
-  readonly fileAuth?: NativeFileAuthEvidence
-  readonly model?: NativeModelLaunchEvidence
+  readonly relay?: NativeRelayScope
 }
 
 const launches = new WeakMap<object, NativeParentLaunchEvidence>()
 const binaries = new Map<string, NativeParentLaunchEvidence['executable']>()
-const fileAuth = new WeakMap<object, NativeFileAuthObservation>()
-
-export function readNativeParentFileAuth(session: object): NativeFileAuthObservation | undefined {
-  const observed = fileAuth.get(session)
-  return observed?.current() ? observed : undefined
-}
 
 export function readNativeParentLaunchEvidence(session: object): NativeParentLaunchEvidence | undefined {
   return launches.get(session)
@@ -36,14 +27,7 @@ export function readNativeParentLaunchEvidence(session: object): NativeParentLau
 
 /** Trusted host producer boundary, also injectable by consuming fixtures.
  * Never call with worker payloads, transcript rows, or a model tool argument. */
-export function recordNativeParentLaunchEvidence(session: object, evidence: NativeParentLaunchEvidence, auth?: NativeFileAuthObservation): void {
-  fileAuth.delete(session)
-  const pid = (session as { child?: { pid?: number } }).child?.pid
-  const identity = pid === undefined ? undefined : readProcessIdentity(pid)
-  if (auth?.current() && identity && isDeepStrictEqual(auth.evidence, evidence.fileAuth)) fileAuth.set(session, {
-    evidence: auth.evidence, current: () => auth.current() && (session as { child?: { pid?: number } }).child?.pid === pid
-      && isDeepStrictEqual(readProcessIdentity(pid!), identity),
-  })
+export function recordNativeParentLaunchEvidence(session: object, evidence: NativeParentLaunchEvidence): void {
   launches.set(session, Object.freeze({ ...evidence,
     executable: Object.freeze({ ...evidence.executable }),
     argv: Object.freeze([...evidence.argv]), tools: Object.freeze([...evidence.tools]) }))
@@ -98,21 +82,16 @@ export async function prepareNativeParentLaunch(input: {
     if (!selected) return undefined
     const observation = await observeNativeExecutable(selected, input.cwd, input.env)
     if (!observation) return undefined
-    const initialAuth = observeNativeFileAuth(input)
-    const model = initialAuth && protectedNativeLauncher(selected)
-      ? await prepareNativeModelLaunch({ ...input, executable: observation.executable, auth: initialAuth }) : undefined
-    const argv = model?.argv ?? [...input.argv], env = model?.env ?? input.env
-    const auth = observeNativeFileAuth({ ...input, argv, env })
+    const argv = [...input.argv], env = input.env
     const evidence: NativeParentLaunchEvidence = Object.freeze({ version: 1,
       sessionId: input.sessionId, childGeneration: input.childGeneration, projectId: input.projectId,
-      executable: observation.executable, argv: Object.freeze([...argv]), tools: Object.freeze([...input.tools]),
-      ...(model ? { model: model.evidence } : {}),
-      ...(auth ? { fileAuth: auth.evidence } : {}) })
+      executable: observation.executable, argv: Object.freeze([...argv]), tools: Object.freeze([...input.tools]) })
     return { argv, env, record(session) {
       // A replaced executable during spawn invalidates this observation.
       try {
-        if (observation.isCurrent() && (!model || model.current() && protectedNativeLauncher(selected))) {
-          recordNativeParentLaunchEvidence(session, evidence, auth)
+        if (observation.isCurrent()) {
+          const relay = readNativeRequestRelay(session)
+          recordNativeParentLaunchEvidence(session, { ...evidence, ...(relay ? { relay } : {}) })
         }
       } catch { /* unknown */ }
     } }

@@ -16,6 +16,7 @@ import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-t
 import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
 import { supportsAutocompact } from './autocompact-support.ts'
 import { prepareNativeParentLaunch } from './native-parent-launch-evidence.ts'
+import { prepareNativeRequestRelay } from './native-request-relay.ts'
 import { buildSettings } from './build-settings.ts'
 import { configuredPtyHost } from './configured-pty-host.ts'
 import { ChannelWedgedSpawnError, MAX_FLEET_RESPAWNS, buildChannelWedgeCapAlertText, runBoundedChannelWedgeRespawn } from './channel-unbound-respawn.ts'
@@ -573,13 +574,15 @@ async function spawnSession(
     let startupResumeRejected = false
     let child: Awaited<ReturnType<typeof ptyHost.spawn>>
     try {
+      const relay = prepareNativeRequestRelay(childEnv)
+      const launchEnv = relay?.env ?? childEnv
       const launch = options.project_id !== undefined && options.conversationProjectId !== null
         ? await prepareNativeParentLaunch({ sessionId, childGeneration, projectId: options.project_id,
-          argv, tools: toolSurface, cwd, env: childEnv })
+          argv, tools: toolSurface, cwd, env: launchEnv })
         : undefined
       child = await ptyHost.spawn(launch?.argv ?? argv, {
       cwd,
-      env: launch?.env ?? childEnv,
+      env: launch?.env ?? launchEnv,
       ...(options.repl_pane_label !== undefined ? { label: options.repl_pane_label } : {}),
       ...(options.projectPlacement !== undefined ? { projectPlacement: options.projectPlacement } : {}),
       // SNAPSHOT-REPLACE, not append — on either backend. Each delivery is the child's
@@ -620,6 +623,8 @@ async function spawnSession(
     })
     scanChild = child
     session.attachChild(child)
+    // No first chat can run until the exact native process has an authenticated route.
+    await relay?.register(session)
     launch?.record(session)
     recordMcpServiceOwner({ sessionKey, childGeneration, channelName, pid: child.pid }, serviceMarkers)
     // Synchronous handle mirror so a respawn can detect alive-but-wedged without

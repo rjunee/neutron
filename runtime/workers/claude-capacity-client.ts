@@ -1,143 +1,191 @@
 import { createHash, createPublicKey, randomBytes, verify } from 'node:crypto'
 import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync } from 'node:fs'
 import { createConnection } from 'node:net'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { dirname, isAbsolute } from 'node:path'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
-import { hasCompetingClaudeAuth } from '../adapters/claude-code/persistent/native-file-auth.ts'
+import { readProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
 
-/** Public verification material only. Provisioned outside instance-writable ancestry. */
+/** Independently provisioned public material; never accepted from a worker. */
 export interface ClaudeCapacityPin {
   version: 1; publicKey: string; hostId: string; instanceId: string; socketPath: string; claudeConfigDir: string
 }
-export interface ClaudeCapacityInput {
-  request: BoundedWorkRequest; leaseId: string; childId: string; eventDigest: string
-  /** Concrete ID independently bound by the host to the original native launch.
-   * The original request remains unchanged and is digested in full. */
-  modelId?: string
-  configDir: string; env: Record<string, string | undefined>; signal: AbortSignal; deadline: number
+export interface NativeRelayParent { parentSessionId: string; parentPid: number; parentStartTicks: number; bootId: string }
+interface RelayIdentity extends NativeRelayParent { version: 2; instanceId: string; challenge: string; hostId: string; scopeDigest: string }
+export interface NativeRelayRegistration { body: RelayIdentity & { kind: 'claude-native-registered' }; signature: string }
+/** Capability for one exact parent lifetime, containing no account credential. */
+export interface NativeRelayScope { scopeToken: string; registration: NativeRelayRegistration }
+export interface NativeRelayObservation {
+  scopeDigest: string; sessionId: string; nativeAgentId: string; parentAgentId: string | null
+  modelId: string; bodyDigest: string; status: 'available' | 'all-full' | 'unknown'
+  accountGeneration: string | null; observedAtMs: number; retryAtMs: number | null
 }
-interface CapacityRequest {
-  version: 1; kind: 'claude-capacity-request'; instanceId: string; challenge: string
-  modelId: string; requestDigest: string; leaseId: string; childId: string; eventDigest: string
-}
+interface Correlations { nativeAgentId: string; childId: string; requestDigest: string; leaseId: string; eventDigest: string }
 export interface ClaudeCapacityReceipt {
-  body: Omit<CapacityRequest, 'kind'> & { kind: 'claude-capacity'; hostId: string; bootId: string
-    status: 'available' | 'all-full' | 'unknown'; accountGeneration: string | null; observedAtMs: number; retryAtMs: number | null }
+  body: RelayIdentity & Correlations & { kind: 'claude-native-observation'; observations: NativeRelayObservation[]
+    capacity: { status: 'available' | 'all-full' | 'unknown'; modelId: string | null; accountGeneration: string | null; observedAtMs: number; retryAtMs: number | null } }
   signature: string
+}
+export interface ClaudeCapacityInput {
+  request: BoundedWorkRequest; leaseId: string; childId: string; eventDigest: string; relay: NativeRelayScope
+  signal: AbortSignal; deadline: number
 }
 export type ClaudeCapacityOutcome = { kind: 'available'; receipt: ClaudeCapacityReceipt; current(): boolean; release(): void }
   | { kind: 'waiting'; receipt: ClaudeCapacityReceipt } | { kind: 'unknown' }
 export type AcquireClaudeCapacity = (input: ClaudeCapacityInput) => Promise<ClaudeCapacityOutcome>
-const unknown = (): ClaudeCapacityOutcome => ({ kind: 'unknown' })
+export class NativeRelayUnavailable extends Error { readonly substrateErrorClass = 'repl_unreconciled' as const }
 const text = (v: unknown): v is string => typeof v === 'string' && /^[A-Za-z0-9_.:-]{1,256}$/.test(v)
 const digest = (v: unknown): v is string => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v)
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const MAX_AGE_MS = 30_000
+
+/** Stable across account rotation; a changed host route still invalidates warm reuse. */
+export function nativeRelayRouteFingerprint(pin: ClaudeCapacityPin | undefined = loadClaudeCapacityPin()): string | undefined {
+  if (!pin) return undefined
+  if (!validPin(pin)) throw new NativeRelayUnavailable('Native quota relay pin is invalid')
+  return `native-relay-v2:${hash(JSON.stringify([pin.hostId, pin.instanceId, pin.socketPath, pin.publicKey]))}`
+}
 
 function protectedDirectory(path: string): void {
   const info = lstatSync(path)
   if (!isAbsolute(path) || !info.isDirectory() || info.isSymbolicLink() || realpathSync(path) !== path
-    || info.uid !== 0 || (info.mode & 0o022) !== 0) throw Error('Untrusted capacity path')
+    || info.uid !== 0 || (info.mode & 0o022) !== 0) throw Error('Untrusted relay path')
   const parent = dirname(path)
   if (parent !== path) protectedDirectory(parent)
 }
 
+/** Absence selects native self-host authentication. A present broken pin never falls back. */
 export function loadClaudeCapacityPin(): ClaudeCapacityPin | undefined {
+  const uid = process.geteuid?.()
+  if (!Number.isSafeInteger(uid)) return undefined
+  const path = `/etc/neutron/claude-capacity/${uid}.json`
+  try { lstatSync(path) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+    throw new NativeRelayUnavailable('Native quota relay registration is unreadable')
+  }
   try {
-    const uid = process.geteuid?.()
-    if (!Number.isSafeInteger(uid)) return undefined
-    const path = `/etc/neutron/claude-capacity/${uid}.json`
     protectedDirectory(dirname(path))
     const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
     try {
       const info = fstatSync(fd)
-      if (!info.isFile() || info.uid !== 0 || (info.mode & 0o022) !== 0 || info.nlink !== 1 || info.size > 16384) return undefined
+      if (!info.isFile() || info.uid !== 0 || (info.mode & 0o022) !== 0 || info.nlink !== 1 || info.size > 16384) throw Error('Invalid pin')
       const pin = JSON.parse(readFileSync(fd, 'utf8')) as ClaudeCapacityPin
-      if (!validPin(pin)) return undefined
+      if (!validPin(pin)) throw Error('Invalid pin')
       protectedDirectory(dirname(pin.socketPath))
       const socket = lstatSync(pin.socketPath)
-      return socket.isSocket() && socket.uid === 0 ? pin : undefined
+      if (!socket.isSocket() || socket.uid !== 0) throw Error('Invalid socket')
+      return pin
     } finally { closeSync(fd) }
-  } catch { return undefined }
+  } catch { throw new NativeRelayUnavailable('Native quota relay registration is unavailable') }
 }
-
 function validPin(pin: ClaudeCapacityPin): boolean {
   return pin?.version === 1 && text(pin.hostId) && text(pin.instanceId) && typeof pin.publicKey === 'string'
     && isAbsolute(pin.socketPath) && Buffer.byteLength(pin.socketPath) < 104 && isAbsolute(pin.claudeConfigDir)
     && createPublicKey(pin.publicKey).asymmetricKeyType === 'ed25519'
 }
-
-/** Reject immutable, descriptor, helper and alternate-provider auth routes.
- * Only canonical file authentication is eligible; this reads no credentials. */
-export function claudeCapacityFileAuth(pin: ClaudeCapacityPin, input: Pick<ClaudeCapacityInput, 'configDir' | 'env'>): boolean {
-  try {
-    if (hasCompetingClaudeAuth(input.env)) return false
-    if (input.env.CLAUDE_CONFIG_DIR && resolve(input.env.CLAUDE_CONFIG_DIR) !== pin.claudeConfigDir) return false
-    return resolve(input.configDir) === pin.claudeConfigDir && realpathSync(input.configDir) === pin.claudeConfigDir
-  } catch { return false }
+function exactKeys(value: object, keys: readonly string[]): boolean { return Object.keys(value).sort().join(',') === [...keys].sort().join(',') }
+function signed(pin: ClaudeCapacityPin, value: unknown): value is { body: Record<string, unknown>; signature: string } {
+  return object(value) && exactKeys(value, ['body', 'signature']) && object(value.body)
+    && typeof value.signature === 'string' && /^[A-Za-z0-9+/]{86}==$/.test(value.signature)
+    && verify(null, Buffer.from(JSON.stringify(value.body)), createPublicKey(pin.publicKey), Buffer.from(value.signature, 'base64'))
+}
+function parentCurrent(parent: NativeRelayParent): boolean {
+  const identity = readProcessIdentity(parent.parentPid)
+  return identity?.start_ticks === parent.parentStartTicks && identity.boot_id === parent.bootId
+}
+export function nativeRelayScopeCurrent(scope: NativeRelayScope): boolean {
+  try { return /^[A-Za-z0-9_-]{43}$/.test(scope.scopeToken) && scope.registration.body.scopeDigest === hash(scope.scopeToken)
+    && parentCurrent(scope.registration.body) } catch { return false }
+}
+function verifiedScope(pin: ClaudeCapacityPin, scope: NativeRelayScope): boolean {
+  return nativeRelayScopeCurrent(scope) && signed(pin, scope.registration)
+    && scope.registration.body.kind === 'claude-native-registered' && scope.registration.body.version === 2
+    && scope.registration.body.instanceId === pin.instanceId && scope.registration.body.hostId === pin.hostId
 }
 
-/** The pin is supplied by the trusted host, never by a worker or receipt.
- * Exported separately from provisioning for real-socket consuming tests. */
+/** One canonical frame per connection on the same Unix listener as native HTTP. */
+async function exchange(pin: ClaudeCapacityPin, request: object, signal: AbortSignal, deadline: number): Promise<unknown> {
+  if (!validPin(pin) || signal.aborted || Date.now() >= deadline) throw Error('Relay unavailable')
+  return new Promise((resolve, reject) => {
+    const socket = createConnection(pin.socketPath)
+    let bytes = Buffer.alloc(0), settled = false
+    const finish = (error?: Error, value?: unknown) => {
+      if (settled) return; settled = true
+      clearTimeout(timer); signal.removeEventListener('abort', abort); socket.destroy()
+      if (error) reject(error); else resolve(value)
+    }
+    const abort = () => finish(Error('Relay unavailable'))
+    const timer = setTimeout(abort, Math.max(1, Math.min(deadline - Date.now(), 85_000)))
+    signal.addEventListener('abort', abort, { once: true })
+    socket.on('error', abort); socket.on('end', abort); socket.on('close', abort)
+    socket.once('connect', () => signal.aborted ? abort() : socket.write(JSON.stringify(request) + '\n'))
+    socket.on('data', chunk => {
+      bytes = Buffer.concat([bytes, Buffer.from(chunk)])
+      if (bytes.length > 1024 * 1024) { abort(); return }
+      if (!bytes.includes(10)) return
+      try {
+        if (bytes.indexOf(10) !== bytes.length - 1) throw Error('Extra frame')
+        const raw = bytes.subarray(0, -1).toString('utf8'), envelope = JSON.parse(raw)
+        if (JSON.stringify(envelope) !== raw || !signed(pin, envelope)) throw Error('Unverified relay')
+        finish(undefined, envelope)
+      } catch { abort() }
+    })
+  })
+}
+export async function registerClaudeNativeRelay(pin: ClaudeCapacityPin, parent: NativeRelayParent, scopeToken: string,
+  signal: AbortSignal, deadline: number): Promise<NativeRelayScope> {
+  const request = { version: 2, kind: 'claude-native-register', instanceId: pin.instanceId,
+    challenge: randomBytes(24).toString('base64url'), ...parent, scopeToken }
+  const envelope = await exchange(pin, request, signal, deadline) as NativeRelayRegistration
+  const expected = { version: 2, kind: 'claude-native-registered', instanceId: pin.instanceId, challenge: request.challenge,
+    ...parent, hostId: pin.hostId, scopeDigest: hash(scopeToken) }
+  if (!exactKeys(envelope.body, Object.keys(expected)) || Object.entries(expected).some(([key, value]) => (envelope.body as unknown as Record<string, unknown>)[key] !== value)
+    || !parentCurrent(parent)) throw new NativeRelayUnavailable('Native quota relay parent registration was refused')
+  return { scopeToken, registration: envelope }
+}
+
 export async function connectClaudeCapacity(pin: ClaudeCapacityPin, input: ClaudeCapacityInput): Promise<ClaudeCapacityOutcome> {
   try {
-    const modelId = input.modelId ?? input.request.model_id
-    if (!validPin(pin) || !claudeCapacityFileAuth(pin, input) || input.signal.aborted || Date.now() >= input.deadline
-      || !/^claude-[a-z0-9][a-z0-9.-]{1,119}$/.test(modelId)
-      || !text(input.leaseId) || !text(input.childId) || !digest(input.eventDigest)) return unknown()
-    const bootId = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim()
-    const request: CapacityRequest = { version: 1, kind: 'claude-capacity-request', instanceId: pin.instanceId,
-      challenge: randomBytes(24).toString('base64url'), modelId,
-      requestDigest: createHash('sha256').update(JSON.stringify(input.request)).digest('hex'),
-      leaseId: input.leaseId, childId: input.childId, eventDigest: input.eventDigest }
-    const started = Date.now(), deadline = Math.min(input.deadline, started + 85_000)
-    return await new Promise<ClaudeCapacityOutcome>(resolveResult => {
-      const socket = createConnection(pin.socketPath)
-      let bytes = Buffer.alloc(0), settled = false, valid = true
-      const release = () => { valid = false; clearTimeout(timer); input.signal.removeEventListener('abort', abort); socket.destroy() }
-      const fail = () => { release(); if (!settled) { settled = true; resolveResult(unknown()) } }
-      const abort = () => fail()
-      const timer = setTimeout(fail, Math.max(1, deadline - Date.now()))
-      input.signal.addEventListener('abort', abort, { once: true })
-      socket.on('error', fail); socket.on('close', fail); socket.on('end', fail)
-      socket.once('connect', () => {
-        if (input.signal.aborted) fail()
-        else socket.write(JSON.stringify(request) + '\n')
-      })
-      socket.on('data', chunk => {
-        if (settled) { fail(); return }
-        bytes = Buffer.concat([bytes, Buffer.from(chunk)])
-        if (bytes.length > 16384) { fail(); return }
-        if (!bytes.includes(10)) return
-        try {
-          if (bytes.indexOf(10) !== bytes.length - 1) throw Error('Extra frame')
-          const raw = bytes.subarray(0, -1).toString('utf8'), envelope = JSON.parse(raw)
-          if (JSON.stringify(envelope) !== raw || !object(envelope) || Object.keys(envelope).sort().join(',') !== 'body,signature'
-            || !object(envelope.body) || typeof envelope.signature !== 'string') throw Error('Invalid envelope')
-          const body = envelope.body
-          const { kind: _kind, ...correlations } = request
-          if (Object.keys(body).sort().join(',') !== [...Object.keys(correlations), 'kind', 'hostId', 'bootId', 'status', 'accountGeneration', 'observedAtMs', 'retryAtMs'].sort().join(',')
-            || Object.entries(correlations).some(([key, value]) => body[key] !== value)
-            || body.kind !== 'claude-capacity' || body.hostId !== pin.hostId || body.bootId !== bootId
-            || !Number.isSafeInteger(body.observedAtMs) || Number(body.observedAtMs) < started
-            || Number(body.observedAtMs) > Date.now() || Date.now() - Number(body.observedAtMs) > MAX_AGE_MS
-            || !['available', 'all-full', 'unknown'].includes(String(body.status))
-            || (body.status === 'available' ? !digest(body.accountGeneration) || body.retryAtMs !== null : body.accountGeneration !== null)
-            || (body.retryAtMs !== null && (!Number.isSafeInteger(body.retryAtMs) || Number(body.retryAtMs) <= Number(body.observedAtMs)))
-            || !/^[A-Za-z0-9+/]{86}==$/.test(envelope.signature)
-            || !verify(null, Buffer.from(JSON.stringify(body)), createPublicKey(pin.publicKey), Buffer.from(envelope.signature, 'base64'))) throw Error('Unverified capacity')
-          const receipt = envelope as unknown as ClaudeCapacityReceipt
-          settled = true
-          if (body.status !== 'available') { release(); resolveResult(body.status === 'all-full' ? { kind: 'waiting', receipt } : unknown()); return }
-          resolveResult({ kind: 'available', receipt, release, current: () => valid && !socket.destroyed && !input.signal.aborted
-            && Date.now() < deadline && Date.now() - receipt.body.observedAtMs <= MAX_AGE_MS })
-        } catch { fail() }
-      })
-    })
-  } catch { return unknown() }
+    if (!validPin(pin) || !verifiedScope(pin, input.relay) || !text(input.leaseId) || !text(input.childId) || !digest(input.eventDigest)) return { kind: 'unknown' }
+    const parent = input.relay.registration.body
+    const correlations: Correlations = { nativeAgentId: input.childId, childId: input.childId,
+      requestDigest: hash(JSON.stringify(input.request)), leaseId: input.leaseId, eventDigest: input.eventDigest }
+    const base = { version: 2, instanceId: pin.instanceId, scopeToken: input.relay.scopeToken, ...correlations }
+    const expected = { version: 2, instanceId: pin.instanceId, hostId: pin.hostId, scopeDigest: parent.scopeDigest,
+      parentSessionId: parent.parentSessionId, parentPid: parent.parentPid, parentStartTicks: parent.parentStartTicks, bootId: parent.bootId, ...correlations }
+    for (const [kind, reply] of [['claude-native-bind-child', 'claude-native-child-bound'], ['claude-native-observe', 'claude-native-observation']] as const) {
+      const challenge = randomBytes(24).toString('base64url'), started = Date.now()
+      const envelope = await exchange(pin, { ...base, kind, challenge }, input.signal, input.deadline) as ClaudeCapacityReceipt
+      const body = envelope.body, match = { ...expected, kind: reply, challenge }
+      if (!exactKeys(body, [...Object.keys(match), ...(kind === 'claude-native-observe' ? ['observations', 'capacity'] : [])])
+        || Object.entries(match).some(([key, value]) => (body as unknown as Record<string, unknown>)[key] !== value)
+        || !nativeRelayScopeCurrent(input.relay)) return { kind: 'unknown' }
+      if (kind !== 'claude-native-observe') continue
+      if (!Array.isArray(body.observations) || !body.observations.length || !object(body.capacity)) return { kind: 'unknown' }
+      for (const row of body.observations) {
+        if (!object(row) || !exactKeys(row, ['scopeDigest', 'sessionId', 'nativeAgentId', 'parentAgentId', 'modelId', 'bodyDigest', 'status', 'accountGeneration', 'observedAtMs', 'retryAtMs'])
+          || row.scopeDigest !== parent.scopeDigest || row.sessionId !== parent.parentSessionId || row.nativeAgentId !== input.childId
+          || row.parentAgentId !== null || !/^claude-[a-z0-9][a-z0-9.-]{1,119}$/.test(row.modelId) || !digest(row.bodyDigest)
+          || !['available', 'all-full', 'unknown'].includes(row.status) || !Number.isSafeInteger(row.observedAtMs) || row.observedAtMs > Date.now()
+          || row.accountGeneration !== null && !digest(row.accountGeneration)
+          || row.retryAtMs !== null && (!Number.isSafeInteger(row.retryAtMs) || row.retryAtMs <= row.observedAtMs)) return { kind: 'unknown' }
+      }
+      const latest = body.observations.at(-1)!, capacity = body.capacity
+      if (latest.status !== 'all-full' || !exactKeys(capacity, ['status', 'modelId', 'accountGeneration', 'observedAtMs', 'retryAtMs'])
+        || capacity.modelId !== latest.modelId || !Number.isSafeInteger(capacity.observedAtMs) || capacity.observedAtMs < started
+        || capacity.observedAtMs > Date.now() || Date.now() - capacity.observedAtMs > MAX_AGE_MS
+        || !['available', 'all-full', 'unknown'].includes(capacity.status)
+        || (capacity.status === 'available' ? !digest(capacity.accountGeneration) || capacity.retryAtMs !== null : capacity.accountGeneration !== null)
+        || capacity.retryAtMs !== null && (!Number.isSafeInteger(capacity.retryAtMs) || capacity.retryAtMs <= capacity.observedAtMs)) return { kind: 'unknown' }
+      if (capacity.status !== 'available') return capacity.status === 'all-full' ? { kind: 'waiting', receipt: envelope } : { kind: 'unknown' }
+      let released = false
+      return { kind: 'available', receipt: envelope, release() { released = true }, current: () => !released && !input.signal.aborted
+        && Date.now() < input.deadline && Date.now() - capacity.observedAtMs <= MAX_AGE_MS && nativeRelayScopeCurrent(input.relay) }
+    }
+  } catch { /* Registered route failures preserve unknown. */ }
+  return { kind: 'unknown' }
 }
-
 export const acquireClaudeCapacity: AcquireClaudeCapacity = async input => {
-  const pin = loadClaudeCapacityPin()
-  return pin ? connectClaudeCapacity(pin, input) : unknown()
+  try { const pin = loadClaudeCapacityPin(); return pin ? await connectClaudeCapacity(pin, input) : { kind: 'unknown' } }
+  catch { return { kind: 'unknown' } }
 }

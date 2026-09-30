@@ -59,9 +59,11 @@ tripwires against a private sibling repository's root docs entering this tree:
 
 **No feature flags and no dual code paths — unless a Decisions Log entry records a
 deliberate alternative.** A new path replaces the old one and the old one is
-deleted. The exception is narrow and has exactly one instance today: the REPL
-substrate (Decisions Log 2026-09-12), where herdr is the default container and the
-in-process PTY host is RETAINED as a selectable backend. The rule is scoped rather
+deleted. The recorded alternatives are the REPL substrate (Decisions Log
+2026-09-12), where herdr is the default container and the in-process PTY host is
+retained as a selectable backend, and Claude authentication deployment (Decisions
+Log 2026-09-30), where a provisioned native host relay is mandatory while an
+unregistered self-host keeps native authentication. The rule is scoped rather
 than dropped because a standing absolute the tree contradicts teaches the next
 reader to ignore it — and the exception costs something real: two supported
 backends means the shared interface must stay honest about both, which is a sweep,

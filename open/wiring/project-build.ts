@@ -717,10 +717,18 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
           nativeWorkspaces.set(request.step_id, workspace)
         } catch { return { kind: 'unknown' as const, detail: 'Native continuation workspace identity is unavailable.' } }
       }
+      let waitingChildBound = false
       const observed = await continueClaudeNativeChild({ request, receipt, authority, stateDir: state, session, workspace,
-        ...(!session.authFingerprint ? { capacity: { configDir: options.claudeConfigDir ?? mergeEnv(options.env).CLAUDE_CONFIG_DIR
-          ?? join(mergeEnv(options.env).HOME ?? '', '.claude'), env: mergeEnv(options.env),
-          ...(context.acquireClaudeCapacity ? { acquire: context.acquireClaudeCapacity } : {}) } } : {}),
+        ...(context.acquireClaudeCapacity ? { capacity: { acquire: context.acquireClaudeCapacity } } : {}),
+        onQuotaState: async state => {
+          if (state.kind === 'waiting' && !waitingChildBound) {
+            await context.store.recordStageEvent(run.id, 'claude-native-child-bound', JSON.stringify({ stepId: request.step_id, childId: state.childId }))
+            waitingChildBound = true
+          }
+          await context.store.recordStageEvent(run.id,
+          `claude-quota-${state.kind === 'waiting' ? 'waiting' : state.kind === 'resumed' ? 'resumed' : 'wait-ended'}`,
+          JSON.stringify({ stepId: request.step_id, childId: state.childId,
+            ...(state.kind === 'waiting' ? { retryAtMs: state.retryAtMs } : {}) })) },
         projectsDir: resolveTranscriptProjectsDir(options), deadline, signal: stopped,
         decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, trailer) })
       if (observed.kind === 'result') return observed.outcome
