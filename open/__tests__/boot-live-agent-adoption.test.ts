@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
-import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
 import { getPersistentReplModel, switchPersistentReplModel } from '@neutronai/runtime/adapters/claude-code/persistent/model-control.ts'
 import { writeInstanceModelProvider } from '@neutronai/gateway/storage/owner-metadata.ts'
@@ -90,8 +90,11 @@ test('production operator cap rearm resolves canonical scope without supervision
   mkdirSync(paths.stateDir, { recursive: true })
   const key = poolKeyFor({ substrate_instance_id: 'cc-agent-owner', cwd: home!, user_id: 'owner',
     project_id: PROJECT, credential_identity: 'anthropic:ANTHROPIC_API_KEY' })
-  const row: ReplRegistryRecord = { ...registryRow(key, 'pane:gone', GENERATION, 1),
-    conversationProjectId: PROJECT, model: 'claude-test', capped_at: 100, first_ready_at: 100000 }
+  const originalRow = registryRow(key, 'pane:gone', GENERATION, 1)
+  const row: ReplRegistryRecord = { ...originalRow,
+    conversationProjectId: PROJECT, model: 'claude-test', capped_at: 100, first_ready_at: 100000,
+    reuse: { ...originalRow.reuse!,
+      tool_surface: PROJECT_REPL_TOOL_DEFS.map(tool => tool.name).join(',') } }
   delete row.pane_handle; delete row.pid
   writeFileSync(paths.replRegistryPath, JSON.stringify({ [key]: row }))
   const bearer = 'synthetic-operator-cap-bearer-0123456789'
