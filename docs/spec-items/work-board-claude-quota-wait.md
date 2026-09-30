@@ -21,9 +21,12 @@ dispatch; it matches the current pending step while quota state still matches
 the child's actual `stepId` and `childId`. Missing parent evidence permits only
 an exact direct-step match, never inference from step spelling. Unknown reset
 time remains null.
-Terminal runs, completed checkpoints, subsequent steps and replacement child
-bindings supersede prior waiting. Foreign runs, steps and child identities
-cannot relabel the current card. Queries return at most three selected rows.
+Terminal runs, completed checkpoints and subsequent host steps supersede prior
+waiting. A replacement binding supersedes only the same actual child step;
+resuming a concurrent sibling cannot hide another current child's wait. The
+projection selects one still-waiting current child. Foreign runs, steps and
+child identities cannot relabel the current card. Queries return at most three
+selected rows.
 
 HTTP and push use the same server projection. Web and phone decode the optional
 field and render explicit text. Waiting suppresses the start control while

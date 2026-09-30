@@ -136,27 +136,33 @@ export function deriveQuotaWait(run: TridentRun, events: readonly TridentStageEv
   try {
     const pending = parseBuildModeState(mode.meta, run).checkpoint.pending
     if (!pending) return null
-    const binding = scoped.filter(event => event.stage === 'claude-native-child-bound')
+    const bindings = scoped.filter(event => event.stage === 'claude-native-child-bound')
       .filter(event => {
         const identity = metaOf(event)
         // The authenticated producer retains the enclosing host step for panel
         // children. Their own request step remains the quota event identity.
         return (identity?.parentStepId === undefined ? identity?.stepId : identity.parentStepId) === pending.step_id
-      }).at(-1)
-    if (!binding) return null
-    const identity = metaOf(binding)
-    if (typeof identity?.childId !== 'string' || !identity.childId
-      || typeof identity.stepId !== 'string' || !identity.stepId) return null
-    const state = scoped.filter(event => ['claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended'].includes(event.stage))
-      .filter(event => {
-        const meta = metaOf(event)
-        return event.id > binding.id && meta?.stepId === identity.stepId && meta?.childId === identity.childId
-      }).at(-1)
-    if (!state || state.stage !== 'claude-quota-waiting') return null
-    const retry = metaOf(state)?.retryAtMs
-    const retry_at = typeof retry === 'number' && Number.isSafeInteger(retry) && retry > 0
-      && retry <= 8_640_000_000_000_000 ? new Date(retry).toISOString() : null
-    return { retry_at }
+      }).reverse()
+    const selectedSteps = new Set<string>()
+    for (const binding of bindings) {
+      const identity = metaOf(binding)
+      if (typeof identity?.stepId !== 'string' || !identity.stepId || selectedSteps.has(identity.stepId)) continue
+      // Replacements supersede only their own actual child step. A completed
+      // sibling cannot conceal another child still waiting in this review.
+      selectedSteps.add(identity.stepId)
+      if (typeof identity.childId !== 'string' || !identity.childId) continue
+      const state = scoped.filter(event => ['claude-quota-waiting', 'claude-quota-resumed', 'claude-quota-wait-ended'].includes(event.stage))
+        .filter(event => {
+          const meta = metaOf(event)
+          return event.id > binding.id && meta?.stepId === identity.stepId && meta?.childId === identity.childId
+        }).at(-1)
+      if (!state || state.stage !== 'claude-quota-waiting') continue
+      const retry = metaOf(state)?.retryAtMs
+      const retry_at = typeof retry === 'number' && Number.isSafeInteger(retry) && retry > 0
+        && retry <= 8_640_000_000_000_000 ? new Date(retry).toISOString() : null
+      return { retry_at }
+    }
+    return null
   } catch { return null }
 }
 

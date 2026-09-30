@@ -36,11 +36,24 @@ test('bounded durable query retains a nested synthesis wait through restart and 
   db = ProjectDb.open(join(directory, 'project.db'))
   store = new TridentRunStore(db)
   const allHistory = spyOn(store, 'stageEvents').mockImplementation(() => { throw Error('Projection must not read complete history') })
+  const prepared = spyOn(db, 'prepare')
   const selected = store.quotaWaitEvents(run.id)
+  const bindingQuery = prepared.mock.calls.find(([sql]) => sql.includes('NOT EXISTS'))![0]
+  prepared.mockRestore()
+  const plan = db.raw().query(`EXPLAIN QUERY PLAN ${bindingQuery}`).all(run.id, parentStepId, parentStepId) as { detail: string }[]
+  for (const alias of ['event', 'newer', 'state']) {
+    expect(plan.some(row => row.detail.startsWith(`SEARCH ${alias} USING INDEX code_trident_stage_events_run_idx`))).toBe(true)
+  }
   expect(selected).toHaveLength(3)
   expect(selected.map(event => event.stage)).toEqual(events.map(event => event.stage))
   expect(deriveQuotaWait(store.get(run.id)!, selected)).toEqual({ retry_at: '2027-01-15T08:00:00.000Z' })
   expect(allHistory).not.toHaveBeenCalled()
+  const sibling = JSON.stringify({ parentStepId, stepId: `review-${'c'.repeat(64)}:1:0`, childId: 'sibling' })
+  await store.recordStageEvent(run.id, 'claude-native-child-bound', sibling)
+  await store.recordStageEvent(run.id, 'claude-quota-waiting', sibling)
+  await store.recordStageEvent(run.id, 'claude-quota-resumed', sibling)
+  expect(store.quotaWaitEvents(run.id)).toHaveLength(3)
+  expect(deriveQuotaWait(run, store.quotaWaitEvents(run.id))).toEqual({ retry_at: '2027-01-15T08:00:00.000Z' })
   await store.recordStageEvent(run.id, 'claude-quota-resumed', events[2]!.meta)
   expect(deriveQuotaWait(run, store.quotaWaitEvents(run.id))).toBeNull()
   await store.recordStageEvent(run.id, 'claude-quota-waiting', events[2]!.meta)

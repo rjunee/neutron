@@ -45,6 +45,15 @@ describe('durable quota wait projection', () => {
   const parentStepId = `${current.id}:review:1:head:${'a'.repeat(40)}`
   const stepId = `review-${'b'.repeat(64)}:1:0`
   const nested = quotaWaitEvents(current, T0 + 60_000, { parentStepId, stepId })
+  test('a resumed sibling cannot hide another current child wait; replacing its exact step can', () => {
+    const sibling = { stepId: `review-${'c'.repeat(64)}:1:0`, parentStepId, childId: 'sibling' }
+    const rows = [...nested,
+      { ...nested[1]!, id: 4, meta: JSON.stringify(sibling) },
+      { ...nested[2]!, id: 5, meta: JSON.stringify(sibling) },
+      { ...nested[2]!, id: 6, stage: 'claude-quota-resumed', meta: JSON.stringify(sibling) }]
+    expect(project(rows)).toEqual({ retry_at: '2026-07-02T00:01:00.000Z' })
+    expect(project([...rows, { ...nested[1]!, id: 7, meta: JSON.stringify({ stepId, parentStepId, childId: 'replacement' }) }])).toBeNull()
+  })
   test('an authenticated nested review or synthesis child projects its actual step under the enclosing host step', () => {
     expect(project(nested)).toEqual({ retry_at: '2026-07-02T00:01:00.000Z' })
     expect(project(quotaWaitEvents(current, null, { parentStepId, stepId }))).toEqual({ retry_at: null })
