@@ -71,3 +71,20 @@ test('both-direction semantic mutants cannot satisfy the coverage contract', () 
     expect(satisfies(mutant)).toBe(false)
   }
 })
+
+test('both-direction freshness guard mutants reject the consuming contract', () => {
+  const source = readFileSync(new URL('../build-timeline-import-status.ts', import.meta.url), 'utf8')
+  const marker = 'status.lastSuccessAt > now'
+  expect(source).toContain(marker)
+  const satisfies = (read: typeof importStatusWarnings) =>
+    read(fresh, now).length === 0 &&
+    read({ ...fresh, lastSuccessAt: now + 1 }, now).some(warning => warning.includes('stale or failed')) &&
+    read({ ...fresh, lastSuccessAt: now - 60_001 }, now).some(warning => warning.includes('stale or failed'))
+  expect(satisfies(importStatusWarnings)).toBe(true)
+  for (const replacement of ['false', 'true']) {
+    const changed = source.replace(marker, replacement).replace('export function', 'function')
+    const js = new Bun.Transpiler({ loader: 'ts' }).transformSync(changed)
+    const mutant = new Function(js + '\nreturn importStatusWarnings')() as typeof importStatusWarnings
+    expect(satisfies(mutant)).toBe(false)
+  }
+})

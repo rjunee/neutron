@@ -91,7 +91,8 @@ export function timelineSourceReader(config: { catalogue: string; observations: 
     catch { warnings.push('Direct phase observations unavailable or invalid. Phase coverage is incomplete.') }
     if (config.importStatus) {
       try {
-        warnings.push(...importStatusWarnings(JSON.parse(await readFile(config.importStatus, 'utf8')), now))
+        const status: unknown = JSON.parse(await readFile(config.importStatus, 'utf8'))
+        warnings.push(...importStatusWarnings(status, Date.now()))
       } catch { warnings.push('Direct command importer status unavailable. Recent phase coverage is unverified.') }
     }
     const trident: Array<{ repository: string; snapshot: TimelineSnapshot }> = []
