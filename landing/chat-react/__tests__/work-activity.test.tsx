@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 import { act } from 'react'
-import { createRoot, type Root } from 'react-dom/client'
+import type { Root } from 'react-dom/client'
 
 import type { RunProgress, WorkBoardItem } from '../work-board-client.ts'
 import {
@@ -21,10 +21,15 @@ import {
   type WorkBoardLiveSource,
 } from '../work-activity.tsx'
 
-beforeAll(() => {
+let createRoot: typeof import('react-dom/client')['createRoot']
+
+beforeAll(async () => {
   GlobalRegistrator.register({ url: 'https://sam.neutron.test/chat?client=react' })
   const g = globalThis as unknown as Record<string, unknown>
   g['IS_REACT_ACT_ENVIRONMENT'] = true
+  // React DOM probes input-event support when its module loads. Importing it
+  // before happy-dom exists leaves later component tests with the wrong path.
+  createRoot = (await import('react-dom/client')).createRoot
 })
 afterAll(async () => {
   await GlobalRegistrator.unregister()
