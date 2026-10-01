@@ -10,6 +10,8 @@ Unknown categories remain explicit and HTML-escaped; action-label inference does
 not manufacture missing work. Categories crossing the boundary also appear.
 
 The button wraps on narrow screens and has a 44-pixel minimum target height.
+Its accessible name starts with its exact visible label, including the bounded
+additional-category preview, before listing every recorded later category.
 The shared scale, one-bar geometry, full duration label, complete API evidence,
 Fit all and existing hover/focus/tap/refresh behavior remain intact. The dashboard
 spec now makes visible category discovery an explicit part of overflow acceptance.
@@ -20,6 +22,8 @@ unknown and absent timing, boundary crossings, deduplication and bounded preview
 Consuming popover tests load the actual rendered overflow payload and exercise
 focus, click, refresh and Escape. Semantic mutations selecting first-hour work
 instead of later work and inferring unknown categories from labels are rejected
-by the corresponding tests. Root and Trident TypeScript checks pass.
+by the corresponding tests. Removing the visible-label prefix from the accessible
+name also fails its consuming test; bounded, escaped and unknown category labels
+retain an exact accessible prefix. Root and Trident TypeScript checks pass.
 This record describes the code candidate; served deployment verification remains
 separate from these local checks.

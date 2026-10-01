@@ -174,6 +174,24 @@ test('unknown later categories never acquire action-label inferred phases and ab
   expect(renderTimeline({ ...snapshot, cards: [{ ...card([]), start: null, end: null }] })).not.toContain('class="overflow-button"')
 })
 
+test('overflow accessible name begins with its exact visible bounded label and retains every category', () => {
+  const hour = 3_600_000
+  const decode = (value: string) => value.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+  for (const phases of [['fix', 'review', 'test'], ['fix', 'review', 'test', 'ci', 'deploy'], ['custom<&>', '__proto__']]) {
+    const html = renderTimeline({ observedAt: 2 * hour, cards: [card(phases.map((phase, index) => segment(String(index), hour + index, 2 * hour, phase)), 2 * hour)],
+      prCount: 1, runOnlyCount: 0, maxDurationMs: 2 * hour, viewDurationMs: hour, scaleMode: 'focus', limit: 50, warnings: [] })
+    const button = html.match(/class="overflow-button" aria-label="([^"]+)"[^>]*>([^<]+) <span aria-hidden="true">›<\/span><\/button>/)!
+    const visible = decode(button[2]!)
+    const accessible = decode(button[1]!)
+    expect(accessible.startsWith(`${visible}. `)).toBe(true)
+    if (phases.length > 3) {
+      expect(visible).toBe('Beyond 1h: Fix · Review · Test · +2 categories')
+      expect(accessible).toContain('Recorded later phases: Fix, Review, Test, CI, Deploy.')
+    }
+    if (phases[0] === 'custom<&>') expect(visible).toBe('Beyond 1h: custom<&> · __proto__')
+  }
+})
+
 test('a filter refresh requested during a fetch is replayed with the latest query', async () => {
   const elements = new Map<string, Record<string, unknown>>()
   const requests: string[] = []
