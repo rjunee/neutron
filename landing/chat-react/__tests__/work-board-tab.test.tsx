@@ -15,6 +15,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
+import { readFileSync } from 'node:fs'
 
 import type { RunProgress, WorkBoardItem } from '../work-board-client.ts'
 
@@ -154,6 +155,41 @@ function listOf(rows: WorkBoardItem[]): Handler {
 }
 
 describe('WorkBoardTab (happy-dom)', () => {
+  it('styles shelved titles as muted parked work while completed titles remain struck through', async () => {
+    const style = document.createElement('style')
+    const html = readFileSync(new URL('../../chat-react.html', import.meta.url), 'utf8')
+    style.textContent = html.match(/<style[^>]*>([\s\S]*?)<\/style>/)![1]!
+    document.head.appendChild(style)
+    const { container, root, act } = await mount(listOf([
+      item({ id: 'parked', title: 'Parked title', status: 'archived' }),
+      item({ id: 'shipped', title: 'Shipped title', status: 'done', completed_at: '2026-09-30' }),
+    ]))
+    try {
+      expect(container.querySelector('[aria-label="Shelved"].cwb-ul')).toBeNull()
+      expect(container.querySelector('[aria-label="Done"].cwb-ul')).toBeNull()
+      for (const label of ['Shelved ·', 'Done ·']) {
+        const toggle = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes(label))!
+        await act(async () => toggle.click())
+      }
+      const parked = container.querySelector('[aria-label="Shelved"].cwb-ul .cwb-row')!
+      const shipped = container.querySelector('[aria-label="Done"].cwb-ul .cwb-row')!
+      expect(parked.classList.contains('cwb-row-archived')).toBe(true)
+      expect(parked.classList.contains('cwb-row-done')).toBe(false)
+      expect(shipped.classList.contains('cwb-row-done')).toBe(true)
+      expect(shipped.classList.contains('cwb-row-archived')).toBe(false)
+      // Resolve the actual served stylesheet against a known muted color.
+      container.style.setProperty('--muted', '#777777')
+      const parkedStyle = getComputedStyle(parked.querySelector('.cwb-title')!)
+      expect(parkedStyle.color).toBe('#777777')
+      expect(parkedStyle.textDecoration).toBe('none')
+      expect(getComputedStyle(shipped.querySelector('.cwb-title')!).textDecoration).toBe('line-through')
+      expect(parked.querySelector('[aria-label="Delete item"]')).not.toBeNull()
+      expect(parked.querySelector('[aria-label="Shelved"].cwb-dot-upcoming')).not.toBeNull()
+    } finally {
+      await act(async () => root.unmount())
+      style.remove()
+    }
+  })
   it('renders quota waiting from HTTP and removes it when a resumed push arrives', async () => {
     const live = fakeLive()
     const waiting = item({ status: 'in_progress', linked_run_id: 'current', run_progress: {
@@ -225,6 +261,7 @@ describe('WorkBoardTab (happy-dom)', () => {
     const { container, root, act } = await mount(listOf([item({ status: 'archived', attempts: [
       { run_id: 'failed-run', outcome: 'failed', pr: 12, pr_url: 'https://example.test/pull/12', recorded_at: '2026-09-20' },
       { run_id: 'blocked-run', outcome: 'blocked', pr: 13, pr_url: null, recorded_at: '2026-09-21' },
+      { run_id: 'pr-less-run', outcome: 'done', pr: null, pr_url: null, recorded_at: '2026-09-22' },
     ] }), item({ id: 'legacy', status: 'archived' })]))
     const shelf = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Shelved ·'))!
     expect(shelf.getAttribute('aria-expanded')).toBe('false')
@@ -235,6 +272,11 @@ describe('WorkBoardTab (happy-dom)', () => {
     expect(container.querySelector('a[href="https://example.test/pull/12"]')?.textContent).toContain('PR #12')
     expect(container.textContent).toContain('PR #13')
     expect(Array.from(container.querySelectorAll('a')).some(a => a.textContent?.includes('#13'))).toBe(false)
+    const prLess = Array.from(container.querySelectorAll('.cwb-row-meta')).find(meta => meta.textContent?.includes('pr-less-run'))!
+    expect(prLess.textContent).toContain('Past attempt · done · pr-less-run')
+    expect(prLess.textContent).not.toContain('PR #')
+    expect(prLess.querySelector('a')).toBeNull()
+    expect(container.querySelectorAll('[aria-label="Delete item"]')).toHaveLength(2)
     await act(async () => root.unmount())
   })
 

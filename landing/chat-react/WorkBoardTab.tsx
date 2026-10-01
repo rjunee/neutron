@@ -978,7 +978,7 @@ export function WorkBoardTab({
                 {archivedOpen ? (
                   <ul className="cwb-ul cwb-completed-ul" aria-label="Shelved">
                     {archived.map((it) => (
-                      <li key={it.id} className="cwb-row cwb-row-done">
+                      <li key={it.id} className="cwb-row cwb-row-archived">
                         <div className="cwb-row-line1">
                           <span className="cwb-dot cwb-dot-upcoming" aria-label="Shelved" />
                           {onOpenDoc !== undefined &&
