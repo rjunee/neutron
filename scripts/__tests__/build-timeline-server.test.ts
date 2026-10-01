@@ -124,6 +124,27 @@ test('open PRs precede newer merged PRs before paging; focus and fit-all share h
   expect(all.cards).toEqual(focused.cards)
 })
 
+test('default authenticated focus makes late recorded work visible while API and fit-all preserve evidence', async () => {
+  const hour = 3_600_000
+  const raw = combineTimelineSources({ observedAt: 87 * hour, repositories: [{ repository: 'example/open', error: null,
+    prs: [{ number: 1, title: 'Late work', url: 'https://github.com/example/open/pull/1', createdAt: new Date(0).toISOString(),
+      closedAt: null, mergedAt: null, state: 'open' }] }] }, [], [], 87 * hour)
+  raw.cards[0]!.segments = ['ci', 'fix', 'review', 'test'].map((phase, index) => ({ id: phase, runId: '', phase, label: phase,
+    start: index ? 86 * hour : 0, end: index ? 87 * hour : 60_000, lane: 0, timing: 'recorded', model: null, detail: 'fixture',
+    usage: { tokens: null, input: null, output: null, cacheRead: null, cacheCreation: null, costUsd: null, source: null, observedAt: null, coverage: 'unknown' } }))
+  const handler = createTimelineHandler({ username: 'viewer', password: 'test-secret', read: () => raw })
+  const get = async (path: string) => handler(new Request(`http://localhost${path}`, { headers: { authorization: auth } }))
+  const html = await (await get('/timeline')).text()
+  const summary = html.slice(html.indexOf('<summary class="row-summary">'), html.indexOf('</summary>', html.indexOf('<summary class="row-summary">')))
+  expect(summary).toContain('>Beyond 1h: Fix · Review · Test ')
+  expect(summary).toContain('width:100.00000%')
+  expect(html).toContain('0–1h focus window')
+  expect(await (await get('/api/timeline')).json()).toEqual(raw)
+  expect(await (await get('/timeline?scale=all')).text()).not.toContain('class="overflow-button"')
+  raw.cards[0]!.segments = raw.cards[0]!.segments.filter(segment => segment.phase === 'ci')
+  expect(await (await get('/timeline')).text()).not.toContain('class="overflow-button"')
+})
+
 test('file sources reach authenticated HTML/JSON and import failures preserve catalogue visibility', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'timeline-source-'))
   const catalogue = join(dir, 'catalogue.json'), observations = join(dir, 'observations.jsonl'), importStatus = join(dir, 'import.json')

@@ -1,8 +1,10 @@
 import { expect, test } from 'bun:test'
 import { createContext, runInContext } from 'node:vm'
 import { PHASE_POPOVER_SCRIPT } from './build-timeline-popover.ts'
+import { renderTimeline } from './build-timeline-html.ts'
+import { timelineUsage, type TimelineCard } from './build-timeline.ts'
 
-function fixture(completedAt: number | null = new Date(2026, 8, 27, 0, 1).getTime()) {
+function fixture(completedAt: number | null = new Date(2026, 8, 27, 0, 1).getTime(), rendered?: { key: string; info: string }) {
   const handlers = new Map<string, Array<(event: any) => void>>()
   const timers = new Map<number, () => void>()
   let timerId = 0
@@ -49,7 +51,7 @@ function fixture(completedAt: number | null = new Date(2026, 8, 27, 0, 1).getTim
   const outside = new Node(), popover = new Node()
   const makeTrigger = () => {
     const trigger = new Node()
-    trigger.dataset = { phaseKey: 'example:phase', phaseInfo: JSON.stringify({
+    trigger.dataset = { phaseKey: rendered?.key ?? 'example:phase', phaseInfo: rendered?.info ?? JSON.stringify({
       title: 'Build', duration: '5m', actions: [{ label: 'Build', duration: '5m', tokens: '100 tokens', model: 'Example model',
         startedAt: new Date(2026, 8, 26, 23, 59).getTime(), completedAt }],
     }) }
@@ -79,6 +81,32 @@ function fixture(completedAt: number | null = new Date(2026, 8, 27, 0, 1).getTim
     },
   }
 }
+
+test('visible later-category trigger consumes renderer evidence on focus, tap and refresh', () => {
+  const hour = 3_600_000
+  const usage = timelineUsage({ input_tokens: null, output_tokens: null, cache_read_tokens: null,
+    cache_creation_tokens: null, cost_usd: null, source: null, observed_at: null })
+  const card: TimelineCard = { key: 'example/open#1', repository: 'example/open', pr: 1, title: 'Later work',
+    url: null, lifecycle: 'PR open', start: 0, end: 87 * hour, latestStart: 86 * hour, active: false,
+    runs: [], lanes: 1, gaps: [], events: [], phaseTotals: [], warnings: [], segments: ['ci', 'fix', 'review', 'test'].map((phase, index) => ({
+      id: phase, phase, label: phase, start: index ? 86 * hour : 0, end: index ? 87 * hour : 60_000,
+      lane: 0, runId: '', timing: 'recorded', usage, model: null, detail: 'recorded fixture' })) }
+  const html = renderTimeline({ observedAt: card.end!, cards: [card], prCount: 1, runOnlyCount: 0,
+    maxDurationMs: card.end!, viewDurationMs: hour, scaleMode: 'focus', limit: 50, warnings: [] })
+  const trigger = html.match(/class="overflow-button"[^>]*data-phase-key="([^"]+)" data-phase-info="([^"]+)"/)!
+  const decode = (value: string) => value.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+  const f = fixture(null, { key: decode(trigger[1]!), info: decode(trigger[2]!) })
+  f.trigger.focus()
+  expect(f.popover.hidden).toBe(false)
+  expect(f.popover.children.filter(node => node.className === 'popover-action').map(node => node.children[0]!.textContent))
+    .toEqual(['fix', 'review', 'test'])
+  f.click(f.trigger)
+  expect(f.state()).not.toBeNull()
+  f.refresh()
+  expect(f.popover.hidden).toBe(false)
+  f.dispatch('keydown', f.trigger, { key: 'Escape' })
+  expect(f.popover.hidden).toBe(true)
+})
 
 test('popover shows local 12-hour start and completion clocks across midnight, or unknown completion', () => {
   const complete = fixture(); complete.trigger.focus()
