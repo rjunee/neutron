@@ -129,11 +129,67 @@ test('focus clips only the viewport and makes every later phase available throug
   expect(html).toContain('width:100.00000%')
   expect(html).toContain('class="overflow-button"')
   expect(html).toContain('Beyond the focus window')
+  expect(html).toContain('>Beyond 1h: Review <span aria-hidden="true">›</span></button>')
   expect(html).toContain('&quot;label&quot;:&quot;review&quot;')
   expect(html).toContain('No live signal')
   expect(html).not.toContain('CI running')
   expect(html).toContain('aria-haspopup="dialog"')
   expect(renderTimeline({ ...snapshot, viewDurationMs: 7_260_000, scaleMode: 'all' })).not.toContain('class="overflow-button"')
+})
+
+test('collapsed focus rows visibly name later explicit categories in start order without inferring work', () => {
+  const hour = 3_600_000
+  const render = (segments: TimelineSegment[], end = 87 * hour) => renderTimeline({ observedAt: end,
+    cards: [card(segments, end)], prCount: 1, runOnlyCount: 0, maxDurationMs: end,
+    viewDurationMs: hour, scaleMode: 'focus', limit: 50, warnings: [] })
+  const visibleOverflow = (html: string) => html.match(/class="overflow-button"[^>]*>(.*?)<\/button>/s)?.[1]
+  const late = [segment('ci', 0, 60_000, 'ci'), segment('test', 86 * hour + 1000, 87 * hour, 'test'),
+    segment('fix', 86 * hour, 87 * hour, 'fix'), segment('review', 86 * hour + 500, 87 * hour, 'review'),
+    segment('repeat', 86 * hour + 2000, 87 * hour, 'review')]
+  const html = render(late)
+  expect(visibleOverflow(html)).toBe('Beyond 1h: Fix · Review · Test <span aria-hidden="true">›</span>')
+  expect(html.indexOf('class="overflow-button"')).toBeLessThan(html.indexOf('class="bar-track"'))
+  expect(html.match(/class="bar"/g)).toHaveLength(1)
+  expect(html).toContain('width:100.00000%')
+  expect(html).toContain('Tokens unknown')
+  expect(visibleOverflow(render([segment('ci', 0, 2 * hour, 'ci')], 2 * hour))).toContain('Beyond 1h: CI ')
+  expect(visibleOverflow(render([{ ...segment('unknown', hour, 2 * hour, 'custom<&>'), label: 'Build fix review test' }], 2 * hour)))
+    .toContain('Beyond 1h: custom&lt;&amp;&gt; ')
+  expect(visibleOverflow(render([]))).toContain('Beyond 1h: View timeline ')
+  expect(visibleOverflow(render([segment('boundary', 0, hour, 'build'), segment('crossing', hour - 1, hour + 1, 'review')], hour + 1)))
+    .toContain('Beyond 1h: Review ')
+  expect(render([segment('boundary', 0, hour, 'build')], hour)).not.toContain('class="overflow-button"')
+  expect(visibleOverflow(render(late.concat([segment('extra', 86 * hour + 3000, 87 * hour, 'ci')]))))
+    .toContain('Fix · Review · Test · +1 categories')
+  expect(render(late.concat([segment('extra', 86 * hour + 3000, 87 * hour, 'ci')]))).toContain('Fix, Review, Test, CI. Show phase details')
+})
+
+test('unknown later categories never acquire action-label inferred phases and absent timing has no overflow', () => {
+  const hour = 3_600_000
+  const snapshot = { observedAt: 2 * hour, cards: [card([{ ...segment('unknown', hour, 2 * hour, 'custom'), label: 'Build fix review test' }], 2 * hour)],
+    prCount: 1, runOnlyCount: 0, maxDurationMs: 2 * hour, viewDurationMs: hour, scaleMode: 'focus' as const, limit: 50, warnings: [] }
+  expect(renderTimeline(snapshot)).toContain('>Beyond 1h: custom <span')
+  expect(renderTimeline({ ...snapshot, cards: [card([segment('unknown', hour, 2 * hour, '__proto__')], 2 * hour)] }))
+    .toContain('>Beyond 1h: __proto__ <span')
+  expect(renderTimeline({ ...snapshot, cards: [{ ...card([]), start: null, end: null }] })).not.toContain('class="overflow-button"')
+})
+
+test('overflow accessible name begins with its exact visible bounded label and retains every category', () => {
+  const hour = 3_600_000
+  const decode = (value: string) => value.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
+  for (const phases of [['fix', 'review', 'test'], ['fix', 'review', 'test', 'ci', 'deploy'], ['custom<&>', '__proto__']]) {
+    const html = renderTimeline({ observedAt: 2 * hour, cards: [card(phases.map((phase, index) => segment(String(index), hour + index, 2 * hour, phase)), 2 * hour)],
+      prCount: 1, runOnlyCount: 0, maxDurationMs: 2 * hour, viewDurationMs: hour, scaleMode: 'focus', limit: 50, warnings: [] })
+    const button = html.match(/class="overflow-button" aria-label="([^"]+)"[^>]*>([^<]+) <span aria-hidden="true">›<\/span><\/button>/)!
+    const visible = decode(button[2]!)
+    const accessible = decode(button[1]!)
+    expect(accessible.startsWith(`${visible}. `)).toBe(true)
+    if (phases.length > 3) {
+      expect(visible).toBe('Beyond 1h: Fix · Review · Test · +2 categories')
+      expect(accessible).toContain('Recorded later phases: Fix, Review, Test, CI, Deploy.')
+    }
+    if (phases[0] === 'custom<&>') expect(visible).toBe('Beyond 1h: custom<&> · __proto__')
+  }
 })
 
 test('a filter refresh requested during a fetch is replayed with the latest query', async () => {

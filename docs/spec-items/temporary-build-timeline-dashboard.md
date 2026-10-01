@@ -42,7 +42,10 @@ worker liveness. Legacy stage pairs require unambiguous observed endpoints.
 
 The default chart is a shared linear 0–1 hour focus window, never a per-row
 normalization. Longer rows retain their full duration label and show an overflow
-control exposing all later phases. Fit all restores the complete shared range.
+control exposing all later phases. Its visible label names recorded categories
+beyond the window, in first-start order, without inferring missing phases from
+action labels. A bounded category preview may summarize additional categories;
+the control still exposes every later action. Fit all restores the complete shared range.
 A phase crossing the boundary reports its full action duration with an explicit
 crossing note; overlapping action durations are never added together.
 
@@ -77,6 +80,9 @@ spans carry unknown tokens unless a provider actually attributed usage.
 - [ ] Widths represent timestamp differences on a shared linear scale, with a
       labeled 1h focus window, explicit overflow and Fit all. Every clipped phase
       remains reachable through overflow or the full-size phase explorer control.
+      A collapsed row visibly names later recorded categories without hover or
+      expansion; the overflow label wraps on phones and opens the same complete
+      phase evidence. Unknown categories remain explicit, never invented build work.
       Concurrent review, suites and CI overlap inside one fixed-height bar.
       Repeated host stage names pair by their recorded start identity. Ambiguous
       pairs remain unknown. Phase labels, wall time, models and coverage are readable
