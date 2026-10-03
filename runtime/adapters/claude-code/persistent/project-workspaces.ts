@@ -1,7 +1,7 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { closeSync, constants, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync, lstatSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { HerdrError, type HerdrRpc } from './herdr-client.ts'
+import { HerdrError, verifyHerdrProtocol, type HerdrRpc } from './herdr-client.ts'
 import { HERDR_PROTOCOL_VERSION, type HerdrLayoutApply, type HerdrLayoutPaneNode, type HerdrProjectLayoutParams } from './herdr-protocol.ts'
 import { withFlockSync } from './registry-lock.ts'
 
@@ -53,6 +53,8 @@ interface WorkspaceRecord {
 const TOKEN = 'neutron_project_owner'
 const SOURCE = 'neutron-project-workspaces'
 const PLACEHOLDER = 'console.log("Chat is asleep. Open this project in Neutron to resume."); setInterval(() => {}, 3600000)'
+const PANE_CLOSE_WAIT_MS = 3_000
+const PANE_CLOSE_POLL_MS = 25
 
 function nonempty(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '' && !/[\x00-\x1f\x7f]/.test(value)
@@ -140,6 +142,12 @@ class WorkspaceJournal {
  */
 export class ProjectWorkspaceRefusal extends Error {
   override readonly name = 'ProjectWorkspaceRefusal'
+}
+
+/** The close may have crossed a server restart or lost its observation channel.
+ * The newly created pane cannot be safely cleaned up through that client. */
+class PendingPaneCloseUncertain extends Error {
+  override readonly name = 'PendingPaneCloseUncertain'
 }
 
 /** Library boundary only: composition supplies the real scope; lifecycle code will
@@ -263,7 +271,7 @@ export class ProjectWorkspaceManager {
           tab: placeholder.layout.tab_id, pane: placeholder.layout.root.pane_id, placeholderArgv: argv,
         } })
         if (initialPane) {
-          await client.call('pane.close', { pane_id: initialPane })
+          await this.closeOwnedPane(client, initialPane, record)
           initialPane = undefined
         }
       }
@@ -332,9 +340,9 @@ export class ProjectWorkspaceManager {
         // Creation and ordering yield to the server. Their success is not proof
         // the former placeholder still has the identity sampled before them.
         await this.verifyPlaceholderRetirement(client, record)
-        await client.call('pane.close', { pane_id: replacedPlaceholder })
+        await this.closeOwnedPane(client, replacedPlaceholder, record, record.chat!.tab)
       }
-      if (initialPane) await client.call('pane.close', { pane_id: initialPane })
+      if (initialPane) await this.closeOwnedPane(client, initialPane, record)
       this.reserve(key, record, {
         ...record, state: 'ready',
         ...(placement.role === 'chat' ? { chat: { tab: applied.layout.tab_id, pane: applied.layout.root.pane_id } } : {}),
@@ -343,6 +351,7 @@ export class ProjectWorkspaceManager {
       // The host has not received this pane yet and cannot discharge its normal
       // failed-spawn cleanup. Close only the pane this operation just created.
       // A failed close leaves the journal pending: no claim of retirement.
+      if (error instanceof PendingPaneCloseUncertain) throw error
       try { await client.call('pane.close', { pane_id: applied.layout.root.pane_id }) } catch { /* remains pending */ }
       throw error
     }
@@ -518,6 +527,44 @@ export class ProjectWorkspaceManager {
     if (info.pane_id !== record.chat.pane || !Array.isArray(info.foreground_processes) || info.foreground_processes.length !== 1
       || JSON.stringify(object(info.foreground_processes[0]).argv) !== JSON.stringify(record.chat.placeholderArgv)) {
       throw new Error('project-workspaces: Chat placeholder identity is not verified')
+    }
+  }
+
+  /** Herdr may answer pane.close while its child is still exiting. Only the exact
+   * typed pending result permits a bounded read-only wait; neither another close
+   * attempt nor a transport failure proves the pane was retired. */
+  private async closeOwnedPane(client: HerdrRpc, paneId: string, record: WorkspaceRecord, tabId?: string): Promise<void> {
+    try {
+      await client.call('pane.close', { pane_id: paneId })
+      return
+    } catch (error) {
+      if (!(error instanceof HerdrError) || error.code !== 'terminal_exit_pending') throw error
+    }
+    try {
+      const deadline = Date.now() + PANE_CLOSE_WAIT_MS
+      while (true) {
+        try {
+          const pane = object(object(await client.call('pane.get', { pane_id: paneId })).pane)
+          if (pane.pane_id !== paneId || pane.workspace_id !== record.workspace
+            || tabId !== undefined && pane.tab_id !== tabId) {
+            throw new Error('project-workspaces: closing pane placement changed')
+          }
+        } catch (error) {
+          if (!(error instanceof HerdrError) || error.code !== 'pane_not_found') throw error
+          // A new server can also say this handle is absent. Corroborate the
+          // recorded workspace on the same RPC client before publishing readiness.
+          await verifyHerdrProtocol(client)
+          const found = object(object(await client.call('workspace.get', { workspace_id: record.workspace! })).workspace)
+          if (found.workspace_id !== record.workspace || object(found.tokens)[TOKEN] !== record.token) {
+            throw new Error('project-workspaces: live workspace ownership mismatch')
+          }
+          return
+        }
+        if (Date.now() >= deadline) throw new Error('project-workspaces: terminal closure still pending')
+        await new Promise<void>(resolve => setTimeout(resolve, Math.min(PANE_CLOSE_POLL_MS, deadline - Date.now())))
+      }
+    } catch (error) {
+      throw new PendingPaneCloseUncertain(error instanceof Error ? error.message : String(error))
     }
   }
 
