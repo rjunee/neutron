@@ -44,9 +44,12 @@ describe('atomicWriteFileSync — round-trip durability', () => {
   test('honors a custom mode', () => {
     const dir = freshDir()
     const path = join(dir, 'settings.json')
-    atomicWriteFileSync(path, 'x', { mode: 0o644 })
-    // Low 9 perm bits.
-    expect(statSync(path).mode & 0o777).toBe(0o644)
+    const previousUmask = process.umask(0o022)
+    try {
+      atomicWriteFileSync(path, 'x', { mode: 0o644 })
+      // Observe the API's output under the fixture's declared creation policy.
+      expect(statSync(path).mode & 0o777).toBe(0o644)
+    } finally { process.umask(previousUmask) }
   })
 
   test('defaults to owner-only 0o600', () => {

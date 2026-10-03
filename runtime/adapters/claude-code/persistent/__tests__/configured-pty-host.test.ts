@@ -3,6 +3,9 @@ import { selectPtyHost, configuredPtyHost } from '../configured-pty-host.ts'
 import { herdrHost, HerdrHost } from '../herdr-host.ts'
 import { bunTerminalHost } from '../bun-terminal-host.ts'
 import { FakeHerdrServer } from './herdr-fake-server.ts'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 it('selects exactly the requested host and defaults to herdr', () => {
   expect(selectPtyHost(undefined)).toBe(herdrHost)
@@ -97,14 +100,27 @@ for (const cause of ['closed-by-us', 'pane-vanished'] as const) {
 
 for (const value of ['herdr', 'bun']) {
   it(`production spawn uses ${value} for a complete turn`, async () => {
-    const proc = Bun.spawn([process.execPath, 'test',
-      'runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts',
-      '--test-name-pattern', 'configured production host carries'], {
-      env: { ...process.env, NEUTRON_REPL_HOST: value }, stdout: 'pipe', stderr: 'pipe',
-    })
-    const [stdout, stderr, code] = await Promise.all([
-      new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
-    ])
-    expect({ code, output: code === 0 ? '' : stdout + stderr }).toEqual({ code: 0, output: '' })
+    const dir = mkdtempSync(join(tmpdir(), 'configured-host-unregistered-'))
+    const preload = join(dir, 'unregistered.ts')
+    const capacityModule = new URL('../../../../workers/claude-capacity-client.ts', import.meta.url).pathname
+    // The child tests a fake PTY's complete turn, so explicitly select an
+    // UNREGISTERED self-host in that fresh process without touching host pins.
+    writeFileSync(preload, `import { afterAll, spyOn } from 'bun:test';
+      import * as capacity from ${JSON.stringify(capacityModule)};
+      const pin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined);
+      const route = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined);
+      afterAll(() => { pin.mockRestore(); route.mockRestore(); });
+    `)
+    try {
+      const proc = Bun.spawn([process.execPath, 'test', '--preload', preload,
+        'runtime/adapters/claude-code/persistent/__tests__/persistent-repl-substrate.test.ts',
+        '--test-name-pattern', 'configured production host carries'], {
+        env: { ...process.env, NEUTRON_REPL_HOST: value }, stdout: 'pipe', stderr: 'pipe',
+      })
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited,
+      ])
+      expect({ code, output: code === 0 ? '' : stdout + stderr }).toEqual({ code: 0, output: '' })
+    } finally { rmSync(dir, { recursive: true, force: true }) }
   }, 15000)
 }

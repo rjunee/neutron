@@ -1,9 +1,19 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import { generateKeyPairSync } from 'node:crypto'
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { authFingerprintFor } from '../repl-session.ts'
 import { deriveChildSinkToken } from '../sink-coordinates.ts'
+import * as capacity from '../../../../workers/claude-capacity-client.ts'
+
+const routeFingerprint = capacity.nativeRelayRouteFingerprint
+let routeLookup: ReturnType<typeof spyOn<typeof capacity, 'nativeRelayRouteFingerprint'>>
+beforeEach(() => {
+  // These credential fixtures model an UNREGISTERED self-host, regardless of
+  // whether the machine running the suite has a protected relay registration.
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
 
 const homes: string[] = []
 function tokenPath(): string {
@@ -13,6 +23,7 @@ function tokenPath(): string {
 }
 
 afterEach(() => {
+  routeLookup.mockRestore()
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true })
 })
 
@@ -28,10 +39,16 @@ test('unchanged credentials reproduce a full versioned tag from a persisted prot
 
   // A separate process has no fingerprint or key cache from the first call.
   const helper = new URL('../repl-session.ts', import.meta.url).pathname
+  const capacityHelper = new URL('../../../../workers/claude-capacity-client.ts', import.meta.url).pathname
   const restarted = Bun.spawnSync([process.execPath, '-e',
-    `const { authFingerprintFor } = await import(process.argv[1]);
-     process.stdout.write(authFingerprintFor({ ANTHROPIC_API_KEY: 'synthetic-auth-token' }, process.argv[2]));`,
-    helper, path,
+    `const { spyOn } = await import('bun:test');
+     const capacity = await import(process.argv[3]);
+     const routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined);
+     const { authFingerprintFor } = await import(process.argv[1]);
+     try {
+       process.stdout.write(authFingerprintFor({ ANTHROPIC_API_KEY: 'synthetic-auth-token' }, process.argv[2]));
+     } finally { routeLookup.mockRestore(); }`,
+    helper, path, capacityHelper,
   ], { stdout: 'pipe', stderr: 'pipe' })
   expect(restarted.exitCode).toBe(0)
   expect(restarted.stdout.toString()).toBe(before)
@@ -70,4 +87,28 @@ test('auth variable precedence stays identical across fingerprint versions', () 
     ANTHROPIC_AUTH_TOKEN: 'ignored', ANTHROPIC_API_KEY: 'also-ignored' }, path)).toBe(chosen)
   expect(authFingerprintFor({ ANTHROPIC_AUTH_TOKEN: 'chosen', ANTHROPIC_API_KEY: 'ignored' }, path)).toBe(chosen)
   expect(authFingerprintFor({ ANTHROPIC_API_KEY: 'chosen' }, path)).toBe(chosen)
+})
+
+test('a registered route overrides credentials without creating a fingerprint key', () => {
+  const path = tokenPath()
+  const { publicKey } = generateKeyPairSync('ed25519')
+  const pin: capacity.ClaudeCapacityPin = { version: 1, hostId: 'synthetic-host', instanceId: 'synthetic-instance',
+    socketPath: '/synthetic/relay.sock', claudeConfigDir: '/synthetic/claude',
+    publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() }
+  const route = routeFingerprint(pin)
+  if (route === undefined) throw new Error('Synthetic registered route must have a fingerprint')
+  routeLookup.mockImplementation(() => routeFingerprint(pin))
+  expect(route).toMatch(/^native-relay-v2:[0-9a-f]{64}$/)
+  expect(authFingerprintFor(undefined, path)).toBe(route)
+  expect(authFingerprintFor({ ANTHROPIC_API_KEY: 'synthetic-auth-token' }, path)).toBe(route)
+  expect(existsSync(path)).toBe(false)
+})
+
+test('an invalid registered route refuses instead of falling back to credentials', () => {
+  const path = tokenPath()
+  routeLookup.mockImplementation(() => routeFingerprint({} as capacity.ClaudeCapacityPin))
+  for (const env of [undefined, { ANTHROPIC_API_KEY: 'synthetic-auth-token' }]) {
+    expect(() => authFingerprintFor(env, path)).toThrow(capacity.NativeRelayUnavailable)
+  }
+  expect(existsSync(path)).toBe(false)
 })

@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, test, spyOn } from 'bun:test'
+import * as capacity from '../../../../workers/claude-capacity-client.ts'
 import { createHash } from 'node:crypto'
 import { mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -14,14 +15,21 @@ import { setNativeChildLiveness } from '../native-child-liveness.ts'
 let dir: string
 const launchOwner = 'native-launch-evidence-owner'
 const body = '#!/bin/sh\nprintf "2.1.285 (Claude Code)\\n"\n'
+let pinLookup: ReturnType<typeof spyOn<typeof capacity, 'loadClaudeCapacityPin'>>
+let routeLookup: ReturnType<typeof spyOn<typeof capacity, 'nativeRelayRouteFingerprint'>>
 beforeEach(() => {
+  // The synthetic executable and lifecycle PTY model an UNREGISTERED self-host.
+  pinLookup = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   dir = mkdtempSync(join(tmpdir(), 'native-launch-'))
   writeFileSync(join(dir, 'claude'), body, { mode: 0o700 })
 })
 afterEach(async () => {
-  setNativeChildLiveness(launchOwner, undefined)
-  await shutdownAllPersistentRepls()
-  rmSync(dir, { recursive: true, force: true })
+  try {
+    setNativeChildLiveness(launchOwner, undefined)
+    await shutdownAllPersistentRepls()
+    rmSync(dir, { recursive: true, force: true })
+  } finally { pinLookup.mockRestore(); routeLookup.mockRestore() }
 })
 const input = () => ({ sessionId: 'session', childGeneration: 'generation', projectId: 'project',
   argv: ['claude', '--session-id', 'session', '--tools', 'Agent,SendMessage'],

@@ -10,7 +10,8 @@ import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
 import * as tiers from '@neutronai/trident/model-tiers.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import type { ResumeCheckpoint } from '@neutronai/trident/build-run.ts'
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -34,7 +35,17 @@ import type { ProjectBuildHostOptions } from '@neutronai/trident/project-build-h
 
 const cleanup: (() => void | Promise<void>)[] = []
 const PROJECT_TOOL_NAMES = [...LIVE_AGENT_TOOL_NAMES, SUBAGENT_CONTINUATION_TOOL_NAME]
-afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
+let pinLookup: ReturnType<typeof spyOn<typeof capacity, 'loadClaudeCapacityPin'>>
+let routeLookup: ReturnType<typeof spyOn<typeof capacity, 'nativeRelayRouteFingerprint'>>
+beforeEach(() => {
+  // Fake project sessions model an UNREGISTERED self-host.
+  pinLookup = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
+afterEach(async () => {
+  try { for (const fn of cleanup.splice(0).reverse()) await fn() }
+  finally { pinLookup.mockRestore(); routeLookup.mockRestore() }
+})
 
 type CompletionShape = 'valid' | 'pending' | 'wrong-stage' | 'wrong-head'
 

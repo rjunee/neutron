@@ -40,7 +40,8 @@
  * suite refuses against is one the code under test actually wrote.
  */
 
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from 'bun:test'
+import * as capacity from '../../../../workers/claude-capacity-client.ts'
 import { paneClaimBlocksUs, spawnReservationBlocksUs } from '../signatures.ts'
 import { reservePaneSpawn } from '../repl-registry.ts'
 import { resetLocalOwnershipForTests } from '../local-ownership.ts'
@@ -245,9 +246,18 @@ beforeAll(async () => {
   await sink.ensureStarted({ tokenPath: join(scratch(), 'sink-token') })
 })
 
-beforeEach(() => resetBootAdoptionForTests())
+let routeLookup: ReturnType<typeof spyOn<typeof capacity, 'nativeRelayRouteFingerprint'>>
+let pinLookup: ReturnType<typeof spyOn<typeof capacity, 'loadClaudeCapacityPin'>>
+beforeEach(() => {
+  resetBootAdoptionForTests()
+  // Credential-rotation cases model an UNREGISTERED self-host.
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+  pinLookup = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+})
 
 afterEach(() => {
+  routeLookup.mockRestore()
+  pinLookup.mockRestore()
   setFenceTimerFactoryForTests(undefined)
   setFlockImplForTests(undefined)
   resetBootAdoptionForTests()

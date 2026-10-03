@@ -19,7 +19,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -132,6 +132,7 @@ describe('install.sh — .env is 0600 after write (S3b secrets-at-rest hygiene)'
       // Simulate an .env written under a loose umask (0644) by a prior install
       // or manual `cp`, holding a real secret value.
       writeFileSync(envPath, 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-preexisting\n', { mode: 0o644 })
+      chmodSync(envPath, 0o644) // Construct the unsafe fixture even under umask 077.
       expect(statSync(envPath).mode & 0o777).toBe(0o644)
 
       const { status } = runEnvPermsSeam(dir)
@@ -184,6 +185,7 @@ describe('install.sh — .env is 0600 after write (S3b secrets-at-rest hygiene)'
     try {
       const envPath = join(dir, '.env')
       writeFileSync(envPath, 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-preexisting\n', { mode: 0o644 })
+      chmodSync(envPath, 0o644)
       expect(statSync(envPath).mode & 0o777).toBe(0o644)
 
       const { status, stderr } = runEnvPermsSeam(dir, { chmodBody: '#!/bin/sh\nexit 0\n' })
@@ -208,6 +210,7 @@ describe('install.sh — .env is 0600 after write (S3b secrets-at-rest hygiene)'
     try {
       const envPath = join(dir, '.env')
       writeFileSync(envPath, 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-preexisting\n', { mode: 0o644 })
+      chmodSync(envPath, 0o644)
       expect(statSync(envPath).mode & 0o777).toBe(0o644)
 
       const { status, stdout, stderr } = runEnvPermsSeam(dir, {
@@ -288,6 +291,7 @@ describe('install.sh — .env is 0600 after write (S3b secrets-at-rest hygiene)'
     try {
       const envPath = join(dir, '.env')
       writeFileSync(envPath, 'CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-preexisting\n', { mode: 0o644 })
+      chmodSync(envPath, 0o644)
       expect(statSync(envPath).mode & 0o777).toBe(0o644)
 
       const { status, stdout, stderr } = runEnvPermsSeam(dir, {
