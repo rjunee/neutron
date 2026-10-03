@@ -21,7 +21,8 @@
 import { makeRecordingHost, type Timeline } from './recording-host.ts'
 import { withCapturedStderr } from './capture-stderr.ts'
 import { CONTEXT_RESET_COMMAND } from '../signatures.ts'
-import { describe, it, expect, afterEach } from 'bun:test'
+import { describe, it, expect, afterEach, beforeEach, spyOn } from 'bun:test'
+import * as capacity from '../../../../workers/claude-capacity-client.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
 import type { Event } from '../../../../events.ts'
@@ -33,8 +34,16 @@ import {
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
 
+let pinLookup: ReturnType<typeof spyOn<typeof capacity, 'loadClaudeCapacityPin'>>
+let routeLookup: ReturnType<typeof spyOn<typeof capacity, 'nativeRelayRouteFingerprint'>>
+beforeEach(() => {
+  // The recording PTY models an UNREGISTERED self-host, not a relay parent.
+  pinLookup = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
 afterEach(async () => {
-  await shutdownAllPersistentRepls()
+  try { await shutdownAllPersistentRepls() }
+  finally { pinLookup.mockRestore(); routeLookup.mockRestore() }
 })
 
 function opts(

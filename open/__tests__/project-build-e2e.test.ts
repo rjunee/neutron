@@ -55,6 +55,7 @@ import { prepareAdoptedNativeParentLaunch } from '@neutronai/runtime/adapters/cl
 import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
 import { CLAUDE_CONTINUATION_PROFILE } from '@neutronai/runtime/workers/claude-native-continuation.ts'
 import { capacityFixture } from '@neutronai/runtime/workers/claude-capacity-client.test-support.ts'
+import * as nativeCapacityClient from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { getBestModel, setBestModelOverride } from '@neutronai/runtime/models.ts'
 import { reserveTrailerSlot } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { createClaudeNativeDispatchReceipt, readClaudeNativeDispatchReceipt, type SignedNativeDispatchRecord } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
@@ -183,7 +184,14 @@ function intervalUnion(rows: typeof commandIntervals): number {
 // Diagnostic only: set OPEN_E2E_FIXTURE_TIMING=1 for JSON timing lines. Case
 // body includes every fixture's setup and prepare calls; all_cleanup includes
 // fixture-owned cleanup. These nested measurements must not be added together.
-beforeEach(() => { caseStartedAt = performance.now(); commandIntervals.length = 0 })
+beforeEach(() => {
+  caseStartedAt = performance.now(); commandIntervals.length = 0
+  // The fake parent defaults to the unregistered deployment. Never read the
+  // machine's protected live route; registered-parent cases select their route
+  // explicitly and use the isolated signed relay fixture below.
+  const route = spyOn(nativeCapacityClient, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+  cleanups.push(() => route.mockRestore())
+})
 afterEach(async () => {
   const cleanupStartedAt = performance.now()
   try {
@@ -1499,6 +1507,82 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     releaseNativeContinuation: () => releaseNativeContinuation?.(),
     finishNativeQuota: () => worker(quotaDispatch) }
 }
+
+test.each(['ready', 'cold-ready', 'auth', 'tools', 'planner', 'missing-launch', 'launch', 'session', 'generation', 'argv', 'relay', 'route-unavailable'] as const)(
+  'registered native parent preparation accepts current authority and refuses stale %s before child admission', async fault => {
+    const f = await fixture({ nativeContinuation: 'available' })
+    if (fault !== 'cold-ready') f.register()
+    await Promise.resolve()
+    const fingerprint = 'native-relay-v2:fixture-current-route'
+    f.session.authFingerprint = fingerprint
+    const launch = readNativeParentLaunchEvidence(f.session)!
+    if (fault === 'auth') f.session.authFingerprint = ''
+    if (fault === 'tools') f.session.toolSurface = f.session.toolSurface.split(',').filter(name => name !== 'SendMessage').join(',')
+    if (fault === 'planner') Reflect.set(f.session, 'plannerRole', undefined)
+    if (fault === 'missing-launch') pool.set(f.key, Promise.resolve({ ...f.session } as ReplSession))
+    if (fault === 'launch') recordNativeParentLaunchEvidence(f.session, { ...launch, executable: { ...launch.executable, sha256: '0'.repeat(64) } })
+    if (fault === 'session') recordNativeParentLaunchEvidence(f.session, { ...launch, sessionId: 'foreign-session' })
+    if (fault === 'generation') recordNativeParentLaunchEvidence(f.session, { ...launch, childGeneration: 'foreign-generation' })
+    if (fault === 'argv') recordNativeParentLaunchEvidence(f.session, { ...launch, argv: ['claude', '--session-id', f.session.sessionId, '--tools', 'Agent'] })
+    if (fault === 'relay') {
+      const { relay: _relay, ...withoutRelay } = launch
+      recordNativeParentLaunchEvidence(f.session, withoutRelay)
+    }
+    const before = { tools: f.session.toolSurface, auth: f.session.authFingerprint, launch: readNativeParentLaunchEvidence(f.session) }
+    const route = spyOn(nativeCapacityClient, 'nativeRelayRouteFingerprint').mockImplementation(() => {
+      if (fault === 'route-unavailable') throw new Error('Registered host route unavailable')
+      return fingerprint
+    })
+    const admit = spyOn(f.context.nativeChildAdmission, 'admit')
+    cleanups.push(() => { route.mockRestore(); admit.mockRestore() })
+    const outcome = await drive(f)
+    if (fault === 'ready' || fault === 'cold-ready') {
+      expect(outcome.kind, why(f, outcome)).toBe('merged')
+      expect(admit.mock.calls.length).toBeGreaterThan(0)
+      expect(f.nativeInputs.length).toBeGreaterThan(0)
+    } else {
+      expect(outcome.kind, why(f, outcome)).toBe('blocked')
+      expect(admit).not.toHaveBeenCalled()
+      expect(f.nativeInputs).toEqual([])
+    }
+    expect(f.admission.listLeases('liveChild')).toHaveLength(0)
+    expect({ tools: f.session.toolSurface, auth: f.session.authFingerprint, launch: readNativeParentLaunchEvidence(f.session) }).toEqual(before)
+  }, 30_000)
+
+test('registered native parent preparation rechecks authority after admission without binding a child', async () => {
+  const f = await fixture({ nativeContinuation: 'available' })
+  f.register()
+  await Promise.resolve()
+  const fingerprint = 'native-relay-v2:fixture-current-route'
+  f.session.authFingerprint = fingerprint
+  const route = spyOn(nativeCapacityClient, 'nativeRelayRouteFingerprint').mockReturnValue(fingerprint)
+  const originalAdmit = f.context.nativeChildAdmission.admit.bind(f.context.nativeChildAdmission)
+  const admit = spyOn(f.context.nativeChildAdmission, 'admit').mockImplementation(async (...args) => {
+    const result = await originalAdmit(...args)
+    f.session.authFingerprint = 'changed-after-admission'
+    return result
+  })
+  cleanups.push(() => { route.mockRestore(); admit.mockRestore() })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('blocked')
+  expect(admit).toHaveBeenCalledTimes(1)
+  expect(f.nativeInputs).toEqual([])
+  expect(f.admission.listLeases('liveChild')).toHaveLength(0)
+})
+
+test('registered native parent preparation cannot start a cold parent in a fenced project', async () => {
+  const f = await fixture({ nativeContinuation: 'available' })
+  await f.admission.maintenance.register(f.admission.scopeFor('e2e-project'))
+  expect(await f.admission.maintenance.beginMaintenance(f.admission.scopeFor('e2e-project'))).not.toBeNull()
+  const route = spyOn(nativeCapacityClient, 'nativeRelayRouteFingerprint').mockReturnValue('native-relay-v2:fixture-current-route')
+  const spawn = spyOn(f.context, 'spawnProjectSession')
+  cleanups.push(() => { route.mockRestore(); spawn.mockRestore() })
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('blocked')
+  expect(spawn).not.toHaveBeenCalled()
+  expect(f.nativeInputs).toEqual([])
+  expect(f.admission.listLeases('liveChild')).toHaveLength(0)
+})
 
 test('native planner consumes its closed host capability while builder retains candidate validation', async () => {
   const f = await fixture()

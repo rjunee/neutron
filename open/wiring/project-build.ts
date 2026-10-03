@@ -10,8 +10,8 @@ import { createHash } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
-import { continueClaudeNativeChild, readClaudeContinuationResult, type ClaudeQuotaState } from '@neutronai/runtime/workers/claude-native-continuation.ts'
-import type { AcquireClaudeCapacity, ControlClaudeContinuation } from '@neutronai/runtime/workers/claude-capacity-client.ts'
+import { CLAUDE_CONTINUATION_PROFILE, continueClaudeNativeChild, readClaudeContinuationResult, type ClaudeQuotaState } from '@neutronai/runtime/workers/claude-native-continuation.ts'
+import { nativeRelayRouteFingerprint, nativeRelayScopeCurrent, type AcquireClaudeCapacity, type ControlClaudeContinuation } from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { bindPlannerWork, releasePlannerWork, PLANNER_ROLE, requiresPlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
 import { readArmedTrailerReservation } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { workContextPath } from '@neutronai/trident/production-host-effects.ts'
@@ -31,7 +31,7 @@ import type { CodexOwnerBindings } from './codex-owner-binding.ts'
 import { codexBuildResultTransport } from './codex-build-result.ts'
 import { pool } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { liveProjectSessions } from '@neutronai/runtime/adapters/claude-code/persistent/live-project-sessions.ts'
-import { mergeEnv } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
+import { mergeEnv, type ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 import type { NativeChildAdmission } from '@neutronai/gateway/project-admission.ts'
 import { createLogger } from '@neutronai/logger'
 import type { Provider } from '@neutronai/runtime/provider.ts'
@@ -116,10 +116,36 @@ export const PROJECT_SESSION_ACQUIRE_TIMEOUT_MS = 35_000
 
 const log = createLogger('project-build')
 
+/** A provisioned relay cannot use a parent launched before that route or its
+ * continuation grants existed. This is observation only: admission still owns
+ * every spawn, and an old child never gains launch authority from this check. */
+function nativeParentPreparationRefusal(session: ReplSession, projectId: string, request: Parameters<ProjectActingTurn>[0]['request']): string | undefined {
+  try {
+    const fingerprint = nativeRelayRouteFingerprint()
+    // Unregistered self-hosts retain native authentication (SPEC 2026-09-30).
+    if (fingerprint === undefined) return undefined
+    if (session.authFingerprint !== fingerprint) return 'Native parent authentication route is stale.'
+    if (session.toolSurface !== PROJECT_REPL_TOOL_DEFS.map(tool => tool.name).join(',')) return 'Native parent tool grants are stale.'
+    if (requiresPlannerWork(request) && session.plannerRole !== PLANNER_ROLE) return 'Native parent planner profile is unavailable.'
+    const launch = readNativeParentLaunchEvidence(session)
+    if (!launch || launch.version !== 1 || launch.projectId !== projectId || launch.sessionId !== session.sessionId
+      || launch.childGeneration !== session.childGeneration || launch.executable.version !== CLAUDE_CONTINUATION_PROFILE.version
+      || launch.executable.sha256 !== CLAUDE_CONTINUATION_PROFILE.sha256 || !launch.executable.realPath
+      || !isDeepStrictEqual(launch.tools, session.toolSurface.split(','))) return 'Native parent continuation launch is unavailable.'
+    const grants = launch.argv.flatMap((arg, index) => arg === '--tools' ? [launch.argv[index + 1]] : [])
+    const sessions = launch.argv.flatMap((arg, index) => arg === '--session-id' || arg === '--resume' ? [launch.argv[index + 1]] : [])
+    if (grants.length !== 1 || grants[0] !== session.toolSurface || sessions.length !== 1 || sessions[0] !== session.sessionId
+      || !launch.relay || launch.relay.registration.body.parentSessionId !== session.sessionId
+      || launch.relay.registration.body.parentPid !== session.child.pid || !nativeRelayScopeCurrent(launch.relay)) {
+      return 'Native parent continuation relay is unavailable.'
+    }
+    return undefined
+  } catch { return 'Native parent continuation authority is unavailable.' }
+}
+
 // `liveProjectSessions` — the live `cc-agent-*` supervised sessions scoped to one
-// project id — is ONE reader, called twice by the acting turn: before the spawn and
-// after it, because the second call is the ONLY evidence a spawn produced anything
-// (see the comment at its second call site). It lives in the runtime
+// project id — is ONE reader for preflight and admitted acquisition. A fresh read
+// after acquisition is the ONLY evidence a spawn produced anything. It lives in the runtime
 // (`live-project-sessions.ts`) so the liveness census asks the very same question.
 
 export interface ProjectBuildContext {
@@ -146,7 +172,8 @@ export interface ProjectBuildContext {
   /**
    * #1237 — the lease every NATIVE CHILD of this run's project REPL holds. REQUIRED:
    * an unwired gate is a composition bug, not open admission. The acting turn admits
-   * before it resolves or spawns any REPL; a fenced or unknown scope refuses the step.
+   * before it acquires or spawns any REPL; read-only preflight of an existing ready
+   * parent grants no authority. A fenced or unknown scope refuses the step.
    */
   nativeChildAdmission: NativeChildAdmission
   /** The same host-owned resolver consumed by owner chat. Never creates a build session. */
@@ -518,6 +545,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     if (!pending || Bun.peek.status(pending) !== 'fulfilled') return { kind: 'unknown', detail: 'Project conversation is not ready' }
     const session = await pending
     if (!session || session.hasChildExited()) return { kind: 'unknown', detail: 'Project conversation child is unavailable' }
+    const preparationRefusal = nativeParentPreparationRefusal(session, context.projectId, turn.request)
+    if (preparationRefusal) return { kind: 'refused', reason: 'capability-unsupported', detail: preparationRefusal }
     // Restricted launches do not attest the edit/run grants required by this bridge.
     if (options.skip_permissions !== true || options.restricted || options.permissions) return { kind: 'refused', reason: 'capability-unsupported', detail: 'Project launch grants cannot authorize bounded build work' }
     const launch = readNativeParentLaunchEvidence(session)
@@ -591,7 +620,19 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         return context.codexOwnerBindings.actingTurn(context.projectId, topic, context.projectDir, [run.worktree])(turn)
       }
       if (context.provider !== 'anthropic') return { kind: 'refused', reason: 'capability-unsupported', detail: `No live acting-turn binding for ${context.provider} selected at ${context.providerSource} level` }
-      // #1237 — THE NATIVE CHILD'S LEASE, taken BEFORE any REPL is resolved or
+      // Read an already-ready parent without acquiring or refreshing it. Refuse
+      // known-stale authority before creating another durable child hold. Cold
+      // acquisition stays below admission and repeats the check before binding.
+      const candidates = liveProjectSessions(context.projectId)
+      if (candidates.length === 1) {
+        const pending = pool.get(candidates[0]![0])
+        const session = pending && Bun.peek.status(pending) === 'fulfilled' ? Bun.peek(pending) as ReplSession | undefined : undefined
+        if (session && !session.hasChildExited()) {
+          const preparationRefusal = nativeParentPreparationRefusal(session, context.projectId, turn.request)
+          if (preparationRefusal) return { kind: 'refused', reason: 'capability-unsupported', detail: preparationRefusal }
+        }
+      }
+      // #1237 — THE NATIVE CHILD'S LEASE, taken BEFORE any REPL is acquired or
       // spawned, so a fenced project never gains a child. The child joins the run's
       // `build` lease (it is that run draining); the Codex branch above takes none —
       // it is the cross-provider observed owner thread, not a child of this REPL.

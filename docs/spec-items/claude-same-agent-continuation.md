@@ -43,6 +43,16 @@ facts. Ordinary assistant text and arbitrary local 429s are not quota authority.
 
 ## Original-child continuation
 
+On registered host routes, new bounded native dispatch first checks an already
+ready parent against the current route fingerprint, project tool grants, required
+planner role and matching measured continuation launch and relay scope. A stale
+parent refuses before acquiring a child lease; this check never refreshes the
+parent or promotes recorded metadata. Missing-parent acquisition remains behind
+native admission, and the selected parent is checked again before original
+dispatch binding. An unavailable registered route refuses. Unregistered
+self-hosts retain their existing native authentication contract. These checks
+do not change recovery or retrospectively authorize an existing child.
+
 An authenticated native quota observation and fresh available capacity may
 authorize a bounded `SendMessage` addressed to the original native agent ID.
 This retains the request, worktree, result contract, parent and durable child
@@ -120,6 +130,14 @@ board can display its wait without guessing from step-name prefixes or whichever
 checkpoint happens to be current at recovery time.
 
 ## Acceptance
+
+- [ ] Registered current warm and cold parents reach the existing merge gates;
+      stale route, tools, planner, launch identity, argv or relay refuse before
+      new child admission or input. A changed parent after admission releases
+      only its positively unsubmitted child; fenced cold scopes never spawn.
+      Verify the registered-parent preparation cases in
+      `open/__tests__/project-build-e2e.test.ts`, with accepting and refusing
+      semantic mutations.
 
 - [ ] The native launcher registers the exact process before first chat; broken
       registered routes refuse without direct-auth fallback or credential 429.

@@ -349,22 +349,83 @@ test('lesser grants and null thread are accepted', async () => {
   expect(await f.run()).toEqual({ kind: 'turn-ended' })
 })
 
+async function observeAcknowledgementBudget(f: Awaited<ReturnType<typeof fixture>>, preExpiryCheck?: () => void) {
+  f.binding.projects_dir = join(f.dir, 'projects')
+  f.binding.session.child.submitLine = async text => { f.commands.push(text) }
+  const controller = new AbortController()
+  f.input.signal = controller.signal
+  const wall = 90_000
+  f.input.timeout_ms = wall
+  f.input.request = { ...f.input.request, budget: { wall_ms: wall } }
+  let now = 0, settled = false
+  const waiting = barrier(), expire = barrier()
+  const pauses: number[] = []
+  // Hold the observation at a real awaited pause, then advance the injected
+  // clock to the budget. This distinguishes premature UNKNOWN/completion from
+  // waiting without racing filesystem observation against a 45ms wall timer.
+  const acting = createClaudeActingTurn(f.binding, { now: () => now, pause: async ms => {
+    pauses.push(ms)
+    waiting.release()
+    await expire.reached
+  } })
+  const running = acting(f.input).then(result => { settled = true; return result })
+  let waitTimer: ReturnType<typeof setTimeout> | undefined
+  const waitBound = new Promise<never>((_resolve, reject) => {
+    waitTimer = setTimeout(() => reject(new Error('Acknowledgement observation did not reach its barrier')), 2000)
+  })
+  try {
+    await Promise.race([waiting.reached, waitBound, running.then(() => {
+      throw new Error('Acknowledgement ended observation before budget expiry')
+    })])
+    expect(settled).toBe(false)
+    expect(now).toBe(0)
+    expect(pauses).toEqual([25])
+    expect(f.commands).toHaveLength(1)
+    expect(f.released()).toBe(0)
+    preExpiryCheck?.()
+    now = wall
+    expire.release()
+    return await running
+  } finally {
+    clearTimeout(waitTimer)
+    now = wall
+    controller.abort()
+    expire.release()
+    await running.catch(() => {})
+  }
+}
+
 test('acknowledgement alone waits for the trailer until the host budget', async () => {
   const f = await fixture()
-  f.binding.session.child.submitLine = async text => { f.commands.push(text) }
-  f.input.timeout_ms = 45
-  const start = Date.now()
-  expect(await f.run()).toEqual({ kind: 'unknown', detail: expect.stringContaining('trailer') })
-  // WALL-CLOCK-BOUND-OK: the contract is that acknowledgement does NOT end the turn —
-  // the wait must actually be spent. The deterministic assertions above cover the
-  // outcome (`unknown` naming the trailer) and the dispatch (one submitLine), but
-  // neither can distinguish 'waited the budget' from 'returned immediately with the
-  // same answer', which is the exact shortcut this test exists to catch. It is a
-  // LOWER bound on elapsed time against a 45ms budget, margin 5ms: a loaded runner
-  // makes the run slower, never faster, so load cannot flake it — only an
-  // implementation that stopped waiting can.
-  expect(Date.now() - start).toBeGreaterThanOrEqual(40)
+  expect(await observeAcknowledgementBudget(f)).toEqual({ kind: 'unknown', detail: 'Claude trailer not observed before cancellation or host budget expiry.' })
   expect(f.commands).toHaveLength(1)
+  expect(f.released()).toBe(1)
+})
+
+test('a failed pre-expiry assertion drains the acknowledgement observer before fixture cleanup', async () => {
+  const f = await fixture()
+  const originalStat = fs.stat
+  let resultProbes = 0
+  const probes = spyOn(fs, 'stat').mockImplementation(((...args: Parameters<typeof fs.stat>) => {
+    if (String(args[0]) === f.input.request.result.path) resultProbes++
+    return originalStat(...args)
+  }) as typeof fs.stat)
+  try {
+    await expect(observeAcknowledgementBudget(f, () => {
+      expect('forced pre-expiry assertion').toBe('must fail')
+    })).rejects.toThrow()
+    expect(f.released()).toBe(1)
+    expect(f.commands).toHaveLength(1)
+    const afterDrain = resultProbes
+    expect(afterDrain).toBeGreaterThan(0)
+    // Real filesystem turns are also positive controls for the probe counter;
+    // after draining, only these explicit probes may grow it.
+    for (let index = 0; index < 2; index++) {
+      await expect(fs.stat(f.input.request.result.path)).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+    expect(resultProbes).toBe(afterDrain + 2)
+    expect(f.released()).toBe(1)
+  } finally { probes.mockRestore() }
 })
 
 test('trailer appearing after acknowledgement establishes observation', async () => {

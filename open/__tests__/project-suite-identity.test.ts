@@ -668,6 +668,9 @@ async function workspaceFixture() {
 
 test('workspace directory scratch churn preserves suite identity, including nested directory size and timestamps', async () => {
   const { root, workspace, nested } = await workspaceFixture()
+  // Make the initial permission input distinct from the restrictive mutation.
+  await chmod(workspace, 0o755)
+  expect((await stat(workspace)).mode & 0o777).toBe(0o755)
   const before = await projectSuiteIdentity(root)
   expect(before).toMatch(/^[a-f0-9]{64}$/)
   const original = await stat(nested)

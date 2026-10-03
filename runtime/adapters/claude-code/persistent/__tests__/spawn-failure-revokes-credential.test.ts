@@ -13,7 +13,8 @@
  * against the live sink.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import * as capacity from '../../../../workers/claude-capacity-client.ts'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 
 import { createPersistentReplSubstrate } from '../persistent-repl-substrate.ts'
@@ -24,6 +25,18 @@ import { childByKey, sink } from '../pool-state.ts'
 import { poolKeyFor } from '../pool.ts'
 import { lifecycleReplHost } from './lifecycle-repl-host.ts'
 import { getReplSinkInfo } from '../repl-sink.ts'
+
+let unregisteredPin: ReturnType<typeof spyOn>
+let unregisteredRoute: ReturnType<typeof spyOn>
+beforeEach(() => {
+  // Fake children exercise native self-host lifecycle, not host registration.
+  unregisteredPin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
+afterEach(() => {
+  unregisteredRoute.mockRestore()
+  unregisteredPin.mockRestore()
+})
 
 function mcpConfigPathFrom(argv: readonly string[]): string {
   const i = argv.indexOf('--mcp-config')

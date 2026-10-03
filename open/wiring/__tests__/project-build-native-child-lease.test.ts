@@ -7,7 +7,8 @@
  * `liveChild` lease, BEFORE any REPL is resolved or spawned, over the REAL
  * `ProjectAdmission` on a migrated database.
  */
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -29,7 +30,17 @@ import { buildTridentTerminalObserver } from '../trident-nexus-observer.ts'
 import { nativeDispatchReceiptPath, readClaudeNativeDispatchReceipt, type SignedNativeDispatchRecord } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
-afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn() })
+let pinLookup: ReturnType<typeof spyOn<typeof capacity, 'loadClaudeCapacityPin'>>
+let routeLookup: ReturnType<typeof spyOn<typeof capacity, 'nativeRelayRouteFingerprint'>>
+beforeEach(() => {
+  // Fake project sessions model an UNREGISTERED self-host.
+  pinLookup = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
+afterEach(async () => {
+  try { for (const fn of cleanup.splice(0).reverse()) await fn() }
+  finally { pinLookup.mockRestore(); routeLookup.mockRestore() }
+})
 
 async function fixture() {
   const dir = await mkdtemp(join(tmpdir(), 'native-child-lease-'))

@@ -14,7 +14,8 @@
  * handle (`topic_id` + `turn_id`).
  */
 
-import { describe, it, expect, afterEach } from 'bun:test'
+import { describe, it, expect, afterEach, beforeEach, spyOn } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -43,8 +44,17 @@ import {
   type RecoveredReplyDelivery,
 } from '../recovered-reply-store.ts'
 
+let unregisteredPin: ReturnType<typeof spyOn>
+let unregisteredRoute: ReturnType<typeof spyOn>
+beforeEach(() => {
+  // The crash-capable fake child models an unregistered native self-host.
+  unregisteredPin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
 afterEach(async () => {
   await shutdownAllPersistentRepls()
+  unregisteredRoute.mockRestore()
+  unregisteredPin.mockRestore()
 })
 
 // ─── Part 1: the gateway sink semantics (deliver-or-persist, deduped) ─────────

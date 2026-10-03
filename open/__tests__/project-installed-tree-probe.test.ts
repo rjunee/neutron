@@ -107,6 +107,9 @@ os.read = changed_read
 
 test('file replacement, mode and ownership remain measured while valid local links work', async () => {
   const f = await fixture()
+  // Make the initial permission input distinct from the restrictive mutation.
+  await chmod(f.input, 0o644)
+  expect((await stat(f.input)).mode & 0o777).toBe(0o644)
   const before = await projectInstalledTreeIdentity(f.root)
   expect(before).toMatch(/^[a-f0-9]{64}$/)
   const originalMode = (await stat(f.input)).mode & 0o777
