@@ -51,3 +51,20 @@ restored. Restoring the broader sleep-pin precedence also failed by producing a
 different native session ID. After the exact-identity fix, all 21 selected
 custody/lifecycle controls passed. The repository-wide acceptance run and live provider proof remain
 separate evidence; these offline results do not complete issue #1416.
+
+Root subsequently ran the complete shared-host gate on frozen source revision
+`e9b1c13aacafcedc54874b71360e5d93378f8968`:
+`bash scripts/check-shared-host.sh` executed all 51 TypeScript projects and all
+1,778 discovered test files, including `open/__tests__/project-build-e2e.test.ts`.
+The coverage audit assigned and executed every discovered file. All nineteen
+logical lanes passed: 27,676 tests passed, 24 were skipped, zero failed, and
+130,957 assertions ran. The gate exited zero and preserved measured suite-input
+identity `59fdad6ade75537057e37a7b2cc95c7e28e27228dfca7f817cfd1b2e300406ac`.
+Log SHA-256: `9afa1d3d5d5533861a49545a8bf3db175e4d8101b1a115cf88a33c7e3342d32a`.
+
+Independent Astra and bounded Claude Opus reviews approved the frozen production
+changes. The final test-only non-null assertion changed its reviewed source hash
+but produced identical JavaScript; a separate changed-output control detected a
+runtime change. The receipt is recorded after its measured source revision;
+this documentation does not relabel that revision or substitute for exact-head
+publication CI, served-code verification or live unattended merge acceptance.
