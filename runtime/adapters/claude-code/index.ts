@@ -25,6 +25,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { readRegistryState, registryConversationScopeMatches } from './persistent/repl-registry.ts'
+import { SESSION_KEY_SEP } from './persistent/signatures.ts'
 import { beginBootAdoption } from './persistent/boot-adoption.ts'
 import { supervisedBySessionKey } from './persistent/pool-state.ts'
 import { rearmReplCap } from './persistent/operator-cap-rearm.ts'
@@ -431,6 +432,43 @@ export function resolveReplCwdAndHome(input: {
   if (cwd !== undefined) out.cwd = cwd
   if (home !== undefined) out.home = home
   return out
+}
+
+/** Discover conversation keys, not authentication or adoption authority. Validate
+ * each candidate against the caller's exact dimensions before returning its
+ * opaque credential component. Runtime resume still owns the session/profile. */
+export function recordedClaudeConversationIdentities(options: Pick<ClaudeCodeSubstrateOptions,
+  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'conversationProjectId'>,
+): string[] {
+  if (options.conversationProjectId === undefined) throw new Error('Recorded conversation requires an exact scope')
+  const { home } = resolveReplCwdAndHome({ cwd: options.cwd, env: process.env })
+  if (home === undefined) throw new Error('Recorded conversation registry location is unknown')
+  const state = readRegistryState(deriveReplSupervisionPaths(home).replRegistryPath)
+  if (state.kind === 'absent') return []
+  if (state.kind === 'unreadable') throw new Error('Recorded conversation registry is unreadable')
+  const ownsDimensions = (key: string) => {
+    const parts = key.split(SESSION_KEY_SEP)
+    return parts[0] === options.substrate_instance_id && parts[1] === (options.user_id ?? '_platform')
+      && parts[2] === (options.project_id ?? 'default')
+  }
+  if (state.droppedKeys.some(ownsDimensions)) throw new Error('Recorded conversation registry dropped a matching identity')
+  const identities: string[] = []
+  for (const [key, row] of Object.entries(state.registry)) {
+    if (!ownsDimensions(key)) continue
+    const credentialId = key.split(SESSION_KEY_SEP)[3]
+    const expected = credentialId === undefined ? undefined : poolKeyFor({ ...options, credential_identity: credentialId })
+    // General and the literal project "general" share a pool project dimension,
+    // but have distinct explicit scope suffixes. Positively different scopes do
+    // not block each other; an unrecorded or contradictory scope is unknown.
+    if (key !== expected && row.conversationProjectId !== undefined
+      && row.conversationProjectId !== options.conversationProjectId) continue
+    if (!credentialId || key !== expected || row.sessionKey !== key
+      || row.conversationProjectId !== options.conversationProjectId) {
+      throw new Error('Recorded conversation identity or scope is ambiguous')
+    }
+    identities.push(credentialId)
+  }
+  return identities
 }
 
 /** Exact lookup from trusted identity fields; durable session keys remain opaque. */

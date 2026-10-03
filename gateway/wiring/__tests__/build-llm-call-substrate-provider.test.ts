@@ -12,7 +12,12 @@
  *   4. per-turn granularity: the resolver flips provider between dispatches.
  */
 
-import { expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
+
+let routeLookup: ReturnType<typeof spyOn>
+beforeEach(() => { routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined) })
+afterEach(() => routeLookup.mockRestore())
 
 import {
   buildLlmCallSubstrate,

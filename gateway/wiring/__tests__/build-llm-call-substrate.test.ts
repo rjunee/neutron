@@ -10,7 +10,8 @@
  * scrubbed env) + spec and yields canned `Event`s. No real `claude` REPL spawns.
  */
 
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -30,12 +31,15 @@ import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 import { poolKeyFor } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 
 let workdir: string
+let unregisteredRoute: ReturnType<typeof spyOn>
 
 beforeEach(() => {
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   workdir = mkdtempSync(join(tmpdir(), 'neutron-bllmc-'))
 })
 
 afterEach(() => {
+  unregisteredRoute.mockRestore()
   rmSync(workdir, { recursive: true, force: true })
 })
 

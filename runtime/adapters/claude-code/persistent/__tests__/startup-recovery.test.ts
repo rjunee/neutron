@@ -1,4 +1,5 @@
-import { afterAll, afterEach, expect, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '../../../../workers/claude-capacity-client.ts'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -20,6 +21,13 @@ const sinkDir = mkdtempSync(join(tmpdir(), 'neutron-startup-sink-'))
 afterAll(() => rmSync(sinkDir, { recursive: true, force: true }))
 const key = 'startup-recovery-test'
 const cleanup: (() => void | Promise<void>)[] = []
+let routeLookup: ReturnType<typeof spyOn>
+let pinLookup: ReturnType<typeof spyOn>
+beforeEach(() => {
+  // These fake native parents carry self-host fingerprints, never host credentials.
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+  pinLookup = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+})
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close()
   resetBootAdoptionForTests()
@@ -28,6 +36,8 @@ afterEach(async () => {
   childByKey.delete(key)
   await sink.stop()
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  pinLookup.mockRestore()
+  routeLookup.mockRestore()
 })
 
 function fixture() {

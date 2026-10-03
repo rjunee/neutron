@@ -1,6 +1,7 @@
 import { projectModelTier } from '@neutronai/runtime/configured-models.ts'
 import { randomUUID } from 'node:crypto'
 import { actingTurnProjectId } from './conversation-scope.ts'
+import { nativeRelayRouteFingerprint, NativeRelayUnavailable } from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/configured-chat/index.ts'
 /**
  * @neutronai/gateway/wiring — shared CC-subprocess LLM-call substrate.
@@ -8,8 +9,10 @@ import { createConfiguredChatSubstrate } from '@neutronai/runtime/adapters/confi
  * Sprint: cc-substrate-migration-3-sites (2026-05-31).
  *
  * Single primitive that every LLM call site in the gateway dispatches
- * through. Wraps the per-instance Anthropic `CredentialPool` (resolved by
- * `resolveLlmCredentials`) into a `Substrate` whose `start(spec)`:
+ * through. A protected native route owns account selection and authentication;
+ * Open preserves the conversation key without consulting or accounting against
+ * its local credential pool. For unregistered self-hosts, wraps the per-instance
+ * Anthropic `CredentialPool` into a `Substrate` whose `start(spec)`:
  *
  *   1. Resolves the LIVE pool (eager `pool` OR lazy `resolvePool` per call).
  *   2. Selects a credential via `selectCredential(pool)`.
@@ -46,6 +49,7 @@ import {
   createClaudeCodeSubstrateAuto,
   existingClaudeRepl,
   hasRecoverableClaudeRepl,
+  recordedClaudeConversationIdentities,
   reconcileExistingClaudeRepl,
   recoverExistingClaudeRepl,
   rearmExistingClaudeReplCap,
@@ -150,6 +154,59 @@ export interface ResolveScrubbedAuthEnvResult {
   /** The selected credential id — the cold substrate's cooldown reporter
    *  keys `reportSuccess`/`reportFailure` on it. */
   cred_id: string
+}
+
+type ClaudeDispatchAuth = (ResolveScrubbedAuthEnvResult & { nativeRoute?: never }) | {
+  /** The transport owns authentication; cred_id only preserves the conversation key. */
+  nativeRoute: string
+  cred_id: string
+  env: Record<string, string | undefined>
+  pool?: never
+}
+
+/** Composition must retain dispatchers for a registered but unavailable route.
+ * Only a selected Claude dispatch validates availability; other providers can
+ * still serve. A broken registration never licenses direct authentication. */
+export function hasRegisteredClaudeRoute(): boolean {
+  try { return nativeRelayRouteFingerprint() !== undefined } catch (error) {
+    if (error instanceof NativeRelayUnavailable) return true
+    throw error
+  }
+}
+
+async function resolveClaudeDispatchAuth(
+  input: ResolveScrubbedAuthEnvInput,
+  preferences: { preferCredentialId?: string; preferCredentialIds?: readonly string[] },
+  recordedIdentity?: () => string | undefined,
+): Promise<ClaudeDispatchAuth> {
+  // Validate the protected route before consulting local account availability.
+  // Invalid registrations throw locally, never falling through to direct auth.
+  const nativeRoute = nativeRelayRouteFingerprint()
+  if (nativeRoute === undefined) return resolveScrubbedAuthEnv(input, preferences)
+  // Lifecycle ownership, not account-pool membership, supplies an existing key.
+  // A first conversation uses the canonical route identity, never a made-up
+  // provider credential. The host's account bank is opaque to this layer.
+  // With no live owner, only exact durable discovery can select a prior key.
+  // The self-host sleep preference is scoped more broadly and may name another
+  // instance or user; even a proven empty exact scope must not inherit that pin.
+  const id = recordedIdentity !== undefined ? recordedIdentity() ?? nativeRoute
+    : preferences.preferCredentialId ?? preferences.preferCredentialIds?.[0] ?? nativeRoute
+  return registeredClaudeAuth(nativeRoute, id)
+}
+
+function registeredClaudeAuth(nativeRoute: string, id: string): ClaudeDispatchAuth {
+  return {
+    cred_id: id, nativeRoute,
+    // The canonical spawn relay supplies the OAuth placeholder and socket.
+    // Never load a provider secret merely to reconstruct a conversation key.
+    env: { ANTHROPIC_API_KEY: undefined, ANTHROPIC_AUTH_TOKEN: undefined, CLAUDE_CODE_OAUTH_TOKEN: undefined },
+  }
+}
+
+function assertNativeRouteCurrent(resolved: ClaudeDispatchAuth): void {
+  if (resolved.nativeRoute !== undefined && nativeRelayRouteFingerprint() !== resolved.nativeRoute) {
+    throw new NativeRelayUnavailable('Native relay route changed during chat preparation; input was refused')
+  }
 }
 
 /**
@@ -298,8 +355,8 @@ export interface ConversationLifecycle {
   ownerFor(scope: string | null): Promise<ConversationOwner>
   handoffChat(scope: string | null, next: { sessionKey: string; credentialId: string },
     options?: { waitMs?: number; keepResumable?: boolean }): Promise<ChatHandoffOutcome>
-  /** #1226 sleep: the credential of the scope's ASLEEP conversation, so the wake
-   * spawn keys the same pool identity and `--resume`s it (while that credential is usable). */
+  /** #1226 sleep: the credential key of the scope's ASLEEP conversation, so wake
+   * resumes it. Local credential usability applies only to unregistered self-hosts. */
   resumeCredentialFor?(scope: string | null): string | undefined
   /** #1226 sleep: a dispatch for the scope is starting — cancel its idle timer. */
   disarmIdle?(scope: string | null): void
@@ -835,7 +892,7 @@ export interface OpenAiFamilyProviderConfig {
 /** Shared option composition; normal turns resolve their project after env awaits. */
 async function claudeOptionsFor(
   input: BuildLlmCallSubstrateInput,
-  resolved: ResolveScrubbedAuthEnvResult,
+  resolved: Pick<ResolveScrubbedAuthEnvResult, 'env' | 'cred_id'>,
   projectIdFor: () => string | undefined,
   onProjectResolved?: (projectId: string | undefined) => void,
 ): Promise<ClaudeCodeSubstrateOptions> {
@@ -1057,7 +1114,7 @@ export interface LlmCallSubstrate extends Substrate {
 export function buildLlmCallSubstrate(
   input: BuildLlmCallSubstrateInput,
 ): LlmCallSubstrate | null {
-  if (input.pool === undefined && input.resolvePool === undefined) {
+  if (input.pool === undefined && input.resolvePool === undefined && !hasRegisteredClaudeRoute()) {
     throw new Error(
       'buildLlmCallSubstrate: exactly one of `pool` (eager) or `resolvePool` (lazy) must be supplied',
     )
@@ -1067,7 +1124,7 @@ export function buildLlmCallSubstrate(
       'buildLlmCallSubstrate: cannot supply BOTH `pool` and `resolvePool` — pick one',
     )
   }
-  if (input.pool !== undefined && input.pool.credentials.length === 0) {
+  if (input.pool !== undefined && input.pool.credentials.length === 0 && !hasRegisteredClaudeRoute()) {
     return null
   }
   // Cross-turn continuity ledger for the STATELESS OpenAI-family providers (audit
@@ -1093,37 +1150,66 @@ export function buildLlmCallSubstrate(
       const selection = input.providerResolver?.(projectId, 'conversation')
       const selected = typeof selection === 'object' ? selection.provider : selection
       if (normalizeProvider(selected?.trim() ? selected : input.provider) !== 'anthropic') continue
-      const pool = input.pool ?? await input.resolvePool?.()
-      if (!pool) continue
-      for (const credential of pool.credentials) {
-        const identity = {
-          substrate_instance_id: input.substrate_instance_id,
-          ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
-          ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
-          project_id: conversationProjectId ?? 'general', conversationProjectId,
-          credential_identity: credential.id,
+      const scopedIdentity = {
+        substrate_instance_id: input.substrate_instance_id,
+        ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+        ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+        project_id: conversationProjectId ?? 'general', conversationProjectId,
+      }
+      let nativeRoute: string | undefined
+      let pool: CredentialPool | null | undefined
+      let candidates: Array<{ id: string; direct?: PooledCredential }>
+      try {
+        nativeRoute = nativeRelayRouteFingerprint()
+        if (nativeRoute !== undefined) {
+          const ids = recordedClaudeConversationIdentities(scopedIdentity)
+          if (ids.length > 1) throw new NativeRelayUnavailable('Recorded native conversation is ambiguous')
+          candidates = ids.map(id => ({ id }))
+        } else {
+          pool = input.pool ?? await input.resolvePool?.()
+          candidates = (pool?.credentials ?? []).map(direct => ({ id: direct.id, direct }))
         }
+      } catch (error) {
+        substrateLog.warn('boot_repl_recovery_unavailable', {
+          substrate_instance_id: input.substrate_instance_id, project_id: projectId,
+          reason: error instanceof Error ? error.message : String(error),
+        })
+        continue
+      }
+      for (const candidate of candidates) {
+        const identity = { ...scopedIdentity, credential_identity: candidate.id }
         try {
           if (!hasRecoverableClaudeRepl(identity)) continue
-          const capturedCredential = { id: credential.id, kind: credential.kind, secret: credential.secret, base_url: credential.base_url }
+          const capturedCredential = candidate.direct === undefined ? undefined : {
+            id: candidate.direct.id, kind: candidate.direct.kind, secret: candidate.direct.secret, base_url: candidate.direct.base_url,
+          }
           const currentAuthority = (): boolean => {
-            // An asynchronous-only pool resolver cannot prove the current credential
-            // under the synchronous registry CAS. Open supplies its canonical pool.
-            if (retired || input.pool !== pool) return false
+            if (retired) return false
             if (input.configuredChat?.env !== undefined && projectModelTier(input.configuredChat.env, projectId) !== undefined) return false
             const currentSelection = input.providerResolver?.(projectId, 'conversation')
             const currentProvider = typeof currentSelection === 'object' ? currentSelection.provider : currentSelection
             if (normalizeProvider(currentProvider?.trim() ? currentProvider : input.provider) !== 'anthropic') return false
+            if (nativeRoute !== undefined) {
+              try {
+                const ids = recordedClaudeConversationIdentities(scopedIdentity)
+                return nativeRelayRouteFingerprint() === nativeRoute && ids.length === 1 && ids[0] === candidate.id
+              } catch { return false }
+            }
+            // An asynchronous-only resolver cannot establish current direct auth
+            // under the synchronous registry CAS.
+            if (!pool || input.pool !== pool || capturedCredential === undefined) return false
             return pool.credentials.some(current => current.id === capturedCredential.id && current.kind === capturedCredential.kind
               && current.secret === capturedCredential.secret && current.base_url === capturedCredential.base_url)
           }
-          const resolved = await resolveCredentialAuthEnv({
+          const resolved: ClaudeDispatchAuth = nativeRoute !== undefined ? registeredClaudeAuth(nativeRoute, candidate.id)
+            : await resolveCredentialAuthEnv({
             ...(input.oauthRefresh === undefined ? {} : { oauthRefresh: input.oauthRefresh }),
             ...(input.owner_handle === undefined ? {} : { owner_handle: input.owner_handle }),
-          }, pool, credential)
+          }, pool!, candidate.direct!)
           const opts = await claudeOptionsFor(input, resolved, () => conversationProjectId ?? 'general')
           opts.conversationProjectId = conversationProjectId
           placeConversation(opts, input, conversationProjectId)
+          assertNativeRouteCurrent(resolved)
           await reconcile(opts, currentAuthority)
         } catch (error) {
           substrateLog.warn('boot_repl_recovery_unavailable', {
@@ -1300,13 +1386,9 @@ export function buildLlmCallSubstrate(
         ? input.conversationLifecycle : undefined
       const scope = conversationProjectId ?? null
       const events = armIdleOnSettle((async function* (): AsyncGenerator<Event, void, void> {
-        // DECISION doc Part 3c — credential selection + Max-OAuth refresh +
-        // ISSUES-#49 env-scrubbing is now the shared `resolveScrubbedAuthEnv`
-        // helper (so the warm reused router process applies the IDENTICAL
-        // discipline). The helper throws a reason-tagged
-        // `ScrubbedAuthEnvError`; we catch and re-yield the EXACT terminal
-        // `Event` (message + retryable) this generator emitted inline before
-        // the refactor, so the substrate's behaviour + tests are unchanged.
+        // Registered native requests use host custody. Unregistered self-hosts
+        // retain the shared credential-selection, refresh and scrub contract,
+        // including the original typed credential-failure events.
         // #1226 — the scope's live Chat owner, read before credential selection so
         // its credential is the pin. A dispatch for this scope is starting: it is not
         // idle, so its idle timer is disarmed (re-armed by `armIdleOnSettle` on EVERY exit).
@@ -1325,7 +1407,7 @@ export function buildLlmCallSubstrate(
             substrate_instance_id: input.substrate_instance_id, scope, count: owner.count,
           })
         }
-        let resolved: ResolveScrubbedAuthEnvResult
+        let resolved: ClaudeDispatchAuth
         try {
           const helperInput: ResolveScrubbedAuthEnvInput = {}
           if (input.pool !== undefined) helperInput.pool = input.pool
@@ -1334,14 +1416,24 @@ export function buildLlmCallSubstrate(
           if (input.owner_handle !== undefined) {
             helperInput.owner_handle = input.owner_handle
           }
-          // The live owner's credential is the pin; with no live owner, an asleep
-          // conversation's credential is, so the wake resumes it (#1226 sleep).
+          // The live/asleep owner's key pins continuity. Registered routes retain
+          // it even when no local account exists; native auth belongs to the host.
           const pinned = owner?.kind === 'owner' ? owner.credentialId
             : owner?.kind === 'none' ? lifecycle?.resumeCredentialFor?.(scope) : undefined
           const survivors = owner?.kind === 'ambiguous' ? owner.credentialIds ?? [] : []
-          resolved = await resolveScrubbedAuthEnv(helperInput, {
+          resolved = await resolveClaudeDispatchAuth(helperInput, {
             ...(pinned === undefined ? {} : { preferCredentialId: pinned }),
             ...(survivors.length === 0 ? {} : { preferCredentialIds: survivors }),
+          }, input.ownerConversation !== true || conversationProjectId === undefined
+            || owner?.kind === 'owner' || owner?.kind === 'ambiguous' ? undefined : () => {
+            const ids = recordedClaudeConversationIdentities({
+              substrate_instance_id: input.substrate_instance_id,
+              ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+              ...(input.user_id === undefined ? {} : { user_id: input.user_id }),
+              project_id: conversationProjectId ?? 'general', conversationProjectId,
+            })
+            if (ids.length > 1) throw new NativeRelayUnavailable('Recorded native conversation is ambiguous; input was refused')
+            return ids[0]
           })
         } catch (err) {
           if (err instanceof ScrubbedAuthEnvError) {
@@ -1395,10 +1487,10 @@ export function buildLlmCallSubstrate(
           yield { kind: 'error', retryable: false, message: 'Helper session lifecycle has completed' }
           return
         }
+        assertNativeRouteCurrent(resolved)
         if (owner?.kind === 'ambiguous') {
           // Only a same-key join onto a survivor may proceed; anything else would spawn
-          // another conversation beside the survivors. No credential fault is reported,
-          // and a parked-everything pool already answered `all_cooldown` above.
+          // another conversation beside the survivors. No credential fault is reported.
           const key = poolKeyFor(opts)
           const joins = owner.sessionKeys !== undefined
             ? owner.sessionKeys.includes(key)
@@ -1427,6 +1519,7 @@ export function buildLlmCallSubstrate(
             return
           }
         }
+        assertNativeRouteCurrent(resolved)
         if (opts.ephemeral !== true) servedClaudeKeys.add(poolKeyFor(opts))
         innerHandle = factory(opts).start(spec)
         if (cancelled) {
@@ -1438,7 +1531,7 @@ export function buildLlmCallSubstrate(
           if (!reported) {
             if (ev.kind === 'completion') {
               reported = true
-              reportSuccess(pool, cred.id)
+              if (pool !== undefined) reportSuccess(pool, cred.id)
             } else if (ev.kind === 'error') {
               reported = true
               // Binary-not-found (ENOENT) is FATAL + non-retryable, NOT a
@@ -1611,7 +1704,7 @@ export function buildLlmCallSubstrate(
               }
               // A background lane discards an INFERRED cooldown entirely (see
               // `credential_failure_lane`); a real provider status still cools.
-              if (cooldownStatus !== null && (cooldownFromProvider || failureLane === 'interactive')) {
+              if (pool !== undefined && cooldownStatus !== null && (cooldownFromProvider || failureLane === 'interactive')) {
                 if (ev.retry_after_ms !== undefined) {
                   reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms, failureLane)
                 } else {
