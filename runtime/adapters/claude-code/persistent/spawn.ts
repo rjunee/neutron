@@ -84,6 +84,9 @@ export type ReplSpawnProfile = {
 // ownership separately: unsupervised callers have no durable reservation, and a
 // supervised reservation's TTL must not license another locally known live child.
 const failedSpawnSetups = new Map<string, { child: PtyChild; cleanup: () => void }>()
+// A bounded termination attempt is not proof of death. Keep the exact warm
+// owner unservable until its child actually exits, including after the timeout.
+const terminatingWarmSessions = new WeakSet<ReplSession>()
 
 function assertFailedSpawnReaped(sessionKey: string): void {
   const failed = failedSpawnSetups.get(sessionKey)
@@ -242,9 +245,18 @@ async function spawnSession(
     },
   }
   let toolBridgeActive = false
+  // Startup's CAS-bound record authorizes only its recorded planner grant.
+  // Absence is unknown historical argv, never permission to add --agents.
+  // Ordinary admitted turns retain the current profile and its reuse guard.
+  const recordedPlanner = resume?.expectedRecord?.reuse?.planner_profile
+  if (resume?.expectedRecord !== undefined && recordedPlanner !== undefined && recordedPlanner !== PLANNER_PROFILE_ID) {
+    throw new Error('startup recovery recorded planner profile is unavailable')
+  }
+  const plannerRequested = spec.tools.some(tool => tool.name === 'Agent') &&
+    (resume?.expectedRecord === undefined || recordedPlanner === PLANNER_PROFILE_ID)
   const toolBridge = replToolBridgeRef.current
   if (options.enableToolBridge === true && toolBridge !== undefined) {
-    const schemas = [...toolBridge.listToolSchemas(), ...(spec.tools.some(tool => tool.name === 'Agent') ? [PLANNER_TOOL_SCHEMA] : [])]
+    const schemas = [...toolBridge.listToolSchemas(), ...(plannerRequested ? [PLANNER_TOOL_SCHEMA] : [])]
     if (schemas.length > 0) {
       writeFileSync(toolsManifestPath, JSON.stringify(schemas, null, 2))
       mcpServers[TOOLS_BRIDGE_SERVER_NAME] = {
@@ -369,7 +381,7 @@ async function spawnSession(
     // this list is the agent's entire readable filesystem.
     addDirs: [cwd, ...(options.extra_dirs ?? [])],
     tools: toolSurface,
-    plannerRole: toolBridgeActive && toolSurface.includes('Agent'),
+    plannerRole: toolBridgeActive && plannerRequested,
     // Token budget upstream; omit it for older CLIs that reject the option.
     ...(supportsAutocompact(claudeBin) ? { autocompactTokens: 300000 } : {}),
     // P0-1 — when the tool bridge is attached, permit its MCP namespace so the
@@ -407,7 +419,7 @@ async function spawnSession(
   // P0-1 — stamp the bridge attachment so the reuse guard can refuse a
   // bridge-mismatched turn (matches the `requestedToolBridge` computation).
   session.toolBridgeActive = toolBridgeActive
-  session.plannerRole = toolBridgeActive && toolSurface.includes('Agent') ? PLANNER_ROLE : undefined
+  session.plannerRole = toolBridgeActive && plannerRequested ? PLANNER_ROLE : undefined
   // Stamp the installed-MCP-server surface this child was SPAWNED with. `mcpServers`
   // is read once by `claude` at startup, so a warm child physically cannot learn
   // about a server installed afterwards — the reuse guard below evicts + respawns
@@ -1665,6 +1677,10 @@ export async function getOrSpawnSession(
   let evictedForceFresh = false
   if (existing !== undefined) {
     const session = await existing
+    if (terminatingWarmSessions.has(session)) {
+      if (!session.hasChildExited()) throw new PaneOwnershipRefusedError('persistent-repl: previous warm owner has not exited')
+      terminatingWarmSessions.delete(session)
+    }
     // Capture the resume-picker recovery's directives BEFORE the alive/exited branch
     // split (Codex P2): a poisoned session whose escaped child has ALREADY exited
     // before the next dispatch still falls through to the spawn below, and without
@@ -1724,7 +1740,9 @@ export async function getOrSpawnSession(
       const freshSurface = session.toolSurface === requestedToolSurface
       // P0-1 defense-in-depth: never serve a bridge-mismatched warm child.
       const freshBridge = session.toolBridgeActive === requestedToolBridge
-      const freshPlanner = session.plannerRole === (requestedToolBridge && requestedToolSurface.split(',').includes('Agent') ? PLANNER_ROLE : undefined)
+      const requestedPlanner = requestedToolBridge && requestedToolSurface.split(',').includes('Agent') &&
+        (forceResume?.expectedRecord === undefined || forceResume.expectedRecord.reuse?.planner_profile === PLANNER_PROFILE_ID)
+      const freshPlanner = session.plannerRole === (requestedPlanner ? PLANNER_ROLE : undefined)
       const freshCredential = session.authFingerprint === authFingerprintFor(options.env, options.sinkTokenPath)
       // INSTALLED-MCP-SERVER guard: `mcpServers` is read once by `claude` at
       // startup, so a warm child cannot learn about a server the owner installed
@@ -1749,6 +1767,11 @@ export async function getOrSpawnSession(
           ? await options.resolveExtraMcpServers()
           : [],
       )
+      // Another request can start or finish termination while MCP resolution
+      // suspends. Recheck this exact owner before either reuse or eviction.
+      if (terminatingWarmSessions.has(session) || session.hasChildExited()) {
+        throw new PaneOwnershipRefusedError('persistent-repl: warm owner changed during profile resolution')
+      }
       const freshMcpServers = session.mcpFingerprint === requestedMcpFingerprint
       // ABANDON-POISON guard (2026-06-18 warm-session hang fix): a session whose
       // prior turn was abandoned (caller timeout / substrate turn-timeout) is left
@@ -1826,7 +1849,7 @@ export async function getOrSpawnSession(
             : !freshBridge
               ? 'tool-bridge mismatch'
               : 'credential rotation'
-        // Evict, then AWAIT the old child's exit before falling through to spawn so a
+        // Terminate, then PROVE the old child's exit before falling through to spawn so a
         // supervised `--resume` replacement (same sessionId) never co-owns the session
         // transcript with the dying child (the Argus-r3 one-owner invariant). The
         // credential-freshness path fires on every token rotation (regularly), unlike
@@ -1837,9 +1860,14 @@ export async function getOrSpawnSession(
         // every turn resolves through. `childByKey` one line down has been identity-guarded
         // since r30 — two maps, two rules, one line apart, which is the contrast that was
         // visible at every one of these sites.
+        terminatingWarmSessions.add(session)
+        await terminateChild(session.child)
+        if (!session.hasChildExited()) {
+          throw new PaneOwnershipRefusedError('persistent-repl: previous warm owner has not exited')
+        }
+        terminatingWarmSessions.delete(session)
         if (pool.get(sessionKey) === existing) pool.delete(sessionKey)
         if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
-        await terminateChild(session.child)
         // LATCH THE DEATH. An eviction is a child exit the supervision watchdog can
         // never see: the registry is repointed at the replacement child before its
         // next tick, so the dead generation's owner learned nothing until the 90-min

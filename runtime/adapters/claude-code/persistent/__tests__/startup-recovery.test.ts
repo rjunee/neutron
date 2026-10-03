@@ -8,7 +8,9 @@ import { ReplSession, unlinkSessionConfigs } from '../repl-session.ts'
 import { disownPane, type ReplRegistryRecord } from '../repl-registry.ts'
 import { sessionJsonlPath } from '../session-size-watchdog.ts'
 import { getOrSpawnSession } from '../spawn.ts'
-import { childByKey, pool, sink } from '../pool-state.ts'
+import { childByKey, pool, sink, replToolBridgeRef } from '../pool-state.ts'
+import { PLANNER_PROFILE, PLANNER_PROFILE_ID, PLANNER_ROLE, PLANNER_TOOL_SCHEMA } from '../../../../workers/planner-work.ts'
+import { setNativeChildLiveness } from '../native-child-liveness.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 import type { AdoptableHost, PtyChild } from '../pty-host.ts'
 import { FakeAdoptableHost } from './boot-adoption-host.ts'
@@ -21,6 +23,7 @@ const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => {
   for (const close of cleanup.splice(0)) await close()
   resetBootAdoptionForTests()
+  replToolBridgeRef.current = undefined
   pool.delete(key)
   childByKey.delete(key)
   await sink.stop()
@@ -69,6 +72,27 @@ test('absent/retired authority stays asleep, while a captured active row resumes
   expect(await recoverStartupRepl(f.options, key, [{ name: 'Read' }], { spawn: f.spawn })).toEqual({ status: 'skipped' })
   expect(f.calls).toHaveLength(0)
   expect(await f.recover()).toEqual({ status: 'resumed' })
+})
+
+test.each(['Agent,Read', ''])('startup reconstructs recorded tools %j without adding current grants', async surface => {
+  const f = fixture()
+  f.save({ ...f.row, reuse: { ...f.row.reuse!, tool_surface: surface } })
+  expect(await recoverStartupRepl(f.options, key, [{ name: 'Read' }, { name: 'Agent' }, { name: 'SendMessage' }], {
+    adoption: { listProcesses: () => [] }, spawn: f.spawn,
+  })).toEqual({ status: 'resumed' })
+  expect(f.calls[0]![2]).toEqual({ tools: surface === '' ? [] : [{ name: 'Agent' }, { name: 'Read' }], model_preference: [f.row.model] })
+})
+
+test.each(['Read,Read', 'Read,', 'Unknown'])('unreconstructable recorded tools %j refuse without a spawn', async surface => {
+  const f = fixture()
+  expect((await f.recover({ ...f.row, reuse: { ...f.row.reuse!, tool_surface: surface } })).status).toBe('refused')
+  expect(f.calls).toHaveLength(0)
+})
+
+test.each(['changed', PLANNER_PROFILE_ID])('unavailable or inconsistent recorded planner %j refuses', async planner => {
+  const f = fixture()
+  expect((await f.recover({ ...f.row, reuse: { ...f.row.reuse!, planner_profile: planner } })).status).toBe('refused')
+  expect(f.calls).toHaveLength(0)
 })
 
 test('explicit sleep preserves its durable row and transcript without a startup wake', async () => {
@@ -227,3 +251,148 @@ test.each([false, true])('native startup boundary preserves the transcript and s
   expect(argvSeen).not.toContain('--session-id')
   expect(readFileSync(f.transcript, 'utf8')).toContain('retained')
 })
+
+test.each([[false, false], [true, false], [false, true], [true, true]])('recorded planner grant %s recovers and the next turn proves old-owner death (stubborn: %s)', async (recordedPlanner, stubborn) => {
+  const f = fixture()
+  f.options.enableToolBridge = true
+  f.options.user_id = 'startup-profile-owner'
+  cleanup.push(() => { setNativeChildLiveness('startup-profile-owner', undefined) })
+  const row = { ...f.row, reuse: { ...f.row.reuse!, tool_surface: 'Read,Agent', tool_bridge: true,
+    ...(recordedPlanner ? { planner_profile: PLANNER_PROFILE_ID } : {}) } }
+  f.save(row)
+  replToolBridgeRef.current = {
+    listToolSchemas: () => [{ name: 'test_tool', description: 'Contained test tool', input_schema: {} }],
+    dispatch: async () => ({}),
+  }
+  const health = Bun.serve({ hostname: '127.0.0.1', port: 0,
+    fetch: () => Response.json({ ok: true, session_id: row.sessionId }) })
+  cleanup.push(() => { health.stop(true) })
+  const children: PtyChild[] = []
+  const exits: (() => void)[] = []
+  let killObserved!: () => void
+  const killing = new Promise<void>(resolve => { killObserved = resolve })
+  const argvs: string[][] = []
+  const manifests: { name: string }[][] = []
+  let writes = 0
+  const host: AdoptableHost = {
+    async spawn(argv, opts) {
+      // A replacement cannot start before the exact prior child has exited.
+      expect(children.every(child => child.hasExited())).toBe(true)
+      argvs.push([...argv])
+      const config = JSON.parse(readFileSync(argv[argv.indexOf('--mcp-config') + 1]!, 'utf8'))
+      const servers = Object.values(config.mcpServers) as { env: Record<string, string> }[]
+      const channel = servers.find(server => server.env.CHANNEL_NAME !== undefined)!
+      const bridge = servers.find(server => server.env.TOOLS_MANIFEST_PATH !== undefined)!
+      manifests.push(JSON.parse(readFileSync(bridge.env.TOOLS_MANIFEST_PATH!, 'utf8')))
+      for (const path of ['/channel-ready', '/channel-bound']) {
+        const response = await fetch(`http://127.0.0.1:${sink.port}${path}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Sink-Token': channel.env.SINK_TOKEN! },
+          body: JSON.stringify({ session_id: row.sessionId, channel_port: health.port }),
+        })
+        expect(response.status).toBe(200)
+      }
+      let exited = false
+      let exit!: () => void
+      const done = new Promise<null>(resolve => { exit = () => { exited = true; resolve(null) } })
+      const ignoreKill = stubborn && children.length === 0
+      const child: PtyChild = { pid: 2_147_483_647, paneHandle: `contained-profile-${children.length}`, exited: done,
+        hasExited: () => exited, kill: () => { killObserved(); if (!ignoreKill) exit() }, write: () => { writes++ },
+        writeKey: () => { writes++ }, submitLine: async () => { writes++ }, beginOutput: () => opts.onScreen?.('❯ '),
+      }
+      children.push(child)
+      exits.push(exit)
+      cleanup.push(() => { exit() })
+      return child
+    },
+    async inspectHandle() { return { kind: 'gone' } },
+    async attach() { throw new Error('unexpected attach') }, async closeHandle() { throw new Error('unexpected close') },
+  }
+  f.options.ptyHost = host
+  const currentTools = [{ name: 'Read' }, { name: 'Agent' }, { name: 'SendMessage' }]
+  const recover = () => recoverStartupRepl(f.options, key, currentTools, { adoption: { listProcesses: () => [] } })
+  expect(await Promise.all([recover(), recover()])).toEqual([{ status: 'resumed' }, { status: 'resumed' }])
+  const recovered = (await pool.get(key))!
+  const dispose = (session: ReplSession) => cleanup.push(() => {
+    session.sizeWatchdog?.stop(); session.deadTurnWatcher?.stop(); session.selfFenceTimer?.cancel()
+    sink.unregister(session.sessionId); unlinkSessionConfigs(session); session.paneClaimBy = undefined
+  })
+  dispose(recovered)
+  expect(argvs).toHaveLength(1)
+  expect(argvs[0]![argvs[0]!.indexOf('--tools') + 1]).toBe('Read,Agent')
+  expect(argvs[0]!.includes('--agents')).toBe(recordedPlanner)
+  if (recordedPlanner) expect(argvs[0]![argvs[0]!.indexOf('--agents') + 1]).toBe(PLANNER_PROFILE)
+  expect(manifests[0]!.some(tool => tool.name === PLANNER_TOOL_SCHEMA.name)).toBe(recordedPlanner)
+  expect(recovered.plannerRole).toBe(recordedPlanner ? PLANNER_ROLE : undefined)
+  expect(JSON.parse(readFileSync(f.options.replRegistryPath!, 'utf8'))[key].reuse.planner_profile)
+    .toBe(recordedPlanner ? PLANNER_PROFILE_ID : undefined)
+  expect(writes).toBe(0)
+  setNativeChildLiveness('startup-profile-owner', () => true)
+  await expect(getOrSpawnSession(key, f.options, { tools: currentTools, model_preference: [row.model!] }))
+    .rejects.toThrow('native-child liveness is unknown')
+  expect(argvs).toHaveLength(1)
+  expect(children[0]!.hasExited()).toBe(false)
+  expect(await pool.get(key)).toBe(recovered)
+  setNativeChildLiveness('startup-profile-owner', undefined)
+  const holdMatchingRequest = () => {
+    let entered!: () => void
+    const resolving = new Promise<void>(resolve => { entered = resolve })
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    let first = true
+    f.options.resolveExtraMcpServers = async () => {
+      if (first) { first = false; entered(); await held }
+      return []
+    }
+    const request = getOrSpawnSession(key, f.options, {
+      tools: [{ name: 'Read' }, { name: 'Agent' }], model_preference: [row.model!],
+    })
+    return { request, resolving, release }
+  }
+  if (recordedPlanner) {
+    // Positive control: the same held resolver reuses an unchanged exact owner.
+    const healthy = holdMatchingRequest()
+    await healthy.resolving
+    healthy.release()
+    expect(await healthy.request).toBe(recovered)
+    expect(argvs).toHaveLength(1)
+  }
+  if (stubborn) {
+    const before = readFileSync(f.options.replRegistryPath!, 'utf8')
+    const suspended = recordedPlanner ? holdMatchingRequest() : undefined
+    if (suspended) await suspended.resolving
+    const attempt = getOrSpawnSession(key, f.options, { tools: currentTools, model_preference: [row.model!] })
+    const refused = expect(attempt).rejects.toThrow('previous warm owner has not exited')
+    await killing
+    if (suspended) {
+      suspended.release()
+      await expect(suspended.request).rejects.toThrow('warm owner changed during profile resolution')
+    }
+    // Even the old, matching surface cannot serve a child already terminating.
+    await expect(getOrSpawnSession(key, f.options, { tools: [{ name: 'Read' }, { name: 'Agent' }], model_preference: [row.model!] }))
+      .rejects.toThrow('previous warm owner has not exited')
+    await refused
+    expect(argvs).toHaveLength(1)
+    expect(await pool.get(key)).toBe(recovered)
+    expect(childByKey.get(key)).toBe(children[0])
+    expect(readFileSync(f.options.replRegistryPath!, 'utf8')).toBe(before)
+    expect(children[0]!.hasExited()).toBe(false)
+    exits[0]!()
+    await children[0]!.exited
+  }
+  // The actual gate used by an ordinary next turn, with no recovery directive.
+  const upgraded = await getOrSpawnSession(key, f.options, { tools: currentTools, model_preference: [row.model!] })
+  dispose(upgraded)
+  expect(upgraded).not.toBe(recovered)
+  expect(children[0]!.hasExited()).toBe(true)
+  expect(argvs).toHaveLength(2)
+  for (const argv of argvs) {
+    expect(argv[argv.indexOf('--resume') + 1]).toBe(row.sessionId)
+    expect(argv).not.toContain('--session-id')
+  }
+  expect(argvs[1]![argvs[1]!.indexOf('--tools') + 1]).toBe('Read,Agent,SendMessage')
+  expect(upgraded.plannerRole).toBe(PLANNER_ROLE)
+  expect(upgraded.sessionId).toBe(row.sessionId)
+  expect(manifests[1]!.some(tool => tool.name === PLANNER_TOOL_SCHEMA.name)).toBe(true)
+  expect(writes).toBe(0)
+  expect(readFileSync(f.transcript, 'utf8')).toContain('retained')
+}, 15_000)
