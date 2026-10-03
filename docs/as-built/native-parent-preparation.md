@@ -57,3 +57,19 @@ The canonical local check is `bash scripts/check-shared-host.sh`, which runs
 all project typechecks and the complete partitioned suite under the shared-host
 admission lock. Publication requires its completed receipt; the focused checks
 above are not a replacement for that gate.
+
+Final canonical receipt: tested revision
+`fddd07befac58debc3efaf1bba99c9ee2a4d9a24`, with the reviewed source and
+consuming-test hashes above unchanged. `bash scripts/check-shared-host.sh`
+completed with exit zero: all 51 project typechecks passed; all 1,776 declared,
+discovered and assigned test files executed; 27,646 tests passed, 24 skipped,
+zero failed, and 130,788 assertions. All 19 bounded-memory lanes were green.
+The runner's measured suite input identity remained
+`4a673a0235722f6aa6070649cfd1badffe1ea952978d572dc29472e1138a6e26`.
+The complete command ran in an isolated unregistered fixture environment,
+without file selectors, retaining the effective user and proving the host's
+registration and mount namespace unchanged afterward. This is a test-environment
+receipt, not registered live provider acceptance. An earlier complete attempt
+on `261e5dec0d55fc57fbc109f5b2c9e869a31fb1b0` failed on ambient route and
+permission assumptions; it is not counted as passing proof. Final-head CI,
+served deployment and fresh unattended workflow acceptance remain separate.

@@ -53,3 +53,13 @@ relay tests could not bind their temporary Unix sockets in the execution sandbox
 it does not establish a relay-suite pass. The required complete suite remains an
 integration gate on the final candidate. Production authentication, permission
 guards and the test runner are unchanged.
+
+Integration receipt: `bash scripts/check-shared-host.sh` on frozen revision
+`fddd07befac58debc3efaf1bba99c9ee2a4d9a24` completed with exit zero in an
+isolated unregistered fixture environment, without test selectors. All 51
+typechecks passed and all 1,776 declared/discovered files executed: 27,646 tests
+passed, 24 skipped, zero failed, 130,788 assertions. All 19 runner lanes passed;
+measured suite identity remained
+`4a673a0235722f6aa6070649cfd1badffe1ea952978d572dc29472e1138a6e26`.
+The host registration and mount namespace were unchanged afterward. This earns
+the full-suite integration receipt, not live registered transport acceptance.

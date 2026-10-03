@@ -44,3 +44,15 @@ subset could not bind its scratch loopback sink; successful test receipts used
 the approved execution environment with loopback binding available. The full
 shared-host gate and publication validation remain the integrating change's
 responsibility; these receipts establish focused behavior only.
+
+Final integration receipt: `bash scripts/check-shared-host.sh` on revision
+`fddd07befac58debc3efaf1bba99c9ee2a4d9a24` completed with exit zero in an
+isolated unregistered fixture environment. With no file selectors, all 51
+typechecks passed and all 1,776 declared/discovered files executed: 27,646 tests
+passed, 24 skipped, zero failed, 130,788 assertions across 19 green runner lanes.
+Measured suite input identity remained
+`4a673a0235722f6aa6070649cfd1badffe1ea952978d572dc29472e1138a6e26`;
+the host registration and mount namespace were unchanged afterward. The original
+production and consuming Open E2E bytes remained reviewed and unchanged.
+Live registered provider acceptance and final publication-head CI are not
+inferred from this fixture-environment receipt.
