@@ -111,3 +111,20 @@ GO. The final publication head adds this measured receipt without changing the
 tested source, tests or dependencies; it does not relabel the tested revision.
 Required exact-publication-head CI, deployment, live provider recovery and
 unattended workflow acceptance remain separate obligations.
+
+## Post-CI fixture correction: final tested revision
+
+After correcting the unrelated deterministic attempt-order fixture, the canonical
+`bash scripts/check-shared-host.sh` passed again on clean tested revision
+`225b91a01b630cb47f719fd64a632438bee661f4`: all 51 TypeScript configurations,
+including both root and Trident, and all 1,776 declared/discovered/assigned/executed
+test files across 19 lanes passed with zero failed lanes. The named consuming
+`open/__tests__/project-build-e2e.test.ts` and
+`open/__tests__/boot-live-agent-adoption.test.ts` both executed; the concurrent
+MCP refresh control also passed. The canonical four jobs, chunk size 100 and
+default concurrency were unchanged. Suite input identity remained
+`7b4722809fd1e649d8a44db71bfa104089e5f353beea94215704a83547ccb2fe`;
+the complete retained log SHA-256 is
+`012bf8475a6b5ace6590a6374f1ed65bf3be74a64ed3dbab5dd1c54dbd99cebe`.
+The publication head adds records only; exact-head CI and live acceptance remain
+required and are not claimed by this local receipt.

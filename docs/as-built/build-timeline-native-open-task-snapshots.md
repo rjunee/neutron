@@ -53,3 +53,16 @@ The final publication head records this result without changing the tested
 source, tests or dependencies. Exact-head CI and served deployment are still
 required; this receipt does not invent active-worker liveness, registration of
 unbound historical work, provider cost or complete all-PR phase coverage.
+
+## Post-CI fixture correction: final tested revision
+
+The unchanged dashboard implementation was included in the final canonical
+`bash scripts/check-shared-host.sh` on clean revision
+`225b91a01b630cb47f719fd64a632438bee661f4`. All 51 TypeScript configurations and
+all 1,776 test files passed across 19 lanes, with zero failed lanes and unchanged
+suite input identity `7b4722809fd1e649d8a44db71bfa104089e5f353beea94215704a83547ccb2fe`.
+The complete retained log SHA-256 is
+`012bf8475a6b5ace6590a6374f1ed65bf3be74a64ed3dbab5dd1c54dbd99cebe`.
+The final publication head adds documentation only. This is local consuming
+verification, not a claim that the new importer is deployed or that unknown
+historical phase coverage has been recovered.

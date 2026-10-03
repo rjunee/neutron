@@ -28,3 +28,20 @@ outcomes now retain the literal type with `as const`; runtime values and exact
 array assertions are unchanged. That aborted attempt executed no tests and is
 not full-suite evidence. The owned Work Board typecheck is required before the
 new canonical validation attempt.
+
+## Final canonical verification
+
+The owning `tsc -p work-board/tsconfig.json` and all 12 focused refusal tests
+passed before clean revision `225b91a01b630cb47f719fd64a632438bee661f4` was frozen.
+Its subsequent canonical `bash scripts/check-shared-host.sh` exited zero: all 51
+TypeScript configurations, including root and Trident, and all 1,776
+declared/discovered/assigned/executed test files passed across 19 lanes with
+zero failed lanes. The 1,537 general, 22 PGLite, 43 device and 174 real-HTTP
+files all executed; existing case-level skips were retained, not file exclusions.
+Both named consuming Open E2Es executed. Suite input identity was unchanged:
+`7b4722809fd1e649d8a44db71bfa104089e5f353beea94215704a83547ccb2fe`.
+The complete retained log SHA-256 is
+`012bf8475a6b5ace6590a6374f1ed65bf3be74a64ed3dbab5dd1c54dbd99cebe`.
+The publication head adds this measured record without changing the tested
+source, fixtures or dependencies. Exact-head CI, deployment and live unattended
+acceptance remain independent requirements.
