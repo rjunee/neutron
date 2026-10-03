@@ -28,7 +28,8 @@
  * the ruling asks for: it is REUSED, not respawned.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test'
+import * as capacity from '../../../../workers/claude-capacity-client.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
 import { getOrSpawnSession, quarantinedChildCount, sweepQuarantinedChildren } from '../spawn.ts'
 import { classifyThrownSpawnError } from '../classify-spawn-error.ts'
@@ -50,8 +51,13 @@ const CHANNEL = 'neutron-56565656565656565656565656565656'
 let hostedWork = 0
 /** How many times the quarantine guard asked. A case asserts its own premise with it. */
 let hostedAsks = 0
+let unregisteredPin: ReturnType<typeof spyOn>
+let unregisteredRoute: ReturnType<typeof spyOn>
 
 beforeEach(() => {
+  // Fake children model an unregistered self-host, regardless of host provisioning.
+  unregisteredPin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   hostedWork = 0
   hostedAsks = 0
   // A CLEAN BASELINE, ASSERTED. Every count below is exact, and an exact count is only
@@ -67,6 +73,8 @@ afterEach(async () => {
   pool.clear()
   childByKey.clear()
   sink.unregister(SESSION_ID)
+  unregisteredRoute.mockRestore()
+  unregisteredPin.mockRestore()
 })
 
 /** A host that refuses to spawn: every case here ends at the eviction, and a spawn attempt

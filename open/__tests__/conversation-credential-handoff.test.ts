@@ -10,7 +10,8 @@
  * real dev-channel peer (`lifecycleReplHost`), so assertions read actual children,
  * actual kills and the RPCs actually sent.
  */
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -44,6 +45,13 @@ import { ActivityInspector, inspectorScopeKey } from '../activity-inspector.ts'
 
 const dirs: string[] = []
 const peers: Array<ReturnType<typeof lifecycleReplHost>> = []
+let unregisteredPin: ReturnType<typeof spyOn>
+let unregisteredRoute: ReturnType<typeof spyOn>
+beforeEach(() => {
+  // Credential handoff uses native self-host auth with synthetic credentials.
+  unregisteredPin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
 afterEach(async () => {
   // A placed child survives a gateway shutdown by design (its pane outlives us);
   // end every fixture child first so no case inherits another's REPL.
@@ -52,6 +60,8 @@ afterEach(async () => {
   retiringSessionKeys.clear()
   setNativeChildLiveness(OWNER_USER_ID, undefined)
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  unregisteredRoute.mockRestore()
+  unregisteredPin.mockRestore()
 })
 function tempDir(prefix: string): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix))); dirs.push(dir); return dir

@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '../../../../workers/claude-capacity-client.ts'
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -9,6 +10,18 @@ import { loadRegistry } from '../repl-registry.ts'
 import type { PtyHost } from '../pty-host.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 import { lifecycleReplHost } from './lifecycle-repl-host.ts'
+
+let unregisteredPin: ReturnType<typeof spyOn>
+let unregisteredRoute: ReturnType<typeof spyOn>
+beforeEach(() => {
+  // Fake children exercise native self-host lifecycle, not host registration.
+  unregisteredPin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
+afterEach(() => {
+  unregisteredRoute.mockRestore()
+  unregisteredPin.mockRestore()
+})
 
 test.each([false, true])('failed setup refuses repeated starts until exact child exit, then recovers (registry=%s)', async registry => {
   const dir = mkdtempSync(join(tmpdir(), 'neutron-spawn-retry-'))

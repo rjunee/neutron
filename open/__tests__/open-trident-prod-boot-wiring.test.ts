@@ -18,7 +18,7 @@ import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqli
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import ts from 'typescript'
-import { mkdirSync, writeFileSync, mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { chmodSync, mkdirSync, writeFileSync, mkdtempSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -152,6 +152,8 @@ test.each([[false, true, true], [true, true, true], [true, false, true], [true, 
   const cwd = join(tmpDir, 'Projects', 'project-one')
   const codexHome = join(cwd, '.codex')
   mkdirSync(codexHome, { recursive: true, mode: privateHome ? 0o700 : 0o755 })
+  // mkdir's requested mode is masked by umask; preserve the negative fixture.
+  chmodSync(codexHome, privateHome ? 0o700 : 0o755)
   writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify('project-one'))
   if (journal) writeFileSync(join(codexHome, '.neutron-owner-launch.json'), '{}')
   const order: string[] = []

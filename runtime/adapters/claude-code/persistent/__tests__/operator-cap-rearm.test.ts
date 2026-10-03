@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '../../../../workers/claude-capacity-client.ts'
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -15,7 +16,16 @@ import { sessionJsonlPath } from '../session-size-watchdog.ts'
 import type { PersistentReplSubstrateOptions } from '../types.ts'
 
 const dirs: string[] = []
+let unregisteredPin: ReturnType<typeof spyOn>
+let unregisteredRoute: ReturnType<typeof spyOn>
+beforeEach(() => {
+  // Registry fixtures use native self-host auth, not the surrounding host route.
+  unregisteredPin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
 afterEach(() => {
+  unregisteredRoute.mockRestore()
+  unregisteredPin.mockRestore()
   setFlockImplForTests(undefined)
   setNativeChildLiveness('cap-test-owner', undefined)
   retiringSessionKeys.clear()

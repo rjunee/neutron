@@ -1,5 +1,6 @@
 /** A real Open graph consumes its previous gateway's project REPL before any turn. */
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, spyOn } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { generateKeyPairSync } from 'node:crypto'
 import * as nativeSpawn from '@neutronai/runtime/adapters/claude-code/persistent/spawn.ts'
 import * as transcriptPaths from '@neutronai/runtime/adapters/claude-code/persistent/session-size-watchdog.ts'
@@ -189,7 +190,12 @@ let restoreHost: (() => void) | undefined
 beforeAll(() => { fixtureHome = mkdtempSync(join(tmpdir(), 'neutron-boot-agent-adoption-')) })
 afterAll(() => { rmSync(fixtureHome, { recursive: true, force: true }) })
 
+let unregisteredPin: ReturnType<typeof spyOn>
+let unregisteredRoute: ReturnType<typeof spyOn>
 beforeEach(() => {
+  // Adoption fixtures bind synthetic native credentials, not a host relay route.
+  unregisteredPin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   setNativeChildLiveness('owner', undefined)
   resetBootAdoptionForTests()
   // The reply sink is a process singleton. Both gateway lifetimes must use its
@@ -230,6 +236,8 @@ afterEach(async () => {
     else process.env[key] = savedEnv[key]
   }
   home = undefined
+  unregisteredRoute.mockRestore()
+  unregisteredPin.mockRestore()
 })
 
 function seedProject(id: string, opts: { deleted?: boolean; provider?: string } = {}): void {
