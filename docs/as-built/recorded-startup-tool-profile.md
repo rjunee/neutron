@@ -56,6 +56,18 @@ Root and Trident checks passed with
 `bunx --no-install tsc --noEmit -p tsconfig.json` and
 `bunx --no-install tsc --noEmit -p trident/tsconfig.json`.
 
+The broader suite exposed a deterministic contention-fixture defect:
+`evict-deletes-only-its-own-entry.test.ts:459` published a new chain link on
+every liveness read. The added post-resolution and post-termination checks
+consumed several links during one stale decision, so four publications no
+longer meant four re-entries. Each link now publishes once. The untouched
+`118e287ff` baseline passed both bound controls; candidate `6d9d954d4` passed
+the three-contender case and failed the four-contender refusal. With the
+fixture correction, the eviction file passes 10 tests and 43 assertions.
+Disabling the existing bound makes the four-contender refusal fail while
+the three-contender acceptance stays green; restoring it passes both.
+The production bound and ownership checks are unchanged by this correction.
+
 Consolidated verification must include
 `open/__tests__/boot-live-agent-adoption.test.ts` and
 `open/__tests__/project-build-e2e.test.ts`, the root and Trident typechecks,
