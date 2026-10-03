@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { importCodexFile, importCodexOperations, type CodexImportOptions } from './build-timeline-codex-import.ts'
 import { appendChangedPhaseObservations, readPhaseObservations, validatePhaseObservation } from './build-timeline-sources.ts'
 import { combineTimelineSources } from '@neutronai/trident/build-timeline-catalogue.ts'
 import { createTimelineHandler } from './build-timeline-server.ts'
+import { importRegisteredCodexRollout } from './build-timeline-codex-discover.ts'
 
 const repo = 'example/project'
 const options: CodexImportOptions = {
@@ -32,6 +33,96 @@ describe('bounded native Codex operation reconstruction', () => {
     identity: Record<string, unknown> = {}) => record('token_usage_record', {
       thread_id: 'thread-1', turn_id: 'turn-1', turn_token_usage: totals, ...identity,
     }, 8000)
+  const start = (overrides: Record<string, unknown> = {}) => record('event_msg', {
+    type: 'task_started', turn_id: 'turn-1', started_at: 1, ...overrides,
+  }, 1100)
+  test('registered native starts, cumulative usage and completion replace one authenticated phase across checkpoint replay', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codex-active-turn-'))
+    try {
+      const root = join(directory, 'sessions'), dated = join(root, '2026/10/03')
+      await mkdir(dated, { recursive: true })
+      const path = join(dated, 'rollout-fixture.jsonl'), journal = join(directory, 'observations.jsonl')
+      await writeFile(path, [meta, start(), context()].join('\n') + '\n')
+      let imported = await importRegisteredCodexRollout(root, path, turnOptions)
+      const ingest = async () => {
+        const recorded = new Set((await readPhaseObservations(journal)).map(row => row.eventId))
+        await appendChangedPhaseObservations(journal, imported.observations.filter(row => !recorded.has(row.eventId)))
+        const snapshot = combineTimelineSources({ observedAt: 10000, repositories: [] }, await readPhaseObservations(journal), [], 10000)
+        const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: () => snapshot })
+        expect((await handler(new Request('http://localhost/api/timeline'))).status).toBe(401)
+        const response = await handler(new Request('http://localhost/api/timeline', {
+          headers: { authorization: `Basic ${Buffer.from('viewer:fixture').toString('base64')}` },
+        }))
+        expect(response.status).toBe(200)
+        return await response.json() as typeof snapshot
+      }
+      let consumed = await ingest()
+      expect(consumed.cards[0]!.segments).toHaveLength(1)
+      expect(consumed.cards[0]!.segments[0]).toMatchObject({ phase: 'build', start: 1000, timing: 'open', model: 'model-a', usage: { tokens: null } })
+      expect(consumed.cards[0]!.segments[0]!.detail).toContain('completion unknown, not worker liveness')
+      expect(consumed.cards[0]!.workSignal?.state).not.toBe('running')
+      expect(imported.coverage.incomplete).toBe(1)
+      const firstId = imported.observations[0]!.eventId
+      await appendFile(path, command() + '\n' + usage() + '\n')
+      imported = await importRegisteredCodexRollout(root, path, turnOptions, JSON.parse(JSON.stringify(imported.checkpoint)))
+      consumed = await ingest()
+      expect(consumed.cards[0]!.segments).toHaveLength(2)
+      expect(consumed.cards[0]!.segments.find(s => s.phase === 'test')!.usage.tokens).toBeNull()
+      expect(consumed.cards[0]!.segments.find(s => s.phase === 'build')).toMatchObject({ timing: 'open', usage: { input: 20, output: 2, cacheRead: 5, tokens: 27 } })
+      expect(imported.observations.find(o => o.phase === 'build')!.eventId).not.toBe(firstId)
+      await appendFile(path, record('token_usage_record', { thread_id: 'thread-1', turn_id: 'turn-1',
+        turn_token_usage: { input_tokens: 40, output_tokens: 4, cached_input_tokens: 10 } }, 8200) + '\n')
+      imported = await importRegisteredCodexRollout(root, path, turnOptions, imported.checkpoint)
+      consumed = await ingest()
+      expect(consumed.cards[0]!.segments.find(s => s.phase === 'build')!.usage.tokens).toBe(44)
+      // A later context changes the honest model answer, not the phase identity.
+      await appendFile(path, context('model-b', 8500) + '\n' + task() + '\n')
+      imported = await importRegisteredCodexRollout(root, path, turnOptions, imported.checkpoint)
+      consumed = await ingest()
+      expect(consumed.cards[0]!.segments).toHaveLength(2)
+      expect(consumed.cards[0]!.segments.find(s => s.phase === 'build')).toMatchObject({ start: 1000, end: 9000, timing: 'recorded', model: null, usage: { tokens: 44 } })
+      expect(imported.coverage.incomplete).toBe(0)
+      const finalRows = imported.observations
+      imported = await importRegisteredCodexRollout(root, path, turnOptions, imported.checkpoint)
+      expect(imported.scan.readBytes).toBe(0)
+      expect(imported.observations).toEqual(finalRows)
+      expect((await ingest()).cards[0]!.segments).toHaveLength(2)
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+  test('partial tails defer native snapshots even with a visible start and usage', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'codex-active-tail-'))
+    try {
+      const path = join(directory, 'rollout.jsonl')
+      for (const ending of [[], [task()]]) {
+        const body = [start(), context(), usage(), ...ending].join('\n') + '\n'
+        await writeFile(path, meta + '\n' + record('response_item', { text: 'padding'.repeat(1000) }) + '\n' + body)
+        const full = await importCodexFile(path, turnOptions)
+        const tail = await importCodexFile(path, turnOptions, Buffer.byteLength(body) + 25)
+        expect(full.observations).toHaveLength(1)
+        expect(tail.scan.partial).toBe(true)
+        expect(tail.observations).toEqual([])
+        expect(tail.coverage.deferredTurns).toBe(1)
+      }
+    } finally { await rm(directory, { recursive: true, force: true }) }
+  })
+  test('open native tasks require exact ownership and native start, preserve unknown usage and refuse changed starts', async () => {
+    for (const turnBindings of [[], [{ ...turnOptions.turnBindings![0]!, sessionId: 'foreign' }],
+      [{ ...turnOptions.turnBindings![0]!, turnId: 'foreign' }]]) {
+      expect((await run([start()], { ...turnOptions, turnBindings })).observations).toEqual([])
+    }
+    for (const receipts of [[], [usage(undefined, { thread_id: 'foreign' })], [usage(undefined, { turn_id: 'foreign' })],
+      [usage(), usage({ input_tokens: 1, output_tokens: 0, cached_input_tokens: 0 })]]) {
+      expect((await run([start(), ...receipts], turnOptions)).observations[0]).toMatchObject({ endedAt: null, inputTokens: null })
+    }
+    expect((await run([usage()], turnOptions)).observations).toEqual([])
+    expect((await run([start({ started_at: undefined })], turnOptions)).observations).toEqual([])
+    expect((await run([start(), task({ completed_at: undefined })], turnOptions)).observations[0]!.endedAt).toBeNull()
+    await expect(run([start(), start({ started_at: 2 })], turnOptions)).rejects.toThrow('Conflicting native task start')
+    await expect(run([start(), task({ started_at: 2 })], turnOptions)).rejects.toThrow('Conflicting native task start')
+    for (const phase of ['build', 'review', 'fix', 'test'] as const) {
+      expect((await run([start()], { ...turnOptions, turnBindings: [{ ...turnOptions.turnBindings![0]!, phase }] })).observations[0]!.phase).toBe(phase)
+    }
+  })
   test('exact task registration also serves nested tests without a checkout binding or duplicate usage', async () => {
     const result = await run([command(), usage(), task()], { ...turnOptions, bindings: [] })
     expect(result.coverage.unbound).toBe(0)
@@ -141,9 +232,8 @@ describe('bounded native Codex operation reconstruction', () => {
     await expect(run([task()], { ...turnOptions, turnBindings: [...turnOptions.turnBindings!, ...turnOptions.turnBindings!] })).rejects.toThrow('turn binding')
     await expect(run([task()], { ...turnOptions, turnBindings: [{ ...turnOptions.turnBindings![0]!, links: [{ repository: 'other/project', prNumber: 7 }] }] })).rejects.toThrow('turn binding')
   })
-  test('native task requires recorded completion; contexts and task-start alone never invent elapsed phases', async () => {
-    for (const event of [task({ started_at: undefined }), task({ completed_at: undefined }), task({ completed_at: 0 }),
-      record('event_msg', { type: 'task_started', turn_id: 'turn-1', started_at: 1 }, 1000)]) {
+  test('completion-only history requires valid native boundaries', async () => {
+    for (const event of [task({ started_at: undefined }), task({ completed_at: undefined }), task({ completed_at: 0 })]) {
       expect((await run([event], turnOptions)).observations).toEqual([])
     }
     const result = await run([task(), task()], turnOptions)

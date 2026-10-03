@@ -188,13 +188,15 @@ test('recovery bind sees the matched card even when a real run fires strategy pr
 })
 
 test('a host-authorized late launch refusal blocks its successor card and preserves both attempt identities', async () => {
-  const board = new WorkBoardStore(db)
+  const recordedAt = '2026-09-29T00:00:00.000Z'
+  const board = new WorkBoardStore(db, { now: () => recordedAt })
   const runs = new TridentRunStore(db)
   const card = await board.create('board', { title: 'Late remote drift' })
-  const source = await runs.create({ slug: 'source', project_slug: 'board', repo_path: '/repo', task: 'Source' })
+  // Equal observation times can sort UUIDs in reverse launch order.
+  const source = await runs.create({ id: 'ffffffff-ffff-4fff-bfff-ffffffffffff', slug: 'source', project_slug: 'board', repo_path: '/repo', task: 'Source' })
   await board.attachRun('board', card.id, source.id)
   await board.detachRun('board', source.id, 'blocked')
-  const successor = await runs.create({ slug: 'successor', project_slug: 'board', repo_path: '/repo', task: 'Recovery' })
+  const successor = await runs.create({ id: '00000000-0000-4000-8000-000000000000', slug: 'successor', project_slug: 'board', repo_path: '/repo', task: 'Recovery' })
   await board.attachRun('board', card.id, successor.id)
   await runs.recordStageEvent(source.id, 'review-rejected')
   const event = db.get<{ id: number }>(
@@ -211,9 +213,11 @@ test('a host-authorized late launch refusal blocks its successor card and preser
     status: 'blocked', linked_run_id: successor.id,
     recovery_refusal: 'Recovery refused: published head moved.', completed_at: null,
   })
-  expect(result!.attempts!.map(a => ({ run_id: a.run_id, outcome: a.outcome }))).toEqual([
-    { run_id: source.id, outcome: 'blocked' }, { run_id: successor.id, outcome: 'blocked' },
-  ])
+  expect(result!.attempts!.map(a => a.recorded_at)).toEqual([recordedAt, recordedAt])
+  expect(result!.attempts!.map(a => ({ run_id: a.run_id, outcome: a.outcome }))
+    .sort((a, b) => a.run_id.localeCompare(b.run_id))).toEqual([
+    { run_id: source.id, outcome: 'blocked' as const }, { run_id: successor.id, outcome: 'blocked' as const },
+  ].sort((a, b) => a.run_id.localeCompare(b.run_id)))
   expect(board.listActive('board').map(row => row.id)).toContain(card.id)
 })
 

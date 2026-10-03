@@ -95,3 +95,18 @@ test('native turn identities, model history, usage poisoning and malformed evide
   expect(valid.observations[0]).toMatchObject({ inputTokens: 15, outputTokens: 3, cacheReadTokens: 5,
     startedAt: 1000, endedAt: 9000, source: { parentSessionId: 'parent-1' } })
 })
+
+test('open native task snapshots retain start and observation clocks without retaining task text', async () => {
+  const start = row('event_msg', { type: 'task_started', turn_id: 'turn-1', started_at: 1, prompt: 'PRIVATE PROMPT' }, 1100)
+  const usage = row('token_usage_record', { thread_id: 'session-1', turn_id: 'turn-1',
+    turn_token_usage: { input_tokens: 20, output_tokens: 3, cached_input_tokens: 5 }, ignored: 'PRIVATE USAGE' }, 4000)
+  for (const events of [[start], [start, usage], [start, usage, row('turn_context', { turn_id: 'turn-1', model: 'model-b' }, 5000)]]) {
+    const source = [...initial, ...events], projected = project(source)
+    const full = await importCodexOperations(source, options)
+    expect(full.observations).toHaveLength(1)
+    expect(full.observations[0]!.endedAt).toBeNull()
+    expect(await importCodexOperations(projected, options)).toEqual(full)
+    expect(project(projected)).toEqual(projected)
+    expect(projected.join('\n')).not.toContain('PRIVATE')
+  }
+})

@@ -26,7 +26,7 @@ async function complete(options: Awaited<ReturnType<typeof fixture>>, tokens = t
     row('event_msg', { type: 'task_complete', turn_id: 'turn-1', started_at: start, completed_at: start + 9 }))
 }
 
-test('manual active registration reaches the actual authenticated dashboard only upon native completion, for root and child tasks', async () => {
+test('manual registration serves native start and completion for root and child tasks through the authenticated dashboard', async () => {
   for (const child of [false, true]) for (const phase of ['build', 'fix', 'review', 'test'] as const) {
     const options = await fixture(child)
     const binding = { ...options.binding, phase }
@@ -34,17 +34,26 @@ test('manual active registration reaches the actual authenticated dashboard only
     expect((await stat(options.config)).mode & 0o777).toBe(0o600)
     const config = JSON.parse(await readFile(options.config, 'utf8'))
     expect((await importCodexFile(options.rollout, config)).observations).toEqual([])
+    await appendFile(options.rollout, row('event_msg', { type: 'task_started', turn_id: 'turn-1', started_at: start }))
+    const open = await importCodexFile(options.rollout, config)
+    await appendChangedPhaseObservations(options.observations, open.observations)
+    const catalogue = options.config + '.catalogue'
+    await writeFile(catalogue, JSON.stringify({ observedAt: Date.now(), repositories: [] }))
+    const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: timelineSourceReader({ catalogue, observations: options.observations, databases: [] }) })
+    const activeResponse = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: `Basic ${Buffer.from('viewer:fixture').toString('base64')}` } }))
+    expect(activeResponse.status).toBe(200)
+    const active = await activeResponse.json() as { cards: Array<{ segments: unknown[] }> }
+    expect(active.cards[0]!.segments).toHaveLength(1)
+    expect(active.cards[0]!.segments[0]).toMatchObject({ phase, model: 'model-a', start: start * 1000, timing: 'open', usage: { tokens: null } })
     await complete(options)
     const imported = await importCodexFile(options.rollout, config)
     expect(imported.observations).toHaveLength(1)
     expect(imported.observations[0]!.source.parentSessionId).toBe(child ? 'parent-1' : undefined)
     await appendChangedPhaseObservations(options.observations, imported.observations)
-    const catalogue = options.config + '.catalogue'
-    await writeFile(catalogue, JSON.stringify({ observedAt: Date.now(), repositories: [] }))
-    const handler = createTimelineHandler({ username: 'viewer', password: 'fixture', read: timelineSourceReader({ catalogue, observations: options.observations, databases: [] }) })
     const response = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: `Basic ${Buffer.from('viewer:fixture').toString('base64')}` } }))
     expect(response.status).toBe(200)
     const text = await response.text(), data = JSON.parse(text)
+    expect(data.cards[0].segments).toHaveLength(1)
     expect(data.cards[0].pr).toBe(7)
     expect(data.cards[0].segments[0]).toMatchObject({ phase, model: 'model-a', start: start * 1000, end: (start + 9) * 1000,
       usage: { input: 15, output: 3, cacheRead: 5, costUsd: null, tokens: 23, coverage: 'partial' } })

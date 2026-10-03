@@ -730,7 +730,9 @@ describe('ONE CHILD PER SESSION KEY — resolving the installed set must not reo
     // The owner installs a server, so BOTH dispatches below fail `freshMcpServers`
     // against the same warm session.
     installed = [EXAMPLE]
-    await Promise.all([drain(sub.start(spec('a'))), drain(sub.start(spec('b')))])
+    const replies = await Promise.all([drain(sub.start(spec('a'))), drain(sub.start(spec('b')))])
+    expect(replies[0]).toContain(' a')
+    expect(replies[1]).toContain(' b')
 
     // ONE replacement. Three spawns here means both callers replaced the same session.
     expect(argvs).toHaveLength(2)

@@ -2,6 +2,7 @@
 import { open, readFile } from 'node:fs/promises'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 import type { DirectPhaseObservation } from './build-timeline-sources.ts'
 
 type Link = { repository: string; prNumber: number }
@@ -114,7 +115,7 @@ export function projectCodexReceipt(line: string): string | null {
   try { r = JSON.parse(line) } catch { return malformed }
   if (!object(r) || !object(r.payload)) return malformed
   if (!(typeof r.type === 'string' && ['session_meta', 'turn_context', 'token_usage_record'].includes(r.type)) &&
-      !(r.type === 'event_msg' && typeof r.payload.type === 'string' && ['item_completed', 'task_complete'].includes(r.payload.type))) return null
+      !(r.type === 'event_msg' && typeof r.payload.type === 'string' && ['item_completed', 'task_started', 'task_complete'].includes(r.payload.type))) return null
   const p = r.payload
   let payload: Obj
   if (r.type === 'session_meta') {
@@ -125,7 +126,7 @@ export function projectCodexReceipt(line: string): string | null {
     const usage = object(p.turn_token_usage) ? { input_tokens: numberField(p.turn_token_usage.input_tokens),
       output_tokens: numberField(p.turn_token_usage.output_tokens), cached_input_tokens: numberField(p.turn_token_usage.cached_input_tokens) } : null
     payload = { thread_id: stringField(p.thread_id), turn_id: stringField(p.turn_id), turn_token_usage: usage }
-  } else if (p.type === 'task_complete') payload = { type: p.type, turn_id: stringField(p.turn_id), started_at: numberField(p.started_at), completed_at: numberField(p.completed_at) }
+  } else if (p.type === 'task_started' || p.type === 'task_complete') payload = { type: p.type, turn_id: stringField(p.turn_id), started_at: numberField(p.started_at), ...(p.type === 'task_complete' ? { completed_at: numberField(p.completed_at) } : {}) }
   else if (!object(p.item) || p.item.type !== 'CommandExecution') payload = { type: 'item_completed' }
   else {
     const item = p.item, args = argv(item.command), classification = args && classify(args)
@@ -163,7 +164,7 @@ export function projectCodexReceipt(line: string): string | null {
         status,
         exit_code: numberField(item.exit_code), ...(args?.[0] === 'gh' && args[2] === 'create' ? { stdout } : {}) } : {}) } }
   }
-  return JSON.stringify({ type: r.type, ...(r.type === 'turn_context' ? { timestamp: stringField(r.timestamp) } : {}), payload })
+  return JSON.stringify({ type: r.type, ...(['turn_context', 'token_usage_record'].includes(String(r.type)) || p.type === 'task_started' || p.type === 'task_complete' ? { timestamp: stringField(r.timestamp) } : {}), payload })
 }
 
 export async function importCodexOperations(lines: AsyncIterable<string> | Iterable<string>, options: CodexImportOptions): Promise<{ observations: DirectPhaseObservation[]; coverage: CodexImportCoverage }> {
@@ -189,6 +190,8 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
   const observations: DirectPhaseObservation[] = [], seen = new Set<string>()
   const contexts = new Map<string, Array<{ at: number; model: string }>>()
   const turns: Array<{ turnId: string; start: number; end: number }> = []
+  const starts = new Map<string, number>()
+  const observedByTurn = new Map<string, number>()
   const usageByTurn = new Map<string, TurnUsage | null>()
   let sessionId: string | undefined, parentSessionId: string | undefined, bytes = 0
   for await (const line of lines) {
@@ -200,6 +203,14 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
     try { r = JSON.parse(line) } catch { coverage.malformed++; continue }
     if (!object(r) || !object(r.payload)) { coverage.malformed++; continue }
     const p = r.payload
+    // Only native evidence for this exact turn can advance its snapshot clock.
+    // File mtimes, refresh times and sibling activity are not observations of it.
+    const at = typeof r.timestamp === 'string' ? Date.parse(r.timestamp) : NaN
+    if (sessionId && typeof p.turn_id === 'string' && stamp(at) &&
+        (r.type === 'turn_context' || r.type === 'token_usage_record' && p.thread_id === sessionId ||
+          r.type === 'event_msg' && ['task_started', 'task_complete'].includes(String(p.type)))) {
+      observedByTurn.set(p.turn_id, Math.max(observedByTurn.get(p.turn_id) ?? 0, at))
+    }
     if (r.type === 'session_meta') {
       if (sessionId !== undefined || typeof p.id !== 'string' || !p.id) throw new Error('Repeated or invalid native session identity')
       sessionId = p.id
@@ -225,6 +236,15 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
       else if (prior == null || next === null || next.input < prior.input ||
           next.output < prior.output || next.cached < prior.cached) usageByTurn.set(p.turn_id, null)
       else usageByTurn.set(p.turn_id, next)
+      continue
+    }
+    if (r.type === 'event_msg' && p.type === 'task_started') {
+      if (!sessionId || typeof p.turn_id !== 'string' || !p.turn_id || !stamp(p.started_at) || !stamp(p.started_at * 1000)) {
+        coverage.incomplete++; continue
+      }
+      const start = p.started_at * 1000
+      if (starts.has(p.turn_id) && starts.get(p.turn_id) !== start) throw new Error('Conflicting native task start')
+      starts.set(p.turn_id, start)
       continue
     }
     if (r.type === 'event_msg' && p.type === 'task_complete') {
@@ -273,7 +293,13 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
       observedAt: p.completed_at_ms,
     })
   }
-  for (const turn of turns) {
+  const envelopes: Array<{ turnId: string; start: number; end: number | null }> = [...turns]
+  for (const [turnId, start] of starts) {
+    const completed = turns.filter(turn => turn.turnId === turnId)
+    if (completed.some(turn => turn.start !== start)) throw new Error('Conflicting native task start')
+    if (!completed.length) { envelopes.push({ turnId, start, end: null }); coverage.incomplete++ }
+  }
+  for (const turn of envelopes) {
     const binding = turnBindings.find(b => b.sessionId === sessionId && b.turnId === turn.turnId)
     if (!binding) { coverage.unbound++; continue }
     const id = `codex-turn:${sessionId}:${turn.turnId}`
@@ -281,9 +307,9 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
     seen.add(id)
     // One turn may change model. A mixed or absent model remains unknown rather
     // than attributing the entire envelope to the most recent context.
-    const models = new Set((contexts.get(turn.turnId) ?? []).filter(c => c.at >= turn.start && c.at < turn.end + 1000).map(c => c.model))
+    const models = new Set((contexts.get(turn.turnId) ?? []).filter(c => c.at >= turn.start && (turn.end === null || c.at < turn.end + 1000)).map(c => c.model))
     const usage = usageByTurn.get(turn.turnId) ?? null
-    observations.push({
+    const snapshot: DirectPhaseObservation = {
       eventId: id, phaseId: id, links: binding.links, phase: binding.phase,
       label: `Native ${binding.phase} task`, model: models.size === 1 ? [...models][0]! : null,
       startedAt: turn.start, endedAt: turn.end,
@@ -294,9 +320,14 @@ export async function importCodexOperations(lines: AsyncIterable<string> | Itera
       cacheCreationTokens: null, costUsd: null,
       source: { kind: 'codex-log', sessionId: binding.sessionId, turnId: turn.turnId, ...(parentSessionId ? { parentSessionId } : {}),
         sourceEventId: turn.turnId, evidenceRef: `${options.evidenceRef}:turn:${turn.turnId}`, attribution: 'reconstructed',
-        basis: `Explicit session-and-turn PR and phase binding; native completed task envelope at one-second resolution; nested commands may overlap; ${usage === null ? 'task usage attribution unknown' : 'exact native per-turn token receipt; cache creation and cost unknown'}` },
-      observedAt: turn.end,
-    })
+        basis: `Explicit session-and-turn PR and phase binding; native ${turn.end === null ? 'open task envelope; completion unknown, not worker liveness' : 'completed task envelope'} at one-second resolution; nested commands may overlap; ${usage === null ? 'task usage attribution unknown' : 'exact native per-turn token receipt; cache creation and cost unknown'}` },
+      observedAt: starts.has(turn.turnId) ? Math.max(turn.end ?? turn.start, observedByTurn.get(turn.turnId) ?? turn.start) : turn.end!,
+    }
+    // Snapshot IDs cover their evidence, so replay is immutable and cumulative
+    // usage replaces one phase rather than producing additional charged spans.
+    // Preserve the existing completion-only receipt contract for older journals.
+    if (starts.has(turn.turnId)) snapshot.eventId = `${id}:snapshot:${createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')}`
+    observations.push(snapshot)
     coverage.emittedTurns++
     if (usage !== null) coverage.tokenCoverage = 'partial'
   }
@@ -355,7 +386,7 @@ export async function importCodexFile(path: string, options: CodexImportOptions,
           // The window may include completion but omit its earlier usage. Do
           // not freeze an unknown receipt in an append-only journal when a
           // later/full scan can still recover exact native usage.
-          if (observation.inputTokens === null) {
+          if (observation.eventId.includes(':snapshot:') || observation.inputTokens === null) {
             result.coverage.deferredTurns++
             result.coverage.emittedTurns--
             return false

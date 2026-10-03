@@ -459,8 +459,13 @@ function publishContendingChain(
   const link = (): Promise<ReplSession> => {
     const session = left > 0 ? warmSession({ key: BOUND_KEY }) : finalSession
     const asExited = session.hasChildExited.bind(session)
+    // One replacement per resolved entry. Liveness is checked again after MCP
+    // resolution and termination; those checks must not skip contenders that
+    // this turn has not resolved through, consuming the chain before re-entry.
+    let published = false
     session.hasChildExited = (): boolean => {
-      if (left > 0) {
+      if (!published && left > 0) {
+        published = true
         left -= 1
         last = link()
         pool.set(BOUND_KEY, last)

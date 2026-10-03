@@ -8,6 +8,7 @@ import { resolveTranscriptProjectsDir } from './signatures.ts'
 import { getOrSpawnSession, type ReplSpawnProfile } from './spawn.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
 import { pool } from './pool-state.ts'
+import { PLANNER_PROFILE_ID } from '../../../workers/planner-work.ts'
 
 export type StartupRecoveryOutcome =
   | { status: 'adopted' | 'resumed' | 'skipped' }
@@ -84,15 +85,26 @@ export async function recoverStartupRepl(
       throw new Error('startup recovery requires an uncapped captured session and its recorded model')
     }
     if (row.cwd !== options.cwd || row.reuse?.auth_fingerprint !== expectedAuthFingerprint ||
-        row.reuse.tool_surface !== tools.map(tool => tool.name).join(',') ||
         row.reuse.tool_bridge !== (options.enableToolBridge === true)) {
       throw new Error('startup recovery credential, directory or tool profile changed')
+    }
+    // Recover the recorded grant, including its order and the empty default-deny
+    // surface. A deploy adding tools is not authority to add them at startup.
+    const knownTools = new Map(tools.map(tool => [tool.name, tool]))
+    const names = row.reuse.tool_surface === '' ? [] : row.reuse.tool_surface.split(',')
+    if (new Set(names).size !== names.length || names.some(name => !knownTools.has(name))) {
+      throw new Error('startup recovery recorded tool profile is unavailable')
+    }
+    const recordedTools = names.map(name => knownTools.get(name)!)
+    const planner = row.reuse.planner_profile
+    if (planner !== undefined && (planner !== PLANNER_PROFILE_ID || !row.reuse.tool_bridge || !names.includes('Agent'))) {
+      throw new Error('startup recovery recorded planner profile is unavailable')
     }
     const transcript = statSync(sessionJsonlPath(row.sessionId, row.cwd, resolveTranscriptProjectsDir(options)))
     if (!transcript.isFile() || transcript.size === 0) throw new Error('startup recovery transcript is unavailable')
     const recovered = await (deps.spawn ?? getOrSpawnSession)(sessionKey,
       { ...options, ...(row.effort === undefined ? {} : { effort: row.effort }) },
-      { tools, model_preference: [row.model] },
+      { tools: recordedTools, model_preference: [row.model] },
       { sessionId: row.sessionId, expectedRecord: row })
     if (recovered.sessionId !== row.sessionId || recovered.forceFreshRespawn || recovered.pendingResumeSessionId !== undefined) {
       throw new Error('startup recovery did not resume the recorded conversation')
