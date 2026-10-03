@@ -21,3 +21,10 @@ all 12 tests with 65 assertions. Temporary result mutations independently remove
 the source, removed the successor, replaced the successor identity with a second
 source identity, or changed the successor outcome to failed; every focused run
 failed. All four mutations were removed before the final passing run.
+
+The first corrected full-gate attempt stopped at the owned Work Board typecheck:
+sorting the expected literal array widened its outcome to `string`. Both expected
+outcomes now retain the literal type with `as const`; runtime values and exact
+array assertions are unchanged. That aborted attempt executed no tests and is
+not full-suite evidence. The owned Work Board typecheck is required before the
+new canonical validation attempt.

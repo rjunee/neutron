@@ -216,7 +216,7 @@ test('a host-authorized late launch refusal blocks its successor card and preser
   expect(result!.attempts!.map(a => a.recorded_at)).toEqual([recordedAt, recordedAt])
   expect(result!.attempts!.map(a => ({ run_id: a.run_id, outcome: a.outcome }))
     .sort((a, b) => a.run_id.localeCompare(b.run_id))).toEqual([
-    { run_id: source.id, outcome: 'blocked' }, { run_id: successor.id, outcome: 'blocked' },
+    { run_id: source.id, outcome: 'blocked' as const }, { run_id: successor.id, outcome: 'blocked' as const },
   ].sort((a, b) => a.run_id.localeCompare(b.run_id)))
   expect(board.listActive('board').map(row => row.id)).toContain(card.id)
 })
