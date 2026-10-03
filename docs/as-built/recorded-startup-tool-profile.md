@@ -87,3 +87,27 @@ Consolidated verification must include
 `open/__tests__/project-build-e2e.test.ts`, the root and Trident typechecks,
 and the required full shared-host gate. These author fixtures do not establish
 a live provider resume, served deployment, or unattended workflow continuation.
+
+### Consolidated local release verification
+
+On tested revision `2ce3ab4886b58ff681f13b82cb747a3b85ef096a`,
+`umask 022; bash scripts/check-shared-host.sh` exited zero. All 51 owned
+TypeScript configurations passed. The declared, Bun-discovered, assigned and
+executed test-file counts were each 1,776: 1,537 general, 22 PGLite, 43 device
+and 174 real-HTTP. All 19 bounded-memory lanes were green, with zero failed
+lanes. Existing case-level skips were retained; the final 74-file HTTP batch
+reported 792 passes, 14 skips and zero failures.
+
+Both `open/__tests__/project-build-e2e.test.ts` and
+`open/__tests__/boot-live-agent-adoption.test.ts` executed. The previously
+failing concurrent MCP refresh control passed in the canonical HTTP lane.
+The wrapper reported unchanged suite input identity
+`973fc7de25171986b96bfb77c09aa6608a9ae4d89b1f4b7e3233f771742962ac`.
+The retained complete log's SHA-256 is
+`1e5b2e47ef468720e8aeeaa76371c579f0adf7a97c3e70c5ebfc1d6384f83460`.
+
+The corrected source received independent native review and bounded cross-model
+GO. The final publication head adds this measured receipt without changing the
+tested source, tests or dependencies; it does not relabel the tested revision.
+Required exact-publication-head CI, deployment, live provider recovery and
+unattended workflow acceptance remain separate obligations.

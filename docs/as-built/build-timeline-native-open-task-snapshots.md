@@ -33,3 +33,23 @@ Validation on the candidate based on `118e287ff`:
 - `bun test scripts/__tests__/build-timeline-server.test.ts`: 11 passed with loopback listener permission. The initial sandboxed invocation failed only its ephemeral listener creation; that refusal is not counted as a pass.
 - Disabling the native-start branch made the consuming API test fail. Removing exact turn matching made the foreign-turn refusal test fail. Both semantic mutations were restored before the passing run.
 - `bunx tsc --noEmit` and `bunx tsc --noEmit -p trident/tsconfig.json`: both passed. Full shared-host validation, publication, CI and deployment remain the coordinating change's responsibility; this focused receipt does not claim those gates or all-PR coverage.
+
+### Consolidated local release verification
+
+The coordinating `umask 022; bash scripts/check-shared-host.sh` exited zero
+on tested revision `2ce3ab4886b58ff681f13b82cb747a3b85ef096a`. All 51 owned
+TypeScript configurations passed. Declared, Bun-discovered, assigned and
+executed coverage matched at 1,776 files across all 19 bounded-memory lanes,
+with zero failed lanes. This includes the consuming Open project-build and
+boot-adoption tests as well as the native importer, projection, registration,
+journal and authenticated-server tests. Normal case-level skips were preserved;
+the final 74-file HTTP batch reported 792 passes, 14 skips and zero failures.
+
+Suite input identity remained
+`973fc7de25171986b96bfb77c09aa6608a9ae4d89b1f4b7e3233f771742962ac`;
+the retained complete log has SHA-256
+`1e5b2e47ef468720e8aeeaa76371c579f0adf7a97c3e70c5ebfc1d6384f83460`.
+The final publication head records this result without changing the tested
+source, tests or dependencies. Exact-head CI and served deployment are still
+required; this receipt does not invent active-worker liveness, registration of
+unbound historical work, provider cost or complete all-PR phase coverage.
