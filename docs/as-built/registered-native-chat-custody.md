@@ -68,3 +68,25 @@ but produced identical JavaScript; a separate changed-output control detected a
 runtime change. The receipt is recorded after its measured source revision;
 this documentation does not relabel that revision or substitute for exact-head
 publication CI, served-code verification or live unattended merge acceptance.
+
+Exact-head publication CI exposed a timer boundary in the consuming
+`open/__tests__/project-build-e2e.test.ts:9212` queue fixture: the planner merged,
+but its measured queue interval was 1,199 ms after a requested 1,200 ms sleep.
+The actor records both endpoints with `Date.now()`
+(`runtime/workers/claude-acting-turn.ts:196,269,276`), and the dispatch budget
+credits that measured interval once
+(`runtime/workers/claude-dispatch-budget.ts:12,17-21`). The fixture now rechecks
+the same clock before releasing the held writer. The 1,200 ms minimum assertion,
+2,000 ms execution allowance, real queue and production deadline guards remain
+intact (`open/__tests__/project-build-e2e.test.ts:9190,9215-9224`).
+
+The eight focused queue, expiry, cancellation and planner controls passed with
+61 assertions; ten sequential repetitions of the repaired consuming planner
+case also passed. Root and Trident TypeScript checks passed. Removing queue
+credit made that planner control fail with an unknown plan instead of merging.
+Doubling credit made the existing queued execution-expiry control fail at
+5,042 ms against its unchanged 4,800 ms bound
+(`open/__tests__/project-build-e2e.test.ts:9153`). Both mutations were restored
+to the original production source hash. This bounded test repair does not
+relabel the earlier complete-suite receipt; publication CI on the repaired head
+remains separate evidence.
