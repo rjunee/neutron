@@ -53,6 +53,7 @@ class Server implements HerdrRpc {
         if (!workspace) throw new HerdrError('workspace_not_found', 'gone')
         return { workspace }
       }
+      case 'ping': return { type: 'pong', version: '0.9.1', protocol: 22 }
       case 'layout.apply': {
         if (params.workspace_id && params.tab_id) throw new HerdrError('invalid_target', 'use either tab_id or workspace_id, not both')
         const workspace_id = (params.workspace_id ?? this.tabs.get(params.tab_id as string)!.workspace_id) as string
@@ -118,6 +119,155 @@ function fixture() {
   const path = join(directory, 'registry.json')
   return { path, manager: new ProjectWorkspaceManager(path), server: new Server() }
 }
+
+function pendingClose(server: Server, target: (paneId: string) => boolean) {
+  let released = false
+  let closeAttempted = false
+  let observed!: () => void
+  const polled = new Promise<void>(resolve => { observed = resolve })
+  const client: HerdrRpc = { async call(method, params) {
+    if (method === 'pane.close' && target(params.pane_id as string)) {
+      server.calls.push({ method, params })
+      closeAttempted = true
+      throw new HerdrError('terminal_exit_pending', 'terminal closure awaits verified child exit and PTY EOF')
+    }
+    if (method === 'pane.get' && closeAttempted && target(params.pane_id as string)) {
+      observed()
+      if (released) server.panes.delete(params.pane_id as string)
+    }
+    return server.call(method, params)
+  } }
+  return { client, release: () => { released = true }, polled }
+}
+
+test.each(['chat', 'worker'] as const)('%s-first waits for confirmed initial shell closure before publishing ready placement', async role => {
+  const { manager, server, path } = fixture()
+  const close = pendingClose(server, paneId => paneId === 'pane-3')
+  const placement = manager.applyLayout(close.client, root, scope('one', role))
+  await close.polled
+  const pending = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+  expect(pending.state).toBe('pending')
+  expect(server.panes.has('pane-3')).toBe(true)
+  expect(server.panes.size).toBe(2)
+  close.release()
+  const applied = await placement
+  expect(server.panes.has('pane-3')).toBe(false)
+  expect(server.panes.has(applied.layout.root.pane_id)).toBe(true)
+  expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['ready'])
+  expect(server.calls.filter(call => call.method === 'pane.close' && call.params.pane_id === 'pane-3')).toHaveLength(1)
+  expect(server.calls.filter(call => call.method === 'pane.get' && call.params.pane_id === 'pane-3').length).toBeGreaterThan(1)
+  expect(server.count('workspace.close')).toBe(0)
+  expect(server.count('tab.close')).toBe(0)
+})
+
+test('placeholder close pending keeps the new Chat and foreign split alive until the exact placeholder is gone', async () => {
+  const { manager, server, path } = fixture()
+  const worker = await manager.applyLayout(server, root, scope('one', 'worker'))
+  const before = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+  const placeholder = before.chat.pane as string
+  const sibling = { ...server.panes.get(placeholder)!, pane_id: 'foreign-split', argv: ['foreign-shell'] }
+  server.afterTabMove = () => server.panes.set(sibling.pane_id, sibling)
+  const close = pendingClose(server, paneId => paneId === placeholder)
+  const placement = manager.applyLayout(close.client, root, scope())
+  await close.polled
+  expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['pending'])
+  expect(server.panes.has(placeholder)).toBe(true)
+  close.release()
+  const chat = await placement
+  expect(server.panes.has(placeholder)).toBe(false)
+  expect(server.panes.has(sibling.pane_id)).toBe(true)
+  expect(server.panes.has(worker.layout.root.pane_id)).toBe(true)
+  expect(server.panes.has(chat.layout.root.pane_id)).toBe(true)
+  expect(server.calls.filter(call => call.method === 'pane.close' && call.params.pane_id === placeholder)).toHaveLength(1)
+  expect(server.count('workspace.close')).toBe(0)
+  expect(server.count('tab.close')).toBe(0)
+})
+
+test('pending close with an unchanged live pane times out and never publishes ready', async () => {
+  const { manager, server, path } = fixture()
+  const client: HerdrRpc = { async call(method, params) {
+    if (method === 'pane.close' && params.pane_id === 'pane-3') {
+      server.calls.push({ method, params })
+      throw new HerdrError('terminal_exit_pending', 'still exiting')
+    }
+    return server.call(method, params)
+  } }
+  await expect(manager.applyLayout(client, root, scope())).rejects.toThrow('terminal closure still pending')
+  expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['pending'])
+  expect(server.calls.filter(call => call.method === 'pane.close' && call.params.pane_id === 'pane-3')).toHaveLength(1)
+  expect(server.count('pane.close')).toBe(1)
+  expect(server.panes.size).toBe(2)
+  await expect(new ProjectWorkspaceManager(path).applyLayout(server, root, scope())).rejects.toThrow('pending')
+})
+
+test.each(['other-code', 'transport'] as const)('%s close refusal cannot be reclassified as completed closure', async fault => {
+  const { manager, server, path } = fixture()
+  const client: HerdrRpc = { async call(method, params) {
+    if (method === 'pane.close' && params.pane_id === 'pane-3') {
+      server.calls.push({ method, params })
+      if (fault === 'transport') throw new Error('close transport unavailable')
+      throw new HerdrError('other_code', 'close refused')
+    }
+    return server.call(method, params)
+  } }
+  await expect(manager.applyLayout(client, root, scope())).rejects.toThrow(fault === 'transport' ? 'close transport unavailable' : 'close refused')
+  expect(server.calls.filter(call => call.method === 'pane.get' && call.params.pane_id === 'pane-3')).toHaveLength(0)
+  expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['pending'])
+  expect(server.count('pane.close')).toBe(2)
+  expect([...server.panes.values()].map(pane => pane.argv)).toEqual([['initial-shell']])
+})
+
+test.each(['observation-unavailable', 'owner-changed', 'protocol-changed'] as const)(
+  'pending close refuses %s before publishing Chat', async fault => {
+    const { manager, server, path } = fixture()
+    const client: HerdrRpc = { async call(method, params) {
+      if (method === 'pane.close' && params.pane_id === 'pane-3') {
+        if (fault !== 'observation-unavailable') {
+          await server.call(method, params)
+          if (fault === 'owner-changed') {
+            const workspace = [...server.workspaces.values()][0]!
+            workspace.tokens = { neutron_project_owner: 'another-owner' }
+          }
+        } else server.calls.push({ method, params })
+        throw new HerdrError('terminal_exit_pending', 'still exiting')
+      }
+      if (method === 'pane.get' && params.pane_id === 'pane-3' && fault === 'observation-unavailable') {
+        throw new Error('pane observation unavailable')
+      }
+      if (method === 'ping' && fault === 'protocol-changed') return { type: 'pong', version: 'next', protocol: 23 }
+      return server.call(method, params)
+    } }
+    const reason = fault === 'observation-unavailable' ? 'pane observation unavailable'
+      : fault === 'owner-changed' ? 'ownership mismatch' : 'protocol 23'
+    await expect(manager.applyLayout(client, root, scope())).rejects.toThrow(reason)
+    expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['pending'])
+    expect(server.calls.filter(call => call.method === 'pane.close' && call.params.pane_id === 'pane-3')).toHaveLength(1)
+    expect(server.count('pane.close')).toBe(1)
+    expect(server.panes.size).toBe(fault === 'observation-unavailable' ? 2 : 1)
+  })
+
+test.each(['pane-id', 'workspace', 'tab'] as const)(
+  'pending placeholder close refuses a changed live %s placement without cleanup', async change => {
+    const { manager, server, path } = fixture()
+    const worker = await manager.applyLayout(server, root, scope('one', 'worker'))
+    const record = Object.values(JSON.parse(readFileSync(path, 'utf8')))[0] as any
+    const placeholder = record.chat.pane as string
+    const client: HerdrRpc = { async call(method, params) {
+      if (method === 'pane.close' && params.pane_id === placeholder) {
+        server.calls.push({ method, params })
+        if (change === 'pane-id') server.paneResponseId = 'changed-pane'
+        else server.panes.get(placeholder)![change === 'workspace' ? 'workspace_id' : 'tab_id'] = 'changed-placement'
+        throw new HerdrError('terminal_exit_pending', 'still exiting')
+      }
+      return server.call(method, params)
+    } }
+    await expect(manager.applyLayout(client, root, scope())).rejects.toThrow('closing pane placement changed')
+    expect(Object.values(JSON.parse(readFileSync(path, 'utf8'))).map((row: any) => row.state)).toEqual(['pending'])
+    expect(server.count('pane.close')).toBe(2) // initial shell, then exact placeholder only
+    expect(server.panes.has(placeholder)).toBe(true)
+    expect(server.panes.has(worker.layout.root.pane_id)).toBe(true)
+    expect(server.panes.size).toBe(3) // placeholder, worker, and unreturned Chat
+  })
 
 test('General, literal general and another project are distinct even with same label/cwd', async () => {
   const { manager, server } = fixture()
