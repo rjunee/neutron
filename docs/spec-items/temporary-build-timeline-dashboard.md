@@ -119,6 +119,21 @@ spans carry unknown tokens unless a provider actually attributed usage.
       GitHub CI snapshots may revise the recorded start for the same check-run
       identity; the newest observation supplies timing without rewriting earlier
       snapshots. Non-GitHub phase start identities remain immutable.
+- [ ] An exact registered native task-start receipt yields an open phase with its
+      recorded start clock, observed unique model or unknown, and cumulative
+      exact-turn usage or unknown. Completion updates the same phase, never adds
+      another charged task span. Missing completion explicitly reports incomplete
+      coverage and unknown completion; open timing does not prove worker liveness.
+      Later model evidence can revise only an exact native task's model; its PR
+      links, category, native turn and start remain immutable. Equal-time conflicting
+      snapshots refuse. Foreign turns, context-only registration and missing starts
+      never fabricate open work. Partial tails defer start-backed snapshots.
+      Checkpoint projection preserves native starts and observation clocks across
+      restart; old checkpoints that discarded starts require bounded backfill.
+      Verify authenticated consumption and refusal controls in
+      `scripts/build-timeline-codex-import.test.ts`,
+      `scripts/build-timeline-codex-projection.test.ts` and
+      `scripts/build-timeline-sources.test.ts`.
 - [ ] Unknown, partial and complete metrics remain distinct, costs are never
       estimated, and phase totals cannot double-count attempt receipts. Multi-PR
       linked observations are marked shared and not summed.
@@ -129,9 +144,9 @@ spans carry unknown tokens unless a provider actually attributed usage.
       The private config binds the authoritative observation journal; a caller
       cannot bypass its held lock by supplying another writable journal path.
       Concurrent registrations serialize through that configured lock.
-      Root and child turns consume the same completion-receipt path through the
+      Root and child turns consume the same native start/completion path through the
       authenticated dashboard API. Missing usage remains unknown. Registration
-      does not claim automatic source discovery or active-task timing.
+      does not claim automatic source discovery or itself provide active-task timing.
       Verify: `bun test scripts/build-timeline-register-turn.test.ts`.
 - [ ] Explicit phase recording, manual native registration and scheduled native
       refresh use the same observation-journal mutex. A live holder refuses every
@@ -150,7 +165,7 @@ spans carry unknown tokens unless a provider actually attributed usage.
       empty newly created rollout reports incomplete coverage until it grows.
       Discovery alone does not attribute
       command or task phases: test commands need explicit time-scoped checkout or
-      exact session/turn PR binding (or exact successful GitHub PR evidence), and completed tasks need
+      exact session/turn PR binding (or exact successful GitHub PR evidence), and native tasks need
       exact session/turn PR and phase bindings.
       Verify: `bun test scripts/build-timeline-codex-discover.test.ts`.
 - [ ] Explicit registered sources can be collected without reading unrelated

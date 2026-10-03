@@ -429,9 +429,15 @@ function identity(record: DirectPhaseObservation): string {
   // The check ID, not that mutable timestamp, identifies this provider snapshot.
   const checkRun = record.source.kind === 'github' && record.phase === 'ci' &&
     record.phaseId.startsWith('github-check:') && /^[1-9]\d*$/.test(record.source.sourceEventId ?? '')
+  // Native task snapshots can acquire a model or discover mixed models while
+  // their exact turn, PR ownership, category and recorded start stay fixed.
+  const nativeTask = record.source.kind === 'codex-log' && !!record.source.sessionId && !!record.source.turnId &&
+    record.phaseId === `codex-turn:${record.source.sessionId}:${record.source.turnId}` &&
+    record.source.sourceEventId === record.source.turnId
   return JSON.stringify({
     links: [...record.links].sort((a, b) => a.repository.localeCompare(b.repository) || a.prNumber - b.prNumber),
-    phase: record.phase, model: record.model, startedAt: checkRun ? null : record.startedAt,
+    phase: record.phase, model: nativeTask ? null : record.model, startedAt: checkRun ? null : record.startedAt,
+    nativeTask,
     checkRunId: checkRun ? record.source.sourceEventId : null,
     sourceKind: record.source.kind, sourceSession: record.source.sessionId ?? null,
     sourceTurn: record.source.turnId ?? null,

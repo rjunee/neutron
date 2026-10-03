@@ -281,6 +281,24 @@ describe('direct phase observations', () => {
     expect(latest[0]?.links).toHaveLength(2)
   }))
 
+  test('only exact native task models may revise; ownership, category, source and start remain immutable', async () => withLog(async (file) => {
+    const task = observation({ phaseId: 'codex-turn:session:turn', model: 'model-a',
+      source: { kind: 'codex-log', sessionId: 'session', turnId: 'turn', sourceEventId: 'turn',
+        attribution: 'reconstructed', evidenceRef: 'codex:fixture', basis: 'native task snapshot' } })
+    await appendPhaseObservation(file, task)
+    const revised = { ...task, eventId: 'revised-model', observedAt: 4000, model: null }
+    await appendPhaseObservation(file, revised)
+    expect((await readPhaseObservations(file))[0]!.model).toBeNull()
+    for (const mutation of [
+      { startedAt: 999 }, { phase: 'review' }, { links: [{ repository: 'example/other', prNumber: 9 }] },
+      { source: { ...task.source, turnId: 'other' } }, { source: { ...task.source, sourceEventId: 'other' } },
+    ]) await expect(appendPhaseObservation(file, { ...revised, eventId: 'bad', observedAt: 5000, ...mutation })).rejects.toThrow('conflicting phase identity')
+    await expect(appendPhaseObservation(file, { ...revised, eventId: 'tied', model: 'model-b' })).rejects.toThrow('ambiguous phase snapshot')
+    const command = { ...task, phaseId: 'codex:session:command', eventId: 'command' }
+    await appendPhaseObservation(file, command)
+    await expect(appendPhaseObservation(file, { ...command, eventId: 'changed-command', observedAt: 5000, model: null })).rejects.toThrow('conflicting phase identity')
+  }))
+
   test('rejects conflicting phase identity and duplicate events, including superseded events', async () => withLog(async (file) => {
     await appendPhaseObservation(file, observation())
     await appendPhaseObservation(file, observation({ eventId: 'event-2', observedAt: 4000 }))

@@ -174,7 +174,7 @@ Append-only growth is assumed for the durable checkpoint prefix, which is never
 reread. Rewriting that earlier prefix while growing the file, or a same-size
 rewrite whose timestamps alias, cannot be detected by stat identity checks.
 
-Native in-conversation work has no child command to wrap. For completed tasks,
+Native in-conversation work has no child command to wrap. For open and completed tasks,
 the importer also accepts operator-attested `turnBindings` in its private config:
 
 ```json
@@ -193,8 +193,11 @@ the importer also accepts operator-attested `turnBindings` in its private config
 The operator must attest both the task's PR ownership and its phase; a checkout,
 PR mention, agent name or task title is not that attestation. Supported categories
 are `plan`, `build`, `fix`, `review`, `test`, `ci` and `deploy`. The native
-`task_complete` receipt supplies its own start/end at one-second resolution.
-Absent completion stays unimported. An exact native `token_usage_record` for the
+`task_started` receipt supplies an open task's start at one-second resolution;
+`task_complete` supplies its own matching start/end. A context or registration alone
+does not supply a start. Missing completion remains an open/dashed interval with
+unknown completion and incomplete coverage; it does not prove worker liveness.
+An exact native `token_usage_record` for the
 same session and turn supplies input, output and cached-input counts for that
 attested task only. Native usage records are cumulative within a turn, so the
 last monotonic snapshot in the scan supplies its totals; malformed or regressing
@@ -203,7 +206,14 @@ field excludes cached input and the cache-read field carries it separately.
 Missing receipts leave tokens unknown;
 cache creation and provider cost remain unknown. Nested command spans retain
 unknown tokens. A unique recorded invoking model is shown only from a full source
-scan; missing, mixed or partial task contexts remain unknown. A tail can omit a
+scan or complete checkpoint journal; missing or mixed task contexts remain unknown.
+Later native evidence may revise the task model to unknown while its exact turn,
+PR links, category and start remain immutable. Each changed native snapshot has
+a deterministic immutable event ID and advances the same phase with cumulative
+usage, using native receipt observation clocks rather than refresh time. Equal-time
+conflicting snapshots refuse through the journal's existing ambiguity guard.
+All start-backed task snapshots from partial tails are deferred: a tail can omit
+an earlier model or malformed usage receipt. For completion-only history, a tail can omit a
 usage receipt; such a partial task is deferred instead of recording unknown usage
 permanently. One model in a tail cannot prove the task used only that model.
 These are task envelopes that can contain
@@ -213,9 +223,12 @@ discovery command then picks up new rollout files without per-file registration.
 New orchestration lanes still require explicit binding records.
 An exact turn registration also covers that turn's nested local test commands,
 including commands completed before task completion. It never lends ownership
-to sibling or follow-up turns. Command usage stays unknown; only the completed
+to sibling or follow-up turns. Command usage stays unknown; only the attested
 task envelope receives its native per-turn usage receipt.
-Use explicit start/completion records for forward work while a task is still open.
+Older checkpoints that discarded task-start records need a bounded full backfill
+to recover those starts; replay cannot recover discarded bytes. Retain the existing
+observation journal when resetting a private source checkpoint. New starts are
+retained and imported incrementally.
 
 Manual native task registration is available once the exact session and turn have
 a native `turn_context` record. Put the single binding object (the object inside
@@ -248,18 +261,19 @@ the config with mode 0600. Identical registration is a no-op; changing an existi
 turn's phase or PR links is refused. A busy lock or partial native JSON record
 refuses without changing the config; retry once the writer finishes. The tool
 never changes existing observation bytes or guesses usage. The next successful
-refresh imports the task after its native completion receipt is available.
+refresh imports the task once its native start or valid completion receipt is available.
 
 This is an explicit operator seam, not automatic dispatch instrumentation. Repeat
 registration for every intended root or child turn, including follow-up turns;
 parent linkage does not inherit PR ownership or phase. The separate configured
 session-root collector above discovers a newly spawned session's rollout without
 per-file registration. This registration tool neither discovers those sources
-nor intercepts the native `spawn_agent` tool. An active registered turn has no
-imported phase until native completion;
-registration time is not a task start. Unregistered turns remain unknown. An
-automatic dispatcher producer and open-task native snapshots remain outstanding
-under #1313. Successful manual registration does not establish all-PR coverage.
+nor intercepts the native `spawn_agent` tool. An active registered turn appears
+when a full scan or complete checkpoint retains its native task-start receipt;
+registration time is not a task start. Its missing completion and observed usage
+remain explicit, and absence of an end never establishes current liveness.
+Unregistered turns remain unknown. An automatic dispatcher producer remains
+outstanding under #1313. Successful manual registration does not establish all-PR coverage.
 
 Evidence references identify the opaque source and native receipt ID; session and
 turn identities remain separate source fields. Bounded-tail byte offsets belong
