@@ -1769,6 +1769,12 @@ export async function getOrSpawnSession(
       )
       // Another request can start or finish termination while MCP resolution
       // suspends. Recheck this exact owner before either reuse or eviction.
+      // Proven exit permits bounded re-entry through all ownership/profile gates:
+      // a concurrent refresh may already have published its one replacement.
+      // Never re-enter on termination alone while the old child is still alive.
+      if (session.hasChildExited() && staleTurnReentries < STALE_TURN_REENTRY_LIMIT) {
+        return getOrSpawnSession(sessionKey, options, spec, forceResume, staleTurnReentries + 1)
+      }
       if (terminatingWarmSessions.has(session) || session.hasChildExited()) {
         throw new PaneOwnershipRefusedError('persistent-repl: warm owner changed during profile resolution')
       }

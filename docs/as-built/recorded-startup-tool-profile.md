@@ -26,6 +26,11 @@ Timeout cannot license a second owner or a false death notification.
 The marker and child exit are checked again after asynchronous MCP resolution,
 so a matching-profile request already waiting there cannot reuse an owner that
 another request began terminating while it was suspended.
+If that exact old child has positively exited, the request instead re-enters
+the existing ownership and profile gates with the unchanged stale-request retry
+limit (`spawn.ts:1775`). This lets concurrent MCP refresh requests converge on
+one replacement without returning an unchecked winner or reusing a live child
+whose termination is unresolved.
 
 This implements the recorded-profile recovery requirement in
 `docs/spec-items/a-gateway-restart-keeps-the-project-repls.md:24` and the
@@ -52,6 +57,15 @@ exit proof fails that control while both promptly exiting controls pass.
 The held-resolver control uses a recorded planner grant so its old profile
 actually matches: it refuses when termination starts during the lookup, while
 the same held lookup reuses a healthy unchanged owner.
+The full-suite concurrent MCP refresh regression was reproduced against
+integration base `11743311f`: one request was incorrectly refused after the old
+owner had exited. The bounded re-entry correction restores both actual replies
+and exactly one replacement in `owner-mcp-servers.test.ts:703`. The whole
+owner-MCP, startup-recovery, evict-deletes-only-its-own-entry,
+poison-eviction-live-work-guard and operator-cap-rearm suites then passed
+119 tests and 668 assertions. Bypassing the post-MCP live-owner refusal still
+failed the held-resolver control (three sibling cases passed); the guard was
+restored before that complete focused run.
 Root and Trident checks passed with
 `bunx --no-install tsc --noEmit -p tsconfig.json` and
 `bunx --no-install tsc --noEmit -p trident/tsconfig.json`.
