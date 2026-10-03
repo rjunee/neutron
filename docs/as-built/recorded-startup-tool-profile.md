@@ -112,7 +112,7 @@ tested source, tests or dependencies; it does not relabel the tested revision.
 Required exact-publication-head CI, deployment, live provider recovery and
 unattended workflow acceptance remain separate obligations.
 
-## Post-CI fixture correction: final tested revision
+### Post-CI fixture correction: final tested revision
 
 After correcting the unrelated deterministic attempt-order fixture, the canonical
 `bash scripts/check-shared-host.sh` passed again on clean tested revision

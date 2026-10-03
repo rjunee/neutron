@@ -54,7 +54,7 @@ source, tests or dependencies. Exact-head CI and served deployment are still
 required; this receipt does not invent active-worker liveness, registration of
 unbound historical work, provider cost or complete all-PR phase coverage.
 
-## Post-CI fixture correction: final tested revision
+### Post-CI fixture correction: final tested revision
 
 The unchanged dashboard implementation was included in the final canonical
 `bash scripts/check-shared-host.sh` on clean revision

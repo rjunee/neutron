@@ -29,7 +29,7 @@ array assertions are unchanged. That aborted attempt executed no tests and is
 not full-suite evidence. The owned Work Board typecheck is required before the
 new canonical validation attempt.
 
-## Final canonical verification
+### Final canonical verification
 
 The owning `tsc -p work-board/tsconfig.json` and all 12 focused refusal tests
 passed before clean revision `225b91a01b630cb47f719fd64a632438bee661f4` was frozen.
