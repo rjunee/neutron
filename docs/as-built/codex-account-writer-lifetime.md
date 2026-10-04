@@ -102,3 +102,13 @@ retains successor handles and refuses bounded turns`, passed with 37 assertions
 (576 other cases filtered out). Both TypeScript checks and the lint gate passed.
 This focused result does not replace the outstanding hosted CI result or claim
 the full suite was rerun after this test-boundary correction.
+
+The subsequent full local gate exposed a separate fixture observation race:
+enumerating all descendant descriptors and then reading each link could hit a
+loader descriptor that had already closed. The synthetic native now reports the
+exact lifetime descriptor it identified by device and inode before fork; the
+test verifies only that inherited descriptor and its inode. Native contention,
+live-descendant, exact-exit release and successor kernel checks remain unchanged.
+The corrected case passed 20 repetitions (280 assertions). Closing the lifetime
+descriptor in the synthetic descendant made that same case fail; restoring it
+passed again. No production admission code changed for this fixture repair.

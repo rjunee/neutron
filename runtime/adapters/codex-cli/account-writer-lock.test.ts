@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { acquireCodexAccountWriteLease, codexAccountWriterCommand, resolveCodexNativeBinary } from './account-writer-lock.ts'
@@ -24,7 +24,7 @@ function launch(home: string, nativeArgs: string[] = []) {
   const [command, ...args] = codexAccountWriterCommand(binary, nativeArgs, home)
   const child = spawn(command!, args, { stdio: ['ignore', 'pipe', 'pipe'] })
   const exit = new Promise<number | null>(resolve => child.once('exit', resolve))
-  const output = new Promise<{ pid: number; locks: number; descendant: number }>((resolve, reject) => {
+  const output = new Promise<{ pid: number; locks: number; lifetimeFd: number; descendant: number }>((resolve, reject) => {
     child.stdout.once('data', data => { try { resolve(JSON.parse(String(data))) } catch (error) { reject(error) } })
     child.once('exit', code => reject(new Error(`writer refused ${code}`)))
   })
@@ -197,7 +197,15 @@ test('a live execed tool retains its descriptor but cannot retain admission afte
     }
     expect(readlinkSync(`/proc/${descendant}/exe`)).toBe(realpathSync('/bin/sleep'))
     const lifetimePath = join(home, '.neutron-account-native.lock')
-    expect(readdirSync(`/proc/${descendant}/fd`).some(fd => readlinkSync(`/proc/${descendant}/fd/${fd}`) === lifetimePath)).toBe(true)
+    expect(ready.locks).toBe(1)
+    expect(Number.isInteger(ready.lifetimeFd)).toBe(true)
+    expect(ready.lifetimeFd).toBeGreaterThanOrEqual(3)
+    // The fixture identified this descriptor by inode before fork. Unrelated
+    // loader descriptors can disappear even after /proc/exe reports sleep.
+    const inheritedPath = `/proc/${descendant}/fd/${ready.lifetimeFd}`
+    expect(readlinkSync(inheritedPath)).toBe(lifetimePath)
+    const inherited = statSync(inheritedPath), expected = statSync(lifetimePath)
+    expect([inherited.dev, inherited.ino]).toEqual([expected.dev, expected.ino])
     expect(kernelBusy(home, true)).toBe(true)
     expect(() => acquireCodexAccountWriteLease(home)).toThrow('accountBusy')
     native.child.kill('SIGKILL'); await native.exit
