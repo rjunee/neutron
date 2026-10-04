@@ -28,5 +28,15 @@ authority for a scopeless survivor. Producer controls cover foreign/ambiguous
 routes, forged signatures, wrong process birth, changed route/pin, and existing
 argv/image ownership checks. Opposite semantic mutants (admit a missing original
 scope; refuse every provisioned survivor) each failed their corresponding test
-and were restored. Shared build-consumer coverage is coordinated separately;
-these results are source and fixture evidence, not deployed native acceptance.
+and were restored.
+
+The shared `open/__tests__/project-build-e2e.test.ts` fixture now passes its
+original signed scope through the adopted producer's process-environment seam,
+with the actual test PID and real signed Unix transport. It never injects a relay
+into adopted launch evidence. The successful sibling re-registers the same
+token, plans, dispatches native work, continues the same child with `SendMessage`,
+and reaches merge. The missing-scope sibling records no launch evidence and
+refuses before child admission or input. Existing unregistered adoption controls
+explicitly select no relay pin. Both new cases failed against the old producer;
+20 selected consuming cases then passed with the producer repair (114 assertions).
+These results are source and fixture evidence, not deployed native acceptance.
