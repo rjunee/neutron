@@ -29,7 +29,7 @@ Transient proc reads can retry only by completing a fresh full census while the
 account lock remains held.
 
 The synthetic native fixture never reads credentials or accesses the network.
-Ten guard tests pass, including two simultaneous admissions, distinct accounts,
+Eleven guard tests pass, including two simultaneous admissions, distinct accounts,
 canonical aliases, reserved-lease home binding, native survival after gateway
 SIGKILL, independent kernel lock contention, and release after exact native exit.
 The Bun suite also invokes seven synthetic process-census cases. Root and Trident
@@ -39,11 +39,16 @@ The consuming run of `trident/codex-build.test.ts`,
 `trident/codex-review.test.ts`, and `open/__tests__/project-build-e2e.test.ts`
 completed with 757 passing tests, zero failures, and 8,382 assertions.
 Semantic mutation controls reject a shared (rather than exclusive) lock,
-unconditional busy refusal, and a descriptor closed by native exec. The restored
+unconditional busy refusal, a descriptor closed by native exec, and an explicit
+parent unlock while the native child remains alive. The restored
 exclusive-lock implementation admits the positive control again.
 
 This is Linux admission using the existing Bun server and Python runtime, not a
-new credential authority. Its cooperative boundary is explicit: later direct
+new credential authority. The verified lifetime profile is the direct native CLI
+or its recognized official npm package. Arbitrary custom wrapper executables are
+not attested: they may close inherited descriptors or spawn another writer that
+does not inherit them, and deployment must not claim those wrappers are protected.
+Its cooperative boundary is explicit: later direct
 launches outside these entrypoints can bypass advisory locking. Deployment must
 inventory and route every actual writer before claiming account-wide exclusion.
 These synthetic results do not establish live migration or token freshness, and

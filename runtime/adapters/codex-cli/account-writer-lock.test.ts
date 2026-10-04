@@ -102,6 +102,24 @@ test('native transport owns the lock after parent lease closes; exact exit relea
   } finally { transport.close() }
 })
 
+test('closing a surviving parent descriptor cannot unlock an already-running native writer', async () => {
+  const home = root(), lease = acquireCodexAccountWriteLease(home)
+  const [command, ...args] = codexAccountWriterCommand(binary, [], home)
+  args.splice(2, 0, '--inherited-lock-fd', '3')
+  const child = spawn(command!, args, { stdio: ['ignore', 'pipe', 'pipe', lease.fd] })
+  const exited = new Promise(resolve => child.once('exit', resolve))
+  try {
+    await new Promise((resolve, reject) => {
+      child.stdout!.once('data', resolve)
+      child.once('exit', () => reject(new Error('Native writer exited before readiness')))
+    })
+    expect(kernelBusy(home)).toBe(true)
+    lease.close()
+    expect(kernelBusy(home)).toBe(true)
+  } finally { lease.close(); child.kill(); await exited }
+  expect(kernelBusy(home)).toBe(false)
+})
+
 test('two racing admissions allow exactly one real native writer', async () => {
   const home = root()
   const attempts = [launch(home), launch(home)]
