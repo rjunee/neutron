@@ -27,8 +27,9 @@ export class CodexAccountWriterError extends Error {
 
 export interface CodexAccountWriteLease { readonly fd: number; readonly canonicalHome: string; close(): void }
 
-/** The inode is permanent. Closing a parent copy must never unlock a native
- * writer's inherited open-file description. No LOCK_UN, unlink or stale reaping. */
+/** Permanent admission reservation, also used for short credential writes.
+ * Native launch converts it into its own process-associated lifetime lock.
+ * Parents only close; no parent LOCK_UN, unlink or stale reaping. */
 export function acquireCodexAccountWriteLease(canonicalHome: string): CodexAccountWriteLease {
   let fd: number | undefined
   try {

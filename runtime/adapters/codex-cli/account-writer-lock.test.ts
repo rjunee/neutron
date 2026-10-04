@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, expect, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { acquireCodexAccountWriteLease, codexAccountWriterCommand, resolveCodexNativeBinary } from './account-writer-lock.ts'
@@ -20,11 +20,11 @@ beforeAll(() => {
 afterEach(() => { for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true }) })
 afterAll(() => rmSync(binaryRoot, { recursive: true, force: true }))
 
-function launch(home: string) {
-  const [command, ...args] = codexAccountWriterCommand(binary, [], home)
+function launch(home: string, nativeArgs: string[] = []) {
+  const [command, ...args] = codexAccountWriterCommand(binary, nativeArgs, home)
   const child = spawn(command!, args, { stdio: ['ignore', 'pipe', 'pipe'] })
   const exit = new Promise<number | null>(resolve => child.once('exit', resolve))
-  const output = new Promise<{ pid: number; locks: number }>((resolve, reject) => {
+  const output = new Promise<{ pid: number; locks: number; descendant: number }>((resolve, reject) => {
     child.stdout.once('data', data => { try { resolve(JSON.parse(String(data))) } catch (error) { reject(error) } })
     child.once('exit', code => reject(new Error(`writer refused ${code}`)))
   })
@@ -32,12 +32,14 @@ function launch(home: string) {
 }
 
 /** Independent kernel oracle: process census must not hide a released lock. */
-function kernelBusy(home: string): boolean {
+function kernelBusy(home: string, nativeOnly = false): boolean {
   const result = spawnSync('python3', ['-c', `import fcntl,sys
-with open(sys.argv[1], 'r+') as handle:
- try: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
- except BlockingIOError: sys.exit(73)
-`, join(home, '.neutron-account-writer.lock')])
+try:
+ with open(sys.argv[1], 'r+') as reservation, open(sys.argv[2], 'r+') as native:
+  if sys.argv[3] != 'native': fcntl.flock(reservation, fcntl.LOCK_EX | fcntl.LOCK_NB)
+  fcntl.lockf(native, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError: sys.exit(73)
+`, join(home, '.neutron-account-writer.lock'), join(home, '.neutron-account-native.lock'), nativeOnly ? 'native' : 'either'])
   if (result.status !== 0 && result.status !== 73) throw new Error('Kernel oracle failed')
   return result.status === 73
 }
@@ -47,12 +49,14 @@ test('same-account exclusion, distinct accounts, alias identity and permanent in
   symlinkSync(home, alias)
   const first = acquireCodexAccountWriteLease(home)
   const inode = statSync(join(home, '.neutron-account-writer.lock')).ino
+  const nativeInode = statSync(join(home, '.neutron-account-native.lock')).ino
   try {
     expect(() => acquireCodexAccountWriteLease(home)).toThrow('accountBusy')
     expect(() => acquireCodexAccountWriteLease(alias)).toThrow('accountBusy')
     const distinct = acquireCodexAccountWriteLease(other); distinct.close()
   } finally { first.close() }
   expect(statSync(join(home, '.neutron-account-writer.lock')).ino).toBe(inode)
+  expect(statSync(join(home, '.neutron-account-native.lock')).ino).toBe(nativeInode)
   const successor = acquireCodexAccountWriteLease(alias); successor.close()
   expect(statSync(join(home, '.neutron-account-writer.lock')).ino).toBe(inode)
 })
@@ -94,6 +98,7 @@ test('native transport owns the lock after parent lease closes; exact exit relea
     const native = await new Promise<{ pid: number; locks: number }>((resolve, reject) => transport.listen(v => resolve(v as { pid: number; locks: number }), reject))
     expect(native.pid).toBe(transport.processIdentity!.pid)
     expect(native.locks).toBeGreaterThan(0)
+    expect(kernelBusy(home, true)).toBe(true)
     expect(kernelBusy(home)).toBe(true)
     expect(() => acquireCodexAccountWriteLease(home)).toThrow('accountBusy')
     transport.close(); await transport.exited
@@ -151,6 +156,7 @@ test('gateway death leaves the native process holding the account until its own 
     parent.kill('SIGKILL'); await parentExit
     expect(() => process.kill(nativePid!, 0)).not.toThrow()
     expect(kernelBusy(home)).toBe(true)
+    expect(kernelBusy(home, true)).toBe(true)
     expect(() => acquireCodexAccountWriteLease(home)).toThrow('accountBusy')
   } finally {
     parent.kill('SIGKILL'); await parentExit
@@ -161,6 +167,112 @@ test('gateway death leaves the native process holding the account until its own 
     catch { await Bun.sleep(10) }
   }
   throw new Error('Native exit did not release account')
+})
+
+test('a live execed tool retains its descriptor but cannot retain admission after native exit', async () => {
+  const home = root(), native = launch(home, ['--descendant'])
+  let descendant: number | undefined
+  let birth: string | undefined
+  const processState = (pid: number) => {
+    const value = readFileSync(`/proc/${pid}/stat`, 'utf8')
+    const fields = value.slice(value.lastIndexOf(')') + 2).split(' ')
+    return { state: fields[0], birth: fields[19] }
+  }
+  try {
+    const ready = await native.output
+    descendant = ready.descendant
+    expect(descendant).toBeGreaterThan(0)
+    birth = processState(descendant!).birth
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (readlinkSync(`/proc/${descendant}/exe`) === realpathSync('/bin/sleep')) break
+      await Bun.sleep(5)
+    }
+    expect(readlinkSync(`/proc/${descendant}/exe`)).toBe(realpathSync('/bin/sleep'))
+    const lifetimePath = join(home, '.neutron-account-native.lock')
+    expect(readdirSync(`/proc/${descendant}/fd`).some(fd => readlinkSync(`/proc/${descendant}/fd/${fd}`) === lifetimePath)).toBe(true)
+    expect(kernelBusy(home, true)).toBe(true)
+    expect(() => acquireCodexAccountWriteLease(home)).toThrow('accountBusy')
+    native.child.kill('SIGKILL'); await native.exit
+    expect(processState(descendant!).birth).toBe(birth)
+    expect(['Z', 'X']).not.toContain(processState(descendant!).state)
+    expect(kernelBusy(home, true)).toBe(false)
+    const successorLease = acquireCodexAccountWriteLease(home); successorLease.close()
+    const successor = launch(home)
+    try {
+      await successor.output
+      expect(kernelBusy(home, true)).toBe(true)
+      expect(() => process.kill(descendant!, 0)).not.toThrow()
+    } finally { successor.child.kill(); await successor.exit }
+  } finally {
+    native.child.kill(); await native.exit
+    if (descendant !== undefined && birth !== undefined) {
+      try {
+        if (processState(descendant).birth === birth) process.kill(descendant, 'SIGTERM')
+        for (let attempt = 0; attempt < 100; attempt++) {
+          const state = processState(descendant)
+          if (state.birth !== birth || ['Z', 'X'].includes(state.state ?? '')) break
+          await Bun.sleep(5)
+        }
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    }
+  }
+})
+
+test('credential admission checks an independent process lock even without a native census hit', async () => {
+  const home = root(), initial = acquireCodexAccountWriteLease(home); initial.close()
+  const child = spawn('python3', ['-c', `import fcntl,sys
+with open(sys.argv[1], 'r+') as handle:
+ fcntl.lockf(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+ print('ready', flush=True)
+ sys.stdin.readline()
+`, join(home, '.neutron-account-native.lock')], { stdio: ['pipe', 'pipe', 'pipe'] })
+  const exited = new Promise(resolve => child.once('exit', resolve))
+  try {
+    await new Promise((resolve, reject) => {
+      child.stdout.once('data', resolve)
+      child.once('exit', () => reject(new Error('Independent lock holder exited early')))
+    })
+    expect(kernelBusy(home, true)).toBe(true)
+    expect(() => acquireCodexAccountWriteLease(home)).toThrow('accountBusy')
+  } finally { child.stdin.end(); await exited }
+  const admitted = acquireCodexAccountWriteLease(home); admitted.close()
+})
+
+test('startup reservation stays exclusive until the native process acquires its lifetime lock', async () => {
+  const home = root(), lease = acquireCodexAccountWriteLease(home)
+  const script = join(import.meta.dir, 'account-writer.py')
+  const program = `import importlib.util,sys
+spec=importlib.util.spec_from_file_location('writer',sys.argv[1])
+writer=importlib.util.module_from_spec(spec)
+spec.loader.exec_module(writer)
+original=writer.native_lock
+def paused(home):
+ print('before-lifetime',flush=True)
+ sys.stdin.readline()
+ return original(home)
+writer.native_lock=paused
+writer.main(['--home',sys.argv[2],'--inherited-lock-fd','3','--',sys.argv[3]])
+`
+  const child = spawn('python3', ['-B', '-c', program, script, home, binary], { stdio: ['pipe', 'pipe', 'pipe', lease.fd] })
+  const exited = new Promise(resolve => child.once('exit', resolve))
+  try {
+    await new Promise((resolve, reject) => {
+      child.stdout!.once('data', resolve)
+      child.once('exit', () => reject(new Error('Admission exited before the lifetime handoff')))
+    })
+    lease.close()
+    expect(kernelBusy(home)).toBe(true)
+    expect(kernelBusy(home, true)).toBe(false)
+    expect(() => acquireCodexAccountWriteLease(home)).toThrow('accountBusy')
+    const ready = new Promise((resolve, reject) => {
+      child.stdout!.once('data', resolve)
+      child.once('exit', () => reject(new Error('Admission exited during lifetime handoff')))
+    })
+    child.stdin!.end('\n'); await ready
+    expect(kernelBusy(home, true)).toBe(true)
+    expect(() => acquireCodexAccountWriteLease(home)).toThrow('accountBusy')
+  } finally { lease.close(); child.kill(); await exited }
+  expect(kernelBusy(home)).toBe(false)
 })
 
 test('existing unwrapped native consumer refuses admission; distinct account remains usable', async () => {

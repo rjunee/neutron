@@ -2,8 +2,10 @@
 """Linux account writer admission. Exec, do not supervise, the credential writer.
 
 Exit 73 means busy; 74 means admission unknown. No credential bytes are read.
-The permanent lock inode and inherited open-file description outlive all parents.
+An inherited flock reserves admission until the actual writer takes a POSIX
+process lock. That lock survives exec, but forked tools cannot inherit its ownership.
 """
+import errno
 import fcntl
 import json
 import os
@@ -15,6 +17,7 @@ import sys
 import time
 
 LOCK_NAME = '.neutron-account-writer.lock'
+NATIVE_LOCK_NAME = '.neutron-account-native.lock'
 
 
 class Busy(Exception):
@@ -32,19 +35,38 @@ def canonical_home(value):
     return home
 
 
-def lock(home, inherited=None):
-    fd = inherited if inherited is not None else os.open(home / LOCK_NAME,
+def lock_file(home, name, inherited=None):
+    fd = inherited if inherited is not None else os.open(home / name,
         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
     observed = os.fstat(fd)
-    named = os.stat(home / LOCK_NAME, follow_symlinks=False)
+    named = os.stat(home / name, follow_symlinks=False)
     if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1 or observed.st_uid != os.getuid() \
             or observed.st_mode & 0o077 or (observed.st_dev, observed.st_ino) != (named.st_dev, named.st_ino):
         raise ValueError('Account lock identity unknown')
+    return fd
+
+
+def lock(home, inherited=None):
+    fd = lock_file(home, LOCK_NAME, inherited)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError as error:
         raise Busy('Another native process owns this account') from error
     os.set_inheritable(fd, True)
+    return fd
+
+
+def native_lock(home):
+    # Dedicated inode: POSIX locks are lost when their owning process closes ANY
+    # descriptor for that inode. Never reopen it inside the native process.
+    fd = lock_file(home, NATIVE_LOCK_NAME)
+    try:
+        fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as error:
+        os.close(fd)
+        if error.errno in (errno.EACCES, errno.EAGAIN):
+            raise Busy('Another native process owns this account') from error
+        raise
     return fd
 
 
@@ -154,7 +176,13 @@ def main(argv):
         raise ValueError('Account admission requires Linux process evidence')
     if argv[0] == '--census':
         home = canonical_home(argv[1])
-        stable_census(home)
+        # Caller holds the reservation throughout this short-lived probe. A
+        # native writer owns the other lock even though its flock is released.
+        fd = native_lock(home)
+        try:
+            stable_census(home)
+        finally:
+            os.close(fd)
         return
     if argv[0] == '--resolve':
         env = dict(os.environ)
@@ -176,7 +204,14 @@ def main(argv):
     native = native_command(binary, env)
     home = canonical_home(home_value or str(Path(os.environ['HOME']) / '.codex'))
     fd = lock(home, inherited)
+    lifetime = native_lock(home)
     stable_census(home)
+    os.set_inheritable(lifetime, True)
+    # Only this launch process releases the reservation, and only after it owns
+    # lifetime exclusion. Parent descriptors merely close. A native's tools may
+    # inherit the FD, but POSIX record-lock ownership does not cross fork.
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
     env['CODEX_HOME'] = str(home)
     # Keep the exact PID/start identity, cwd, stdio, signals and inherited FD.
     os.execve(native, [native, *arguments], env)
