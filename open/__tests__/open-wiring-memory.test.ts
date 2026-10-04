@@ -18,7 +18,8 @@
  * Cleanups are always drained in a `finally` so no scheduler timer leaks.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -35,10 +36,14 @@ import { SUPERSEDE_GUIDANCE } from '@neutronai/scribe/extract.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 
 let tmpDir: string
+let unregisteredRoute: ReturnType<typeof spyOn>
 beforeEach(() => {
+  // Exercise synthetic self-host pools, independent of host registration.
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-wiring-mem-'))
 })
 afterEach(() => {
+  unregisteredRoute.mockRestore()
   rmSync(tmpDir, { recursive: true, force: true })
 })
 

@@ -69,3 +69,12 @@ passed 76 tests with no failures. Removing the fixture mocks reproduced the
 original 13, 3, 2 and 4 failures; restoring them restored the 76-test pass.
 These controls isolate synthetic credentials from ambient host registration;
 they do not substitute for a completed exact-head full-suite gate.
+
+The final isolation scope is seven fixture files: the same absence-of-route
+boundary also fixes background composition, reminder dispatch and memory wiring.
+Their direct baseline failure counts were 7, 1 and 5; their isolated runs passed
+9, 1 and 12 tests. All seven edited fixtures, the unchanged doctor suite and
+unchanged registered-auth controls passed together: 123 tests, zero failures
+across nine files. The doctor's 25 original tests already passed; nested
+expected-failure output was not a reason to change it. No production predicate,
+assertion or host registration was removed or relaxed by this fixture batch.

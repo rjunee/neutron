@@ -34,7 +34,8 @@
  * so they fail the moment background composition is pointed back at `cc-agent-*`.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -224,9 +225,13 @@ async function turn(sub: Substrate, prompt: string, project_id = 'project-one'):
   return text
 }
 
+let unregisteredRoute: ReturnType<typeof spyOn>
 beforeEach(() => {
+  // Synthetic self-host pools must never discover the host's native route.
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   githubSpawnEnvRef.resolve = undefined
 })
+afterEach(() => { unregisteredRoute.mockRestore() })
 
 describe('background composition runs on its own REPL', () => {
   test('the nudge substrate does not share a pool key with the owner chat', async () => {
