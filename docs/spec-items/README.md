@@ -138,6 +138,9 @@ branch is cut (standard §3.1, §3.2).
 | [`instance-project-provider-resolution`](instance-project-provider-resolution.md) | Resolve the model provider per instance and project | P1 | — |
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
 | [`observable-pane-adoption`](observable-pane-adoption.md) | Require observable pane adoption and bounded pane-loss recovery | P1 | — |
+| [`open-activity-fixture-drain`](open-activity-fixture-drain.md) | Quiesce the served activity fixture before DB close | P1 | — |
+| [`open-chatlog-fixture-drain`](open-chatlog-fixture-drain.md) | Quiesce the durable chatlog fixture before DB close | P1 | — |
+| [`open-integration-fixture-drain`](open-integration-fixture-drain.md) | Quiesce claim and import integration fixtures before DB close | P1 | — |
 | [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | yes |
 | [`start-the-project-backup-scheduler-loop`](start-the-project-backup-scheduler-loop.md) | Start the dormant per-project backup scheduler loop | P1 | yes |
 | [`temporary-build-timeline-dashboard`](temporary-build-timeline-dashboard.md) | Observe PR wall-clock phases in a temporary authenticated dashboard | P1 | — |
