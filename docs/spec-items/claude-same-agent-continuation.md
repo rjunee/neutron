@@ -52,6 +52,16 @@ Its separate fresh capacity response is based only on the previously observed
 actual model. Launch aliases and credential-file changes cannot establish these
 facts. Ordinary assistant text and arbitrary local 429s are not quota authority.
 
+A native terminal API failure may settle its conversation only through a
+generation-authenticated `StopFailure` hook correlated to the exact injected
+root channel turn by `UserPromptSubmit` and its native prompt ID. Startup,
+history, quoted text, retries, foreign generations and subagent failures cannot
+settle that turn. The normal failure path releases conversation admission, not
+unresolved native-child ownership. Before warm reuse, an authenticated exact
+terminal acknowledgement retires that turn's reply correlation without erasing
+older stale-reply debt. Children launched without these hooks cannot acquire
+retrospective terminal authority from a rendered error or an operator assertion.
+
 ## Original-child continuation
 
 On registered host routes, new bounded native dispatch first checks an already
@@ -158,6 +168,13 @@ checkpoint happens to be current at recovery time.
       Verify: native-request-relay, auth-fingerprint and launch tests, the
       consuming `open/__tests__/project-build-e2e.test.ts` Unix-transport case,
       and the offline official-CLI wire proof.
+- [ ] Generation-authenticated, exactly correlated native terminal failure reaches
+      the existing chat failure path and permits a warm next turn without killing
+      or replacing the parent. Conversation leases release; unresolved native
+      child leases remain unchanged. Uncorrelated and foreign evidence refuses.
+      Verify: `gateway/wiring/__tests__/build-live-agent-turn-native-failure.test.ts`
+      and `runtime/adapters/claude-code/persistent/__tests__/native-turn-failure.test.ts`,
+      including the real dev-channel endpoint and opposite semantic mutations.
 - [ ] Genuine pre-stream A-to-B rotation preserves the same native request,
       parent and child without `SendMessage`; ambiguous upstream completion and
       partial streams cannot replay. Root-depth native agent headers are accepted,
