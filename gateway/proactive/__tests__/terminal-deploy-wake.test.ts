@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '../../wiring/build-live-agent-turn.ts'
 
 import {
   buildTerminalDeployWakeObserver,
@@ -48,9 +49,11 @@ describe('terminal deploy wake', () => {
     const h = harness()
     h.deps.projectChatScope = () => scope
     let observed: unknown
-    h.deps.llm = { compose: async spec => { observed = spec.metering_context; return 'continued' } }
+    let tools: string[] = []
+    h.deps.llm = { compose: async spec => { observed = spec.metering_context; tools = spec.tools.map(tool => tool.name); return 'continued' } }
     await buildTerminalDeployWakeObserver(h.deps)(outcome())
     expect(observed).toEqual({ project_id: scope ?? 'general', conversationProjectId: scope })
+    expect(tools).toEqual(scope === null ? [...LIVE_AGENT_TOOL_NAMES] : PROJECT_REPL_TOOL_DEFS.map(tool => tool.name))
   })
   test('an accepted deploy wakes and replies on the requesting project conversation', async () => {
     const h = harness()

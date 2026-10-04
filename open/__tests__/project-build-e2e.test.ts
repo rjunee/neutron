@@ -50,6 +50,9 @@
  * Everything this does NOT cover is enumerated at the bottom of this file.
  */
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { buildTerminalBuildWakeObserver } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
+import { buildTerminalDeployWakeObserver } from '@neutronai/gateway/proactive/terminal-deploy-wake.ts'
 import { readNativeParentLaunchEvidence, recordNativeParentLaunchEvidence } from '@neutronai/runtime/adapters/claude-code/persistent/native-parent-launch-evidence.ts'
 import { prepareAdoptedNativeParentLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/adopted-native-parent-launch.ts'
 import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
@@ -1677,6 +1680,40 @@ test('host-terminated capped Chat resumes through current launch and signed cap 
   expect(f.world.dispatches.length).toBeGreaterThan(0)
   expect(argvs).toHaveLength(1)
   expect(server.panes.has(old.layout.root.pane_id)).toBe(true)
+}, 30_000)
+
+test.each(['build', 'deploy'] as const)('a project terminal %s wake preserves the native planner grants', async kind => {
+  const f = await fixture({ nativeContinuation: 'available' })
+  f.register()
+  await Promise.resolve()
+  const fingerprint = 'native-relay-v3:fixture-current-route'
+  f.session.authFingerprint = fingerprint
+  const route = spyOn(nativeCapacityClient, 'nativeRelayRouteFingerprint').mockReturnValue(fingerprint)
+  cleanups.push(() => route.mockRestore())
+  const before = f.session.toolSurface
+  let wakes = 0
+  const llm = { compose: async (spec: AgentSpec) => {
+    wakes++
+    expect(spec.metering_context?.conversationProjectId).toBe('e2e-project')
+    // Consume the actual producer's requested surface as the parent launch
+    // grant. Process replacement itself belongs to the runtime reuse tests.
+    f.session.toolSurface = spec.tools.map(tool => tool.name).join(',')
+    return 'Continued.'
+  } }
+  const common = { llm, projectChatScope: () => 'e2e-project', post: async () => true,
+    logger: { error: () => { throw new Error('Wake failed') } } }
+  if (kind === 'build') await buildTerminalBuildWakeObserver({ ...common,
+    wakeCompleted: () => false, claimWake: async () => true, boardItemIdForRun: async () => null,
+    arbitrate: async () => ({ kind: 'unavailable', reason: 'No arbitration needed for completed fixture' }),
+  })({ ...f.row, phase: 'done', chat_id: 'fixture-chat' })
+  else await buildTerminalDeployWakeObserver(common)({ topic_id: 'fixture-chat', ref: 'main',
+    sha: f.baseSha, kind: 'accepted', detail: 'Fixture deployment completed.' })
+  expect(wakes).toBe(1)
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.session.toolSurface).toBe(before)
+  expect(f.nativeInputs.length).toBeGreaterThan(0)
+  expect(f.admission.listLeases('liveChild')).toHaveLength(0)
 }, 30_000)
 
 test.each(['ready', 'cold-ready', 'auth', 'tools', 'planner', 'missing-launch', 'launch', 'session', 'generation', 'argv', 'relay', 'route-unavailable'] as const)(

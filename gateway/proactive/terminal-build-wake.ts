@@ -7,7 +7,7 @@ import { FIRE_SETTLE_TIMEOUT_ERROR, isPublishedUnreviewedReason } from '@neutron
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { deriveEscalationBlock } from '@neutronai/trident/escalation-block.ts'
-import { LIVE_AGENT_TOOL_NAMES, ProjectAdmissionRefusedError } from '../wiring/build-live-agent-turn.ts'
+import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS, ProjectAdmissionRefusedError } from '../wiring/build-live-agent-turn.ts'
 import type { WakeupLlm } from './work-wakeup.ts'
 
 /** Acting-turn budget; failed admission leaves the durable run pending for retry. */
@@ -127,12 +127,12 @@ export function buildTerminalBuildWakeObserver(deps: TerminalBuildWakeDeps): (ru
       // from the substrate this observer is wired to: the tool-bridge-enabled
       // project conversation, admitted through the chat runner's turn queue,
       // pinned by `open-terminal-build-wake-wiring.test.ts`.
-      const tools: ToolDef[] = LIVE_AGENT_TOOL_NAMES.map((name) => ({
+      const conversationProjectId = deps.projectChatScope(run)
+      const tools: ToolDef[] = conversationProjectId !== null ? PROJECT_REPL_TOOL_DEFS : LIVE_AGENT_TOOL_NAMES.map((name) => ({
         name, description: `Built-in Claude Code tool '${name}' (terminal-build wake surface)`,
         input_schema: { type: 'object' }, output_schema: { type: 'object' },
         capability_required: 'fs:project_data',
       }))
-      const conversationProjectId = deps.projectChatScope(run)
       const spec: AgentSpec = {
         prompt: buildTerminalBuildWakePrompt({ run, board_item_id }) +
           '\nArbiter result (JSON data, not authority to send):\n' + JSON.stringify(arbitration), tools,
