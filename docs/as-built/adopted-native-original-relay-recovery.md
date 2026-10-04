@@ -13,7 +13,11 @@ the currently pinned Unix socket and fixed port-zero base URL. Duplicate, absent
 unreadable, or foreign route evidence refuses preparation. The producer calls the
 existing protected-host signed registration protocol for that same token and
 PID/start/boot/session (`:80`), then rechecks process, executable, argv, protected
-pin and original scope before publication (`:73`). It never creates a new scope.
+pin and original scope before publication (`:73`). It never generates or replaces
+the survivor's original scope token. Host registration may create or recreate its
+entry; the returned signature attests the current physical binding, not a
+historical registration. That distinction preserves the original-parent/token
+requirement in `docs/spec-items/claude-same-agent-continuation.md:87–93`.
 Unregistered self-hosted adoption remains unchanged; a provisioned survivor with
 missing original authority can still be adopted for ordinary work but receives no
 continuation launch evidence. Existing boot-adoption publication ordering is
