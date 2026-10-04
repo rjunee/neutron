@@ -40,6 +40,11 @@ class CensusTest(unittest.TestCase):
         with self.assertRaises(writer.Busy):
             writer.census(self.root / '.codex', self.proc)
 
+    def test_empty_live_environment_is_unknown_and_requires_a_fresh_census(self):
+        (self.pid / 'environ').write_bytes(b'')
+        with self.assertRaisesRegex(ValueError, 'home is unknown'):
+            writer.census(self.home, self.proc)
+
     def test_scheduler_state_change_does_not_invent_identity_change(self):
         with patch.object(writer, 'process_identity', side_effect=[('S', '123'), ('R', '123')]):
             with self.assertRaises(writer.Busy):

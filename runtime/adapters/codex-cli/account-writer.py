@@ -83,7 +83,11 @@ def census(home, proc=Path('/proc')):
                 raise ValueError('Process census changed')
             if after[0] in ('Z', 'X'):
                 continue
-            value = environment.get('CODEX_HOME') or str(Path(environment['HOME']) / '.codex')
+            value = environment.get('CODEX_HOME')
+            if not value:
+                if not environment.get('HOME'):
+                    raise ValueError('Native account home is unknown')
+                value = str(Path(environment['HOME']) / '.codex')
             candidate = Path(value)
             if not candidate.is_absolute():
                 candidate = Path(os.readlink(path / 'cwd')) / candidate
