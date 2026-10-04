@@ -607,6 +607,45 @@ checks the protected pin, transport refusals and actual server-entrypoint wiring
 Live host attestation and reboot restoration are
 separate deployment acceptance and are not established by these offline tests.
 
+### Authenticated dead Chat ownership after host termination
+
+The consumed host-termination operation may also identify a dead project Chat
+whose historical credential fingerprint or tool profile no longer matches the
+current route. This is not survivor adoption and does not relax its fingerprint
+guard. The installed owner may request `POST /admin/reconcile-host-terminated-chat`
+with the operation ID, exact project ID, original evidence-bundle bytes and
+registry-artifact bytes. The independently signed preparation must bind the
+bundle digest; the bundle must bind the registry digest and original parent
+session, generation, native PID and gateway claimant. Descriptor paths are data,
+never instructions to read a local file. A consumed, authenticated different-boot
+observation and a fresh signed current-boot challenge are both required.
+
+Reconciliation fences this scope's admission and refuses any unresolved lease,
+current transcript owner, uncertain process census, changed historical parent,
+changed pane, changed journal, active spawn or foreign workspace. Under exact
+registry and workspace-journal comparisons it relinquishes only the dead
+process ownership and the Chat slot. The old bare-shell tab remains visible as
+history; it is neither closed nor adopted and is never relabelled a placeholder.
+A registry commit followed by an interrupted journal save remains placement-
+blocked; retry requires the same authenticated historical identity. A historical
+marker alone grants no permission. Other projects and worker holds are unchanged.
+
+The next ordinary authorized owner turn uses the existing launch path, resumes
+the same native session, and records its genuinely launched current credential,
+tool and planner profile under a new child generation. Reconciliation itself
+does not edit these grants or fingerprints and preserves `capped_at`. Clearing
+that cap remains the separately signed exact cap-rearm operation, against the
+new generation when a real relaunch has occurred. Neither operation retries old
+native work or manufactures workflow completion.
+
+Verify both acceptance and refusal in
+`open/wiring/__tests__/host-terminated-chat-proof.test.ts`,
+`runtime/adapters/claude-code/persistent/__tests__/host-terminated-chat.test.ts`,
+`gateway/http/__tests__/admin-respawn-surface.test.ts` and the consuming restoration
+case in `open/__tests__/project-build-e2e.test.ts`. Include same-boot signed proof,
+remapped but otherwise valid shell/journal, current-owner and commit races,
+interrupted journal save/retry, retained cap and old-generation cap rearm refusal.
+
 **The close is licensed by the row as well as the process, but the window is narrowed
 rather than eliminated.** A pane is only closed when the row still names it — checked
 under the flock immediately before the close — because a newer incarnation of ours on a

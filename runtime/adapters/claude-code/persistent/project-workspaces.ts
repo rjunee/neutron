@@ -46,6 +46,8 @@ interface WorkspaceRecord {
   state: 'pending' | 'ready' | 'retiring' | 'retired'
   workspace?: string
   chat?: ChatSlot
+  /** Old shell panes retained after authenticated death of their native owner. */
+  relinquishedChats?: ChatSlot[]
   workers?: Record<string, WorkerOperation>
   retirement?: { operationId: string; revision: string }
 }
@@ -221,7 +223,7 @@ export class ProjectWorkspaceManager {
         }
         if (existing.version !== 1 || JSON.stringify(existing.scope) !== JSON.stringify(scope)
           || !nonempty(existing.token) || existing.state !== 'ready' || !nonempty(existing.workspace)
-          || !existing.chat || !nonempty(existing.chat.tab) || !nonempty(existing.chat.pane)) {
+          || (existing.chat ? !nonempty(existing.chat.tab) || !nonempty(existing.chat.pane) : !existing.relinquishedChats?.length)) {
           throw new ProjectWorkspaceRefusal('project-workspaces: existing ownership is invalid or pending; reconcile before retry')
         }
         return existing
@@ -376,6 +378,41 @@ export class ProjectWorkspaceManager {
     try { return await operation } finally { if (this.operations.get(key) === operation) this.operations.delete(key) }
   }
 
+  /** Relinquish only metadata, never a process. The callback commits the exact
+   * authenticated dead registry row while the workspace journal is locked.
+   * If the journal save fails afterwards, its retained Chat continues to block
+   * placement and an identical reconciliation can finish the interrupted write. */
+  async relinquishDeadChat(client: HerdrRpc, placement: ProjectPanePlacement, pane: string,
+    commit: () => boolean): Promise<boolean> {
+    const scope = scopeOf(placement)
+    const key = createHash('sha256').update(JSON.stringify(scope)).digest('hex')
+    const prior = this.operations.get(key) ?? Promise.resolve()
+    const operation = prior.catch(() => undefined).then(async () => {
+      try {
+        const before = this.journal.read(rows => structuredClone(rows[key]))
+        if (!before || before.state !== 'ready' || before.chat?.pane !== pane || before.chat.placeholderArgv) return false
+        const inspected = await this.inspect(client, scope, key)
+        if (inspected.status !== 'live' || inspected.pane !== pane || inspected.revision !== before.revision) return false
+        const info = object(object(await client.call('pane.process_info', { pane_id: pane })).process_info)
+        const processes = info.foreground_processes
+        if (info.pane_id !== pane || !Array.isArray(processes) || processes.length !== 1) return false
+        const foreground = object(processes[0])
+        const argv = foreground.argv
+        if (typeof info.shell_pid !== 'number' || foreground.pid !== info.shell_pid || !Array.isArray(argv)
+          || argv.length !== 1 || typeof argv[0] !== 'string'
+          || !/^(?:.*\/)?-?(?:bash|sh|zsh|fish|dash)$/.test(argv[0])) return false
+        return this.journal.update(rows => {
+          if (JSON.stringify(rows[key]) !== JSON.stringify(before) || !commit()) return false
+          const { chat, ...retained } = before
+          rows[key] = { ...retained, revision: randomUUID(), relinquishedChats: [...(before.relinquishedChats ?? []), chat!] }
+          return true
+        })
+      } catch { return false }
+    })
+    this.operations.set(key, operation)
+    try { return await operation } finally { if (this.operations.get(key) === operation) this.operations.delete(key) }
+  }
+
   /** Never substitute workspace.close or a sampled empty pane list for this RPC.
    * Reservation survives uncertain replies and excludes other processes' placement. */
   async retireEmptyWorkspace(client: HerdrRpc, placement: ProjectPanePlacement, expected: ChatInspection): Promise<WorkspaceRetirement> {
@@ -448,7 +485,7 @@ export class ProjectWorkspaceManager {
         || !nonempty(record.token) || !nonempty(record.revision)) {
         return { status: 'refused', reason: 'workspace ownership is invalid' }
       }
-      if (record.state === 'retired') return { status: 'none' }
+      if (record.state === 'retired' || record.state === 'ready' && !record.chat && record.relinquishedChats?.length) return { status: 'none' }
       if (!['ready', 'retiring'].includes(record.state) || !nonempty(record.workspace) || !record.chat
         || !nonempty(record.chat.tab) || !nonempty(record.chat.pane)) {
         return { status: 'refused', reason: 'workspace ownership is invalid or pending' }

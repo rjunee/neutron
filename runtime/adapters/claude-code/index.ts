@@ -550,6 +550,23 @@ export function rearmExistingClaudeReplCap(options: ClaudeCodeSubstrateOptions,
   return rearmReplCap(p, request, authorized)
 }
 
+/** Exact dead-owner reconciliation; normal admitted dispatch still owns launch. */
+export async function reconcileTerminatedClaudeChat(options: ClaudeCodeSubstrateOptions,
+  captured: import('./persistent/repl-registry.ts').ReplRegistryRecord, authorized: () => boolean) {
+  const { p, resolved } = prepareClaudeCodeOptions(options)
+  if (resolved.home === undefined) return { status: 'refused' as const, reason: 'supervision home unavailable' }
+  applySupervisionPaths(p, deriveReplSupervisionPaths(resolved.home))
+  const { isProjectChatInspector } = await import('./persistent/project-workspace-host.ts')
+  const host = p.ptyHost
+  if (!p.projectPlacement || !isProjectChatInspector(host) || !host.relinquishDeadChat) {
+    return { status: 'refused' as const, reason: 'project Chat reconciliation unavailable' }
+  }
+  const placement = p.projectPlacement
+  const { reconcileHostTerminatedChat } = await import('./persistent/host-terminated-chat.ts')
+  return reconcileHostTerminatedChat(p, captured,
+    { relinquish: (pane, commit) => host.relinquishDeadChat!(placement, pane, commit) }, authorized)
+}
+
 function applySupervisionPaths(p: PersistentReplSubstrateOptions, paths: ReplSupervisionPaths): void {
   p.replRegistryPath = paths.replRegistryPath
   p.pendingRespawnsPath = paths.pendingRespawnsPath

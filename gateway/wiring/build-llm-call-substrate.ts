@@ -1085,6 +1085,8 @@ function placeConversation(opts: ClaudeCodeSubstrateOptions, input: BuildLlmCall
 }
 
 export interface LlmCallSubstrate extends Substrate {
+  reconcileTerminatedChat(captured: import('@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts').ReplRegistryRecord,
+    authorized: () => boolean): Promise<import('@neutronai/runtime/adapters/claude-code/persistent/host-terminated-chat.ts').DeadChatReconciliation>
   rearmCap(request: import('@neutronai/runtime/adapters/claude-code/persistent/operator-cap-rearm.ts').CapRearmRequest,
     authorized: () => boolean): Promise<boolean>
   /** Retire already-owned exact helper keys; preserve registry-only survivors. */
@@ -1221,6 +1223,16 @@ export function buildLlmCallSubstrate(
     }
   }
   return {
+    async reconcileTerminatedChat(captured, authorized) {
+      let result: import('@neutronai/runtime/adapters/claude-code/persistent/host-terminated-chat.ts').DeadChatReconciliation =
+        { status: 'refused', reason: 'current conversation authority unavailable' }
+      if (captured.conversationProjectId === undefined) return result
+      await reconcileAuthorized([captured.conversationProjectId], async (options, currentAuthority) => {
+        const { reconcileTerminatedClaudeChat } = await import('@neutronai/runtime/adapters/claude-code/index.ts')
+        result = await reconcileTerminatedClaudeChat(options, captured, () => currentAuthority() && authorized())
+      })
+      return result
+    },
     async rearmCap(request, authorized) {
       let rearmed = false
       await reconcileAuthorized([request.projectId], async (options, currentAuthority) => {

@@ -26,6 +26,7 @@ import type { RespawnOutcome } from '@neutronai/runtime/adapters/claude-code/per
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface AdminRespawnSurfaceInput {
+  reconcileTerminatedChat?: (request: unknown) => Promise<{ status: 'reconciled' } | { status: 'refused'; reason: string }>
   /** Expected operator token — request must present it in `X-Gateway-Token`. */
   gatewayToken: string
   /** Force-recover actuation. Boot wires `respawnSupervisedSession(path, key)`. */
@@ -45,7 +46,7 @@ export interface AdminRespawnSurface {
   handler: (req: Request) => Promise<Response | null>
 }
 
-async function readCapAuthorization(req: Request): Promise<unknown> {
+async function readCapAuthorization(req: Request, maxBytes = 65_536): Promise<unknown> {
   const reader = req.body?.getReader()
   if (!reader) throw new Error('Missing authorization')
   const chunks: Uint8Array[] = []
@@ -55,7 +56,7 @@ async function readCapAuthorization(req: Request): Promise<unknown> {
       const next = await reader.read()
       if (next.done) break
       length += next.value.byteLength
-      if (length > 65_536) throw new Error('Authorization too large')
+      if (length > maxBytes) throw new Error('Authorization too large')
       chunks.push(next.value)
     }
     return JSON.parse(Buffer.concat(chunks).toString('utf8'))
@@ -69,6 +70,27 @@ export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): Admi
   return {
     handler: async (req: Request): Promise<Response | null> => {
       const url = new URL(req.url)
+      if (url.pathname === '/admin/reconcile-host-terminated-chat' && req.method === 'POST') {
+        // The installed owner authenticates the request. Independently signed
+        // host evidence, current scope admission, and exact identity are checked
+        // by composition; the bearer alone never licenses reconciliation.
+        const supplied = req.headers.get('X-Gateway-Token') ?? ''
+        const { timingSafeEqual } = await import('node:crypto')
+        const a = Buffer.from(supplied), b = Buffer.from(input.gatewayToken)
+        if (!a.length || a.length !== b.length || !timingSafeEqual(a, b)) return Response.json({ ok: false }, { status: 403 })
+        const now = (input.now ?? Date.now)()
+        const limit = input.rateLimit ?? { windowMs: 60_000, maxRequests: 5 }
+        rateState.hits = rateState.hits.filter(t => now - t < limit.windowMs)
+        if (rateState.hits.length >= limit.maxRequests) return Response.json({ ok: false }, { status: 429 })
+        rateState.hits.push(now)
+        try {
+          // A historical registry contains all conversations, unlike the small
+          // cap authorization. Bound its supplied preimage without opening paths.
+          const result = await input.reconcileTerminatedChat?.(await readCapAuthorization(req, 4 * 1024 * 1024))
+            ?? { status: 'refused', reason: 'reconciliation unavailable' }
+          return Response.json(result, { status: result.status === 'reconciled' ? 200 : 409 })
+        } catch { return Response.json({ status: 'refused', reason: 'invalid reconciliation request' }, { status: 409 }) }
+      }
       if (url.pathname === '/admin/rearm-session-cap' && req.method === 'POST') {
         // Browser/owner credentials confer NO cap-release authority. The callback
         // must authenticate the independent operator signature before acting.

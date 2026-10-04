@@ -188,6 +188,9 @@ export interface ReplReuseProperties {
 
 /** One persisted REPL supervision row. */
 export interface ReplRegistryRecord {
+  /** Historical ownership relinquished after authenticated host termination.
+   * Not an adoption, launch profile, or permission to clear a restart cap. */
+  host_terminated_chat?: { pane: string; pid: number; childGeneration: string }
   /** Pool key — opaque; follows S3 re-namespacing. */
   sessionKey: string
   /** Spawn-proven conversation scope. Absent legacy 'general' keys are ambiguous. */

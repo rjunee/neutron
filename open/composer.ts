@@ -1381,6 +1381,7 @@ export function buildOpenGraphComposer(
       makeProjectLiveAgentSubstrate,
       adoptLiveAgentRepls,
       rearmLiveAgentCap,
+      reconcileTerminatedChat,
       recoverLiveAgentRepls,
       makeComposeSubstrate,
       reminderComposeSubstrate,
@@ -4429,6 +4430,11 @@ export function buildOpenGraphComposer(
     // the per-boot app token keeps this force-respawn endpoint privileged.
     const replRegistryPath = deriveReplSupervisionPaths(owner_home).replRegistryPath
     const adminRespawnSurface = createAdminRespawnSurface({
+      reconcileTerminatedChat: async raw => {
+        const { reconcileTerminatedProjectChat } = await import('./wiring/reconcile-host-terminated-chat.ts')
+        return reconcileTerminatedProjectChat(raw, { admission: projectAdmission, projectIds: listProjectIds,
+          authority: options.nativeHostRecoveryAuthority, reconcile: reconcileTerminatedChat })
+      },
       gatewayToken: appWsToken,
       respawn: (sessionKey) => respawnSupervisedSession(replRegistryPath, sessionKey),
       authorizeCapRearm: authorization => verifyCapRearmAuthorization(authorization, options.nativeHostRecoveryAuthority) !== undefined,

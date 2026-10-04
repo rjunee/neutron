@@ -28,6 +28,7 @@ export interface ConversationTerminal {
 
 /** The strict host's read-only Chat inspection (#1226 sleep). */
 export interface ProjectChatInspector {
+  relinquishDeadChat?(placement: ProjectPanePlacement, pane: string, commit: () => boolean): Promise<boolean>
   inspectChat(placement: ProjectPanePlacement): Promise<ChatInspection>
   retireEmptyWorkspace?(placement: ProjectPanePlacement, expected: ChatInspection): Promise<WorkspaceRetirement>
 }
@@ -44,6 +45,10 @@ export function createProjectWorkspaceHost(journalPath: string,
   if (!isAbsolute(journalPath)) throw new Error('Project workspace journal requires an absolute path')
   const manager = new ProjectWorkspaceManager(journalPath)
   class ScopedHost extends HerdrHost implements ProjectChatInspector {
+    async relinquishDeadChat(placement: ProjectPanePlacement, pane: string, commit: () => boolean): Promise<boolean> {
+      const client = await (deps.connect ?? (async () => createHerdrRpc()))()
+      return manager.relinquishDeadChat(client, placement, pane, commit)
+    }
     override async spawn(argv: string[], options: PtySpawnOpts) {
       if (options.projectPlacement === undefined) throw new Error('Project workspace host requires explicit placement')
       return super.spawn(argv, options)

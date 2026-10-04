@@ -41,6 +41,27 @@ test('cap rearm uses its independent authority callback, never the browser beare
 })
 
 const defaultHandler = (): Response => new Response('default', { status: 200 })
+
+test('host-terminated reconciliation is owner authenticated, bounded and rate limited without invoking respawn or cap release', async () => {
+  const seen: unknown[] = []
+  const surface = createAdminRespawnSurface({ gatewayToken: 'owner-secret',
+    respawn: () => { throw new Error('must not respawn') }, rearmCap: async () => { throw new Error('must not rearm') },
+    reconcileTerminatedChat: async request => { seen.push(request); return { status: 'reconciled' } },
+    rateLimit: { windowMs: 60000, maxRequests: 2 } })
+  const handler = composeHttpHandler({ adminRespawn: surface, defaultHandler })
+  const call = (request: unknown, token = 'owner-secret') => handler.fetch(new Request('http://x/admin/reconcile-host-terminated-chat', {
+    method: 'POST', headers: { 'X-Gateway-Token': token }, body: JSON.stringify(request),
+  }), {} as never)
+  expect((await call({}, 'foreign')).status).toBe(403)
+  expect(seen).toEqual([])
+  expect((await call({ registry: 'x'.repeat(4 * 1024 * 1024) })).status).toBe(409)
+  expect(seen).toEqual([])
+  const request = { operationId: 'operation', projectId: 'project', bundle: '{}', registry: 'x'.repeat(70_000) }
+  expect((await call(request)).status).toBe(200)
+  expect(seen).toEqual([request])
+  expect((await call(request)).status).toBe(429)
+  expect(seen).toHaveLength(1)
+})
 const ok = (sessionKey: string): RespawnOutcome => ({ ok: true, sessionKey, sessionId: 'uuid-x', initiatedAt: 1 })
 
 function composedWithSurface(over: { token?: string; respawn?: (k: string) => RespawnOutcome } = {}) {

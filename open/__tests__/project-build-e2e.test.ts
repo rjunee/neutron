@@ -1508,6 +1508,121 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     finishNativeQuota: () => worker(quotaDispatch) }
 }
 
+test('host-terminated capped Chat resumes through current launch and signed cap rearm before consuming a full build', async () => {
+  const f = await fixture()
+  const { generateKeyPairSync, sign } = await import('node:crypto')
+  const { ProjectWorkspaceManager } = await import('@neutronai/runtime/adapters/claude-code/persistent/project-workspaces.ts')
+  const { FakeHerdrWorkspaceServer } = await import('@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts')
+  const { lifecycleReplHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/__tests__/lifecycle-repl-host.ts')
+  const { reconcileHostTerminatedChat } = await import('@neutronai/runtime/adapters/claude-code/persistent/host-terminated-chat.ts')
+  const { reconcileTerminatedProjectChat } = await import('../wiring/reconcile-host-terminated-chat.ts')
+  const { getRecord, saveRegistry } = await import('@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts')
+  const { sessionJsonlPath } = await import('@neutronai/runtime/adapters/claude-code/persistent/session-size-watchdog.ts')
+  const { createPersistentReplSubstrate, poolKeyFor, setReplToolBridge, clearReplToolBridgeIf, shutdownAllPersistentRepls } =
+    await import('@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts')
+  const { rearmReplCap } = await import('@neutronai/runtime/adapters/claude-code/persistent/operator-cap-rearm.ts')
+  const { verifyCapRearmAuthorization } = await import('../operator-cap-rearm-authorization.ts')
+  const server = new FakeHerdrWorkspaceServer()
+  const manager = new ProjectWorkspaceManager(join(f.dir, 'workspaces.json'))
+  const placement = { instanceId: 'e2e-instance', projectId: 'e2e-project', projectLabel: 'Recovery', role: 'chat' as const }
+  const root = { type: 'pane' as const, cwd: f.dir, command: ['/bin/bash'], env: {} }
+  const old = await manager.applyLayout(server, root, placement)
+  const fake = lifecycleReplHost()
+  const argvs: string[][] = []
+  const runtime = { substrate_instance_id: 'cc-agent-recovery', user_id: 'e2e-owner', project_id: 'e2e-project',
+    conversationProjectId: 'e2e-project', cwd: f.dir, replRegistryPath: join(f.dir, 'registry.json'), projectsDir: join(f.dir, 'claude-projects'),
+    claude_bin: join(f.dir, 'claude'), env: { CLAUDE_CODE_OAUTH_TOKEN: 'current-fixture' }, enableToolBridge: true,
+    skipTrustSeed: true, skip_permissions: true, extra_dirs: [f.dir], idleQuietMs: 0,
+    admissionGeneration: async () => f.admission.inspect('e2e-project')?.generation,
+    captureConfig: { maxAttempts: 1, attemptDelayMs: 1 },
+    assertConfig: { readyBudgetMs: 5000, readyIntervalMs: 25, healthBudgetMs: 5000, healthIntervalMs: 25 },
+    ptyHost: { async spawn(argv: string[], opts: import('@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts').PtySpawnOpts) {
+      argvs.push(argv)
+      await manager.applyLayout(server, { ...root, command: argv }, placement)
+      return fake.host.spawn(argv, opts)
+    } },
+  }
+  const key = poolKeyFor(runtime)
+  const captured = { sessionKey: key, sessionId: 'e2e-session', child_generation: 'terminated-generation', pid: 987654,
+    adoption_claim_pid: 987653, cwd: f.dir, channelName: 'neutron-11112222333344445555666677778888',
+    conversationProjectId: 'e2e-project', has_session: true, model: 'claude-opus-4-7', capped_at: 100, admission_generation: 0,
+    pane_handle: old.layout.root.pane_id, reuse: { auth_fingerprint: '', tool_surface: 'Read,Agent', tool_bridge: true, planner_profile: 'old-profile' } }
+  saveRegistry(runtime.replRegistryPath, { [key]: captured })
+  const transcript = sessionJsonlPath(captured.sessionId, f.dir, runtime.projectsDir)
+  await mkdir(dirname(transcript), { recursive: true }); await writeFile(transcript, '{"historical":true}\n')
+  await writeFile(runtime.claude_bin, '#!/bin/sh\nprintf "2.1.285 (Claude Code)\\n"\n', { mode: 0o700 })
+  const pair = generateKeyPairSync('ed25519')
+  const signed = <T,>(body: T) => ({ body, signature: sign(null, Buffer.from(JSON.stringify(body)), pair.privateKey).toString('base64') })
+  const hash = (raw: string) => createHash('sha256').update(raw).digest('hex')
+  const registry = JSON.stringify({ [key]: captured })
+  const bundle = JSON.stringify({ policy: 'retained-quota-local-repl-v1', identity: { hostId: 'host', instanceId: 'instance', bootId: 'old-boot',
+    sessionId: captured.sessionId, childGeneration: captured.child_generation, nativePid: captured.pid, gatewayPid: captured.adoption_claim_pid },
+    registry: { path: '/not-opened', sha256: hash(registry) } })
+  const store = f.admission.maintenance, scope = f.admission.scopeFor('e2e-project')
+  await store.register(scope)
+  const admitted = await store.admit(scope, 'liveChild', 'fixture', '["old-run","old-step"]')
+  if (admitted.status !== 'admitted') throw new Error('fixture admission failed')
+  const lease = { ...admitted.lease, reason: 'liveChild' as const, producer: 'fixture', workRef: '["old-run","old-step"]' }
+  const preparation = signed({ version: 1, kind: 'native-host-termination-preparation', operationId: 'recovery', hostId: 'host', instanceId: 'instance',
+    bootId: 'old-boot', evidenceDigest: hash(bundle), lease })
+  const boot = (challenge: string) => signed({ version: 1, kind: 'host-boot', hostId: 'host', instanceId: 'instance', bootId: 'new-boot', challenge })
+  const authority = { hostId: 'host', instanceId: 'instance', publicKey: pair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), attestBoot: async (challenge: string) => boot(challenge) }
+  expect(await store.prepareHostTermination('recovery', lease, JSON.stringify(preparation), () => true)).toBe(true)
+  expect(await store.consumeHostTermination('recovery', lease, JSON.stringify(preparation), JSON.stringify({ version: 1, kind: 'terminated-by-host-reboot',
+    operationId: 'recovery', preparation, observation: boot('consumed') }), () => true)).toBe(true)
+  const bridge = { listToolSchemas: () => [], dispatch: async () => ({}) }
+  const pin = spyOn(nativeCapacityClient, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+  const route = spyOn(nativeCapacityClient, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+  setReplToolBridge(bridge)
+  cleanups.push(async () => { pool.delete(key); supervisedBySessionKey.delete(key); await shutdownAllPersistentRepls(); clearReplToolBridgeIf(bridge); pin.mockRestore(); route.mockRestore() })
+  const reconcile = () => reconcileTerminatedProjectChat({ operationId: 'recovery', projectId: 'e2e-project', bundle, registry }, {
+    admission: f.admission, projectIds: () => ['e2e-project'], authority, kernelBoot: () => 'new-boot',
+    reconcile: (record, authorized) => reconcileHostTerminatedChat(runtime, record, {
+      relinquish: (pane, commit) => manager.relinquishDeadChat(server, placement, pane, commit),
+    }, authorized, () => []),
+  })
+  const held = await store.admit(scope, 'conversation', 'fixture', 'active-chat')
+  expect((await reconcile()).status).toBe('refused')
+  expect(getRecord(runtime.replRegistryPath, key)).toEqual(captured)
+  if (held.status !== 'admitted') throw new Error('fixture hold failed')
+  await store.release(held.lease)
+  expect(await reconcile()).toEqual({ status: 'reconciled' })
+  expect(f.admission.inspect('e2e-project')?.phase).toBe('open')
+  expect(getRecord(runtime.replRegistryPath, key)!.reuse).toEqual(captured.reuse)
+  const substrate = createPersistentReplSubstrate(runtime)
+  for await (const event of substrate.start({ prompt: 'restore readiness only', model_preference: ['claude-opus-4-7'], tools: PROJECT_REPL_TOOL_DEFS }).events) {
+    if (event.kind === 'error') throw new Error(event.message)
+  }
+  const session = (await pool.get(key))!
+  const current = getRecord(runtime.replRegistryPath, key)!
+  expect(current.sessionId).toBe(captured.sessionId)
+  expect(current.child_generation).not.toBe(captured.child_generation)
+  expect(current.reuse!.tool_surface).toBe(PROJECT_REPL_TOOL_DEFS.map(tool => tool.name).join(','))
+  expect(current.reuse!.auth_fingerprint).not.toBe(captured.reuse.auth_fingerprint)
+  expect(session.plannerRole).toBe(PLANNER_ROLE)
+  expect(current.capped_at).toBe(captured.capped_at)
+  const authorize = (generation: string) => signed({ version: 1, kind: 'operator-repl-cap-rearm', hostId: 'host', instanceId: 'instance',
+    issuedAt: Date.now() - 1, expiresAt: Date.now() + 60_000, request: { projectId: 'e2e-project', sessionKey: key, sessionId: current.sessionId,
+      childGeneration: generation, cappedAt: 100 } })
+  const rearm = (envelope: ReturnType<typeof authorize>) => {
+    const request = verifyCapRearmAuthorization(envelope, authority)
+    return !!request && rearmReplCap(runtime, request, () => !!verifyCapRearmAuthorization(envelope, authority))
+  }
+  expect(rearm(authorize(captured.child_generation))).toBe(false)
+  expect(rearm(authorize(current.child_generation!))).toBe(true)
+  expect(getRecord(runtime.replRegistryPath, key)!.capped_at).toBeUndefined()
+  // Only the model boundary is replaced: real acquired parent identity/profile
+  // now consumes the existing literal worker's complete plan→merge transport.
+  session.child.submitLine = f.session.child.submitLine!
+  supervisedBySessionKey.set(key, runtime)
+  f.context.spawnProjectSession = async () => { throw new Error('restored parent must serve the build') }
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.world.dispatches.length).toBeGreaterThan(0)
+  expect(argvs).toHaveLength(1)
+  expect(server.panes.has(old.layout.root.pane_id)).toBe(true)
+}, 30_000)
+
 test.each(['ready', 'cold-ready', 'auth', 'tools', 'planner', 'missing-launch', 'launch', 'session', 'generation', 'argv', 'relay', 'route-unavailable'] as const)(
   'registered native parent preparation accepts current authority and refuses stale %s before child admission', async fault => {
     const f = await fixture({ nativeContinuation: 'available' })

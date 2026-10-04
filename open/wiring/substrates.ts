@@ -53,6 +53,7 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 
 export interface WiredSubstrates {
+  reconcileTerminatedChat: LlmCallSubstrate['reconcileTerminatedChat']
   rearmLiveAgentCap: (request: import('@neutronai/runtime/adapters/claude-code/persistent/operator-cap-rearm.ts').CapRearmRequest,
     authorized: () => boolean) => Promise<boolean>
   adoptLiveAgentRepls: (projectIds: readonly (string | null)[]) => Promise<void>
@@ -642,6 +643,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
         }
       }
     },
+    reconcileTerminatedChat: async (captured, authorized) => await liveAgentSubstrate?.reconcileTerminatedChat(captured, authorized)
+      ?? { status: 'refused', reason: 'live chat substrate unavailable' },
     rearmLiveAgentCap: async (request, authorized) => await liveAgentSubstrate?.rearmCap(request, authorized) ?? false,
     adoptLiveAgentRepls: async projectIds => { await liveAgentSubstrate?.adoptExisting(projectIds) },
     recoverLiveAgentRepls: async projectIds => { await liveAgentSubstrate?.recoverExisting(projectIds, PROJECT_REPL_TOOL_DEFS) },
