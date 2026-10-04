@@ -34,7 +34,10 @@ A feasible seam is the composed upload sweeper: registration/start and awaited
 stop are at `open/wiring/uploads.ts:186-201`; its tick awaits
 `markExpired` at `gateway/upload/chunked-upload-sweeper.ts:164`. Hold that
 store operation before its real SQL update
-(`gateway/upload/upload-session-store.ts:156-170`). Restore any instrumentation.
+(`gateway/upload/upload-session-store.ts:156-170`). Seed and assert a known
+expired row still in `uploading` status before starting the tick: its scan
+returns early without such a row (`gateway/upload/chunked-upload-sweeper.ts:141-146`).
+Assert that row reaches the held operation. Restore any instrumentation.
 
 ## Acceptance
 
@@ -54,9 +57,14 @@ store operation before its real SQL update
       the fixture path: an earlier rejecting cleanup cannot skip a later held
       cleanup or permit DB close before it settles. All promises settle without
       an unhandled rejection. An empty cleanup list still closes normally.
+- [ ] Every registered cleanup is invoked exactly once within each actual
+      consuming teardown invocation, measured per callback, including rejecting
+      callbacks. A duplicate drain or leftover synchronous cleanup loop fails
+      this assertion even when a loop's stop method is idempotent.
 - [ ] Each consumer is independently mutation-sensitive: removing its await
       fails the ordering assertion; moving its DB close before the drain also
-      fails. Restore each mutation and demonstrate green. A timeout, unrelated
+      fails; duplicating its drain/invocation fails the exact-once count.
+      Restore each mutation and demonstrate green. A timeout, unrelated
       assertion, or syntax/import failure is not the nominated failure.
 - [ ] Existing claim-once/restart and import reconnect/boot controls still pass:
       `bun test tests/integration/claim-redirect-once.open.test.ts
@@ -78,7 +86,7 @@ Three dependent tasks have separate evidence-bearing outputs:
 2. Make both integration fixtures consume the production drain, retaining
    their listener and graph shutdown behavior. Connect the step-1 harness to
    their actual close functions, including claim's outer DB-close owner.
-3. Complete consumer-specific rejection/empty and mutation controls using the
+3. Complete consumer-specific rejection/empty, exact-once, and mutation controls using the
    wired fixtures; run their existing behavior suites and write the as-built
    evidence. This depends on the harness and both consumer migrations.
 

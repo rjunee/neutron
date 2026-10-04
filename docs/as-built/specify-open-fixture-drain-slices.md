@@ -53,3 +53,11 @@ The local full-tree leak gate returned 452 findings: one untracked worktree
 metadata path and 451 denylist findings in existing files. This is a local
 baseline/configuration discrepancy, not a passing purity result. No gate,
 allowlist, or denylist was changed; required CI remains the merge gate.
+
+The subsequent cross-model review found the first mutation pair covered early
+close only. All three specs now require a per-callback exact-once count through
+each consuming teardown invocation and a duplicate-drain/invocation mutation
+that fails that count, even when stop is idempotent. They also make the sweeper
+premise explicit: a known expired row still marked `uploading` must enter the
+held operation. The two independent cards keep instrumentation local, accepting
+mild duplication to avoid depending on integration-owned shared support.

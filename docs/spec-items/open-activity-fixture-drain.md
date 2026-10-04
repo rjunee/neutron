@@ -22,6 +22,8 @@ Own only this activity fixture and its local regression tests. The integration,
 route-slot, and durable-chatlog fixture cards are independent. Use the existing
 drain; preserve the served activity behavior. Production shutdown changes and
 shared support changes used by another card are outside this slice.
+Keep barrier instrumentation local to this fixture; the mild duplication with
+the chatlog card is deliberate so neither waits for integration-owned support.
 
 ## Acceptance
 
@@ -36,17 +38,24 @@ shared support changes used by another card are outside this slice.
       events instead of fixed microtask flushing; assert the real DB write
       succeeds, since a loop can catch its write failure. A standalone synthetic loop or an
       appended deferred callback alone cannot establish this criterion.
+      When using the upload sweeper, seed and assert a known expired row still
+      `uploading` before the tick, then assert that row enters the held
+      `markExpired` operation (`gateway/upload/chunked-upload-sweeper.ts:141-164`).
 - [ ] A rejecting cleanup preceding a later held cleanup does not skip the
       latter or close early; preserve forward order and avoid unhandled
       rejections. The no-cleanup control completes normally. Test failure
       paths release the tick and dispose the composition.
+- [ ] Count every registered cleanup through the actual consuming teardown:
+      each callback runs exactly once per teardown invocation, including a
+      rejecting callback. Idempotent stop behavior cannot hide a double drain.
 - [ ] Removing the consumer's drain await and independently moving DB close
       ahead of the drain each fail a specific teardown-order assertion.
+      A duplicate-drain/invocation mutation fails the exact-once count.
       Restore each mutation and re-run green; syntax/import failures and
       unrelated timeouts do not count as mutation evidence.
 - [ ] `bun test open/__tests__/activity-inspector-served.test.ts` passes,
       retaining its served activity assertions. Record any separate focused
-      regression command and both mutation results in the implementation's
+      regression command and all three mutation results in the implementation's
       own as-built shard.
 
 ## Saved execution plan
@@ -56,7 +65,7 @@ This entire spec is the full saved card plan. Add it through
 start the returned card ID. Implement the fixture drain and its consuming
 barrier controls as one bounded change. Keep test support local to this fixture
 so it can run concurrently with the durable-chatlog card without sharing edits.
-Run the focused suite, demonstrate both semantic mutations, and record the
+Run the focused suite, demonstrate all three semantic mutations, and record the
 actual results. Follow the normal Trident review, mutation, CI, and merge
 gates. Do not merge the implementation PR manually or claim that this fixture
 alone resolves every source of #1389's historical CI noise.
