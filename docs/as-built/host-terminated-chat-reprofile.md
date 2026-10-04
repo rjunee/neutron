@@ -58,3 +58,14 @@ base revision. That run was stopped for the approved review-fix window, with
 its logs retained; it is not a completed full-suite pass. The changed Open and
 runtime typechecks passed again after the review fixes. CI and live deployment
 remain separate gates.
+
+Four intended self-host fixture suites now explicitly mock absence of a native
+relay route, restoring the discovery function after each test. This adds 27
+test lines without changing production discovery, host registration or the
+registered-route refusal controls. The credential-lane, protocol-cooldown,
+skill-forge and production-boot suites respectively passed 29, 4, 7 and 19
+tests. Grouping them with the unchanged registered-native-chat-auth controls
+passed 76 tests with no failures. Removing the fixture mocks reproduced the
+original 13, 3, 2 and 4 failures; restoring them restored the 76-test pass.
+These controls isolate synthetic credentials from ambient host registration;
+they do not substitute for a completed exact-head full-suite gate.
