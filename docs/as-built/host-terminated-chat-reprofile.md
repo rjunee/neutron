@@ -70,7 +70,7 @@ original 13, 3, 2 and 4 failures; restoring them restored the 76-test pass.
 These controls isolate synthetic credentials from ambient host registration;
 they do not substitute for a completed exact-head full-suite gate.
 
-The final isolation scope is seven fixture files: the same absence-of-route
+The next isolation batch covered seven fixture files: the same absence-of-route
 boundary also fixes background composition, reminder dispatch and memory wiring.
 Their direct baseline failure counts were 7, 1 and 5; their isolated runs passed
 9, 1 and 12 tests. All seven edited fixtures, the unchanged doctor suite and
@@ -78,3 +78,27 @@ unchanged registered-auth controls passed together: 123 tests, zero failures
 across nine files. The doctor's 25 original tests already passed; nested
 expected-failure output was not a reason to change it. No production predicate,
 assertion or host registration was removed or relaxed by this fixture batch.
+
+The subsequent exact-head shared-host gate completed all 1,781 discovered files
+and all 51 TypeScript configurations, but exited 1: three general-lane failures,
+one failure in the first HTTP batch, and 223 failures with 16 errors in the last
+HTTP batch. Its suite input identity stayed unchanged. These results are retained
+as a failed full gate, not carried forward as a passing receipt.
+
+The final test-only batch also isolates arbiter, leak-fixer and durable-chat
+fixtures. More importantly, the existing private process-test mount boundary now
+hides the invoking host's quota registration alongside its operator authority.
+The preload enters that boundary when host registration exists, preserving the
+exact test invocation. Both default fingerprint discovery and native parent
+registration therefore see an unregistered synthetic test host; explicit signed
+relay fixtures still use their own real pin and socket. Production discovery and
+refusal predicates are unchanged, and missing host directories are not created.
+
+The boundary tests passed 11 cases. The 28 failing HTTP fixture files, related
+route fixtures and signed registered-route controls passed together across 41
+files: 511 passes, one existing live-API opt-in skip, zero failures. Removing the
+quota-directory mask produced 17 passes and seven failures, including the default
+discovery guard and six admission-generation cases; restoring it restored the
+pass. The protected outer registration's before/after digest stayed identical.
+Root and Trident TypeScript checks passed on this test-only batch. A new canonical
+full gate remains required; none of these focused results claims deployment.
