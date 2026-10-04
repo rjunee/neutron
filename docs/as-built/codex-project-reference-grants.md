@@ -38,6 +38,25 @@ launch/pane records. An exclusive cleanup claim and immutable refusal audit fenc
 concurrent cleanup and preserve uncertain cases. The real helper test demonstrates
 account-busy refusal followed by a fresh durable retry
 (`runtime/adapters/codex-cli/persistent/project-owner-helper-main.ts:22`).
+The consuming bootstrap test additionally passes the exact reserved lease through
+the real transport and observes its native fixture PID; reacquiring instead of
+transferring cannot satisfy it. Shell reviewer/build controls hold the account
+reservation and require visible `accountBusy`/deferred refusal without executing
+Codex, paired with successful available-account execution. Thus a single seat
+already occupied by an owner intentionally defers independent Codex review/build
+work; this change does not promise same-account parallel native writers.
+
+Grant expiry remains optional, as specified in the provider-resolution item.
+The existing credential row owns expiry; finite grants retain their expiry across
+same-account refresh and refuse after expiration. No arbitrary expiry horizon or
+new renewal UI was introduced.
+
+The follow-up consuming controls passed with the existing expiry controls (six
+selected tests, 49 assertions); root and trident TypeScript checks passed. Five
+additional must-fail mutations were killed and restored: dropping the transferred
+lease, bypassing admission in each shell consumer, and always-busy overrefusal in
+each shell consumer. These results do not substitute for the paired writer-lock
+descendant-lifetime correction or final integrated acceptance.
 
 The paired web/phone selection UI is recorded in
 `codex-existing-account-project-selection.md`. Synthetic service/API checks cover

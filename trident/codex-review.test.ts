@@ -22,6 +22,7 @@ import { basename, delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { acquireCodexAccountWriteLease } from '../runtime/adapters/codex-cli/account-writer-lock.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-review.sh')
@@ -55,6 +56,8 @@ afterEach(reapFixtures)
 process.on('exit', reapFixtures)
 
 interface RunOpts {
+  /** Hold the same admission reservation as an active account owner. */
+  accountBusy?: boolean
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
   authed?: boolean
   /** Don't set CODEX_HOME at all. */
@@ -146,7 +149,11 @@ function run(opts: RunOpts = {}): {
     script = join(isolatedTrident, 'codex-review.sh')
     writeFileSync(script, readFileSync(SCRIPT))
   }
-  const res = spawnSync(BASH, [script, 'main'], { cwd: dir, encoding: 'utf8', env })
+  const lease = opts.accountBusy ? acquireCodexAccountWriteLease(codexHome) : undefined
+  const res = (() => {
+    try { return spawnSync(BASH, [script, 'main'], { cwd: dir, encoding: 'utf8', env }) }
+    finally { lease?.close() }
+  })()
   const readOr = (name: string): string => {
     try {
       return readFileSync(join(dir, name), 'utf8')
@@ -165,6 +172,16 @@ function run(opts: RunOpts = {}): {
 }
 
 describe('trident/codex-review.sh — exit-code contract', () => {
+  test('single-seat active owner defers review without launching another writer', () => {
+    const busy = run({ authed: true, codexLoginExit: 0, accountBusy: true })
+    expect(busy.status).toBe(5)
+    expect(busy.stderr).toContain('accountBusy')
+    expect(busy.stderr).toContain('DEFERRED')
+    expect(busy.codexArgv).toBe('')
+    const available = run({ authed: true, codexLoginExit: 0 })
+    expect(available.status).toBe(0)
+    expect(available.codexArgv).toContain('exec')
+  })
   test('resumes the requested Codex thread', () => {
     const { status, codexArgv } = run({
       authed: true,

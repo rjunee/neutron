@@ -36,6 +36,7 @@ import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { assertProcessTestIsolation } from './process-test-isolation.ts'
+import { acquireCodexAccountWriteLease } from '../runtime/adapters/codex-cli/account-writer-lock.ts'
 
 assertProcessTestIsolation()
 
@@ -148,6 +149,8 @@ interface RunOpts {
   stageRunId?: string
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
   authed?: boolean
+  /** Hold the same admission reservation as an active account owner. */
+  accountBusy?: boolean
   /** Don't set CODEX_HOME at all. */
   noCodexHome?: boolean
   /** Mock `codex` on PATH whose `login status` exits with this code. null → no CLI. */
@@ -729,6 +732,7 @@ printf '%s\\n' "$rc" > "$STATUSFILE"
     env['STATUSFILE'] = supervisorStatusFile
     return ['/bin/sh', [sup, BASH, ...argv]]
   })()
+  const lease = opts.accountBusy ? acquireCodexAccountWriteLease(codexHome) : undefined
   const res = (() => {
     try {
       return spawnSync(spawnCmd, spawnArgs, {
@@ -739,6 +743,7 @@ printf '%s\\n' "$rc" > "$STATUSFILE"
       })
     } finally {
       liveHolder?.kill()
+      lease?.close()
     }
   })()
   const readOr = (name: string): string => {
@@ -1781,6 +1786,17 @@ describe('trident/codex-build.sh — exit-code contract', () => {
     })
     expect(status).toBe(0)
     expect(stdout).toContain('I am done')
+  })
+
+  test('single-seat active owner defers build without launching another writer', () => {
+    const busy = run({ authed: true, codexLoginExit: 0, accountBusy: true })
+    expect(busy.status).toBe(5)
+    expect(busy.stderr).toContain('accountBusy')
+    expect(busy.stderr).toContain('DEFERRED')
+    expect(busy.codexArgv).toBe('')
+    const available = run({ authed: true, codexLoginExit: 0 })
+    expect(available.status).toBe(0)
+    expect(available.codexArgv).toContain('exec')
   })
 
   test('codex exits non-zero → exit 5 (DEFERRED)', () => {

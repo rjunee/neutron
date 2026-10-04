@@ -108,12 +108,18 @@ is a local credential check, not a claim of live owner/build/restart acceptance 
   project/General owners, probes, exec, reviewer/build and standalone session
   consumers. The lock survives gateway/helper death while native work remains;
   competing admission and auth-file mutations refuse visibly as account busy.
+  With only one configured account occupied by a project or General owner,
+  independent Codex review/build calls defer rather than clone authentication,
+  stop that owner, or silently claim completion. They require account release
+  or an independently available account.
   Distinct-account native consumers remain available. Shared-file synthetic
   fixtures alone do not satisfy this consuming acceptance.
   A conclusively pre-native account refusal is retryable after account release,
   without fabricating retirement or leaving a phantom durable owner. Unknown
   launches, foreign refusal receipts and any native journal remain fenced.
   Verify: `runtime/adapters/codex-cli/persistent/project-owner-admission-refusal.test.ts`,
+  `runtime/adapters/codex-cli/persistent/project-control-bootstrap-account-lease.test.ts`,
+  `trident/codex-review.test.ts`, `trident/codex-build.test.ts`,
   `open/__tests__/codex-durable-owner.test.ts`.
 - [ ] A Codex project orchestrates an actual build through completion on Codex.
   Depends on [the project REPL orchestration change](the-orchestrator-owns-the-build-loop.md)
