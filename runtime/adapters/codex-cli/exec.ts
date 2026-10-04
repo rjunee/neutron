@@ -19,6 +19,7 @@ import type { Readable } from 'node:stream'
 import type { Event } from '../../events.ts'
 import { mapCodexEvent, newCodexJsonlMapper } from './event-map.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { codexAccountWriterCommand } from './account-writer-lock.ts'
 
 /**
  * Spawn shim — production binds to `node:child_process.spawn`. Tests inject
@@ -146,7 +147,10 @@ export async function* startCodexExec(opts: CodexExecOptions): AsyncGenerator<Ev
   }
 
   let child: ChildProcessByStdio<null, Readable, Readable>
-  const spawnImpl: CodexSpawnLike = opts.spawnImpl ?? (nodeSpawn as unknown as CodexSpawnLike)
+  const spawnImpl: CodexSpawnLike = opts.spawnImpl ?? ((binary, arguments_, options) => {
+    const [command, ...guardedArgs] = codexAccountWriterCommand(binary, arguments_, options.env.CODEX_HOME)
+    return nodeSpawn(command!, guardedArgs, options)
+  })
   try {
     child = spawnImpl(opts.bin ?? 'codex', args, {
       stdio: ['ignore', 'pipe', 'pipe'],

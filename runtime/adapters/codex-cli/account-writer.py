@@ -12,6 +12,7 @@ import platform
 import shutil
 import stat
 import sys
+import time
 
 LOCK_NAME = '.neutron-account-writer.lock'
 
@@ -71,12 +72,12 @@ def census(home, proc=Path('/proc')):
             before = process_identity(path)
             if before[0] in ('Z', 'X'):
                 continue
-            argv = (path / 'cmdline').read_bytes().decode().split('\0')
+            argv = os.fsdecode((path / 'cmdline').read_bytes()).split('\0')
             executable = Path(os.readlink(path / 'exe')).name
             is_codex = executable == 'codex' or any(Path(v).name in ('codex', 'codex.js') for v in argv[:2])
             if not is_codex:
                 continue
-            environment = dict(v.split('=', 1) for v in (path / 'environ').read_bytes().decode().split('\0') if '=' in v)
+            environment = dict(v.split('=', 1) for v in os.fsdecode((path / 'environ').read_bytes()).split('\0') if '=' in v)
             after = process_identity(path)
             if before[1] != after[1]:
                 raise ValueError('Process census changed')
@@ -98,6 +99,21 @@ def census(home, proc=Path('/proc')):
                     if not path.exists():
                         continue
                 raise ValueError('Process census is incomplete')
+
+
+def stable_census(home):
+    # Exec/exit can momentarily make proc entries unreadable. Only a subsequent
+    # complete scan can admit; an expired observation is never an empty census.
+    for attempt in range(3):
+        try:
+            census(home)
+            return
+        except Busy:
+            raise
+        except (OSError, ValueError):
+            if attempt == 2:
+                raise
+            time.sleep(0.005)
 
 
 def native_command(binary, env):
@@ -134,7 +150,7 @@ def main(argv):
         raise ValueError('Account admission requires Linux process evidence')
     if argv[0] == '--census':
         home = canonical_home(argv[1])
-        census(home)
+        stable_census(home)
         return
     if argv[0] == '--resolve':
         env = dict(os.environ)
@@ -142,7 +158,7 @@ def main(argv):
         print(json.dumps(native))
         return
     inherited = None
-    home_value = os.environ.get('CODEX_HOME') or str(Path(os.environ['HOME']) / '.codex')
+    home_value = os.environ.get('CODEX_HOME')
     while argv and argv[0] != '--':
         option, value, *argv = argv
         if option == '--home':
@@ -154,9 +170,9 @@ def main(argv):
     binary, *arguments = argv[1:]
     env = dict(os.environ)
     native = native_command(binary, env)
-    home = canonical_home(home_value)
+    home = canonical_home(home_value or str(Path(os.environ['HOME']) / '.codex'))
     fd = lock(home, inherited)
-    census(home)
+    stable_census(home)
     env['CODEX_HOME'] = str(home)
     # Keep the exact PID/start identity, cwd, stdio, signals and inherited FD.
     os.execve(native, [native, *arguments], env)

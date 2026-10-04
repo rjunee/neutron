@@ -12,6 +12,7 @@ import { BunTerminalHost } from '../../claude-code/persistent/bun-terminal-host.
 import { HerdrHost } from '../../claude-code/persistent/herdr-host.ts'
 import { FakeHerdrServer } from '../../claude-code/persistent/__tests__/herdr-fake-server.ts'
 import { CodexProjectSession, CodexProjectSessionHost } from './project-session.ts'
+import { codexAccountWriterCommand } from '../account-writer-lock.ts'
 
 const dirs: string[] = []
 afterEach(() => {
@@ -79,8 +80,12 @@ function fixture(host = new FakeHost()) {
   mkdirSync(packageDir, { recursive: true })
   const script = join(packageDir, 'codex.js')
   writeFileSync(script, '#!/usr/bin/env node\n', { mode: 0o755 })
+  writeFileSync(join(packageDir, '..', 'package.json'), JSON.stringify({ name: '@openai/codex' }))
+  const nativeDir = join(packageDir, '..', 'vendor', `${process.arch === 'arm64' ? 'aarch64' : 'x86_64'}-unknown-linux-musl`, 'bin')
+  mkdirSync(nativeDir, { recursive: true })
+  symlinkSync(script, join(nativeDir, 'codex'))
   symlinkSync(script, join(dir, 'codex'))
-  writeFileSync(join(dir, 'custom-codex'), '#!/usr/bin/env node\n', { mode: 0o755 })
+  writeFileSync(join(dir, 'custom-codex'), '#!/usr/bin/env python\n', { mode: 0o755 })
   const node = realpathSync(Bun.which('node')!)
   symlinkSync(node, join(dir, 'node'))
   symlinkSync(realpathSync(Bun.which('python3')!), join(dir, 'python'))
@@ -99,7 +104,7 @@ describe('CodexProjectSessionHost', () => {
     const f = fixture()
     const session = await f.sessionHost.open(f.open)
     expect(session.recovery).toBe('started')
-    expect(f.host.spawned).toEqual([[f.node, f.script, '--enable', 'multi_agent_v2']])
+    expect(f.host.spawned).toEqual([codexAccountWriterCommand('codex', ['--enable', 'multi_agent_v2'])])
     expect(JSON.parse(readFileSync(f.registryPath, 'utf8')).sessions['project-a']).toMatchObject({
       pane_handle: 'pane-1', argv: ['codex', '--enable', 'multi_agent_v2'],
       identity: [f.node, f.script, '--enable', 'multi_agent_v2'],

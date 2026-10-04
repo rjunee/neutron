@@ -2,14 +2,18 @@ import { spawnSync } from 'node:child_process'
 import { closeSync, constants, fstatSync, mkdirSync, openSync, realpathSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { dlopen, FFIType, toArrayBuffer } from 'bun:ffi'
 
 function loadLibc() {
   if (process.platform !== 'linux') throw new Error('Native account admission requires Linux')
-  return dlopen('libc.so.6', {
+  const { dlopen, FFIType, toArrayBuffer } = require('bun:ffi') as typeof import('bun:ffi')
+  const library = dlopen('libc.so.6', {
     flock: { args: [FFIType.i32, FFIType.i32], returns: FFIType.i32 },
     __errno_location: { args: [], returns: FFIType.ptr },
   })
+  return { symbols: library.symbols, errno() {
+    const location = library.symbols.__errno_location()
+    return location ? new Int32Array(toArrayBuffer(location, 0, 4))[0] : undefined
+  } }
 }
 let libc: ReturnType<typeof loadLibc> | undefined
 
@@ -39,8 +43,7 @@ export function acquireCodexAccountWriteLease(canonicalHome: string): CodexAccou
     }
     libc ??= loadLibc()
     if (libc.symbols.flock(fd, 2 | 4) !== 0) {
-      const location = libc.symbols.__errno_location()
-      const errno = location ? new Int32Array(toArrayBuffer(location, 0, 4))[0] : undefined
+      const errno = libc.errno()
       throw new CodexAccountWriterError(errno === 11 ? 'accountBusy' : 'accountAdmissionUnknown',
         errno === 11 ? 'Another native process owns this account; use a distinct account or wait for its exit'
           : 'Account writer admission could not be established')
