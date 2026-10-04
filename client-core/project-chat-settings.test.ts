@@ -32,3 +32,18 @@ test('missing resolution and HTTP errors cannot appear as a saved provider', asy
   response = Response.json({ code: 'read_only', message: 'Cannot change project' }, { status: 403 })
   await expect(client.set('alpha', 'openai-codex')).rejects.toThrow('Cannot change project')
 })
+
+test('existing-account grants and removal carry only project metadata and refresh status', async () => {
+  const calls: { url: string; method: string; body: unknown }[] = []
+  const account = { source_row_id: 'source-fixture', account_identity: 'identity-fixture', account: 'seat-1', label: 'Fixture account' }
+  const client = new ProjectChatSettingsClient({ base_url: 'https://example.test', token: 'fixture', fetchImpl: async (url, init) => {
+    calls.push({ url, method: init?.method ?? 'GET', body: init?.body ? JSON.parse(String(init.body)) : null })
+    return Response.json({ available_accounts: [account] })
+  } })
+  await client.grantCredential('alpha/beta', account)
+  await client.disconnectCredential('alpha/beta')
+  expect(calls.map(call => call.method)).toEqual(['POST', 'GET', 'DELETE', 'GET'])
+  expect(calls.every(call => call.url === 'https://example.test/api/app/projects/alpha%2Fbeta/codex-auth')).toBe(true)
+  expect(calls[0]!.body).toEqual({ source_row_id: 'source-fixture', account_identity: 'identity-fixture' })
+  expect(calls[2]!.body).toBeNull()
+})

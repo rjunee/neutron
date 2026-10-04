@@ -50,7 +50,9 @@ export interface CodexAccount {
   active: boolean
 }
 
-export interface CodexStatus {
+import type { ProjectCodexAccount, ProjectCodexStatus } from '@neutronai/client-core/project-chat-settings.ts'
+
+export interface CodexStatus extends ProjectCodexStatus {
   owner_credential?: { configured: boolean | null; checked_at: string; detail: string }
   status: CodexConnectionStatus
   materialized?: boolean
@@ -204,6 +206,13 @@ export class WebCodexCredentialClient {
   /** Connect a per-project OVERRIDE subscription. Throws on a metered key. */
   async connect(project_id: string, auth: string): Promise<CodexStatus> {
     return this.req<CodexStatus>(this.path(project_id), { method: 'POST', body: { auth } })
+  }
+
+  /** Explicit owner grant of an existing account; never transfers auth bytes. */
+  async grant(project_id: string, account: Pick<ProjectCodexAccount, 'source_row_id' | 'account_identity'>): Promise<CodexStatus> {
+    return this.req<CodexStatus>(this.path(project_id), { method: 'POST', body: {
+      source_row_id: account.source_row_id, account_identity: account.account_identity,
+    } })
   }
 
   /** Remove a project's OVERRIDE (the global default stays). */

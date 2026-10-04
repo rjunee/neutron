@@ -413,6 +413,7 @@ export function SettingsTab({
   const [codexStatusProject, setCodexStatusProject] = useState<string | null>(null)
   const codexSequence = useRef(0)
   const [codexAuth, setCodexAuth] = useState('')
+  const [codexAccount, setCodexAccount] = useState('')
   const [codexBusy, setCodexBusy] = useState(false)
   const [codexError, setCodexError] = useState<string | null>(null)
   const currentCodexStatus = codexStatusProject === projectId ? codexStatus : null
@@ -423,6 +424,7 @@ export function SettingsTab({
     setCodexStatus(null)
     setCodexStatusProject(projectId)
     setCodexError(null)
+    setCodexAccount('')
     void codexClient
       .status(projectId)
       .then((s) => {
@@ -462,8 +464,36 @@ export function SettingsTab({
         if (!mountedRef.current || seq !== codexSequence.current) return
         setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to connect Codex')
+        void codexClient.status(projectId).then(s => {
+          if (mountedRef.current && seq === codexSequence.current) setCodexStatus(s)
+        }).catch(() => {})
       })
   }, [codexClient, projectId, codexAuth])
+
+  const grantCodex = useCallback((): void => {
+    const account = currentCodexStatus?.available_accounts?.find(row => row.source_row_id === codexAccount)
+    if (codexBusy || !account) return
+    setCodexBusy(true)
+    setCodexError(null)
+    setCodexStatus(null)
+    const seq = ++codexSequence.current
+    void codexClient.grant(projectId, account).then(() => codexClient.status(projectId)).then(s => {
+      if (!mountedRef.current || seq !== codexSequence.current) return
+      setCodexStatus(s)
+      setCodexStatusProject(projectId)
+      setCodexAccount('')
+      setCodexBusy(false)
+    }).catch((err: unknown) => {
+      if (!mountedRef.current || seq !== codexSequence.current) return
+      setCodexBusy(false)
+      setCodexAccount('')
+      setCodexError(err instanceof Error ? err.message : 'Could not connect the selected Codex account')
+      // Refresh metadata after a refusal: an account may have been replaced.
+      void codexClient.status(projectId).then(s => {
+        if (mountedRef.current && seq === codexSequence.current) setCodexStatus(s)
+      }).catch(() => {})
+    })
+  }, [codexClient, projectId, codexAccount, currentCodexStatus, codexBusy])
 
   const disconnectCodex = useCallback((): void => {
     setCodexBusy(true)
@@ -1090,9 +1120,9 @@ export function SettingsTab({
         <p className="cset-sub">
           Codex chat requires a subscription connected explicitly to this project. This connection
           also overrides the account-wide Codex reviewer credential for this project.
-          Run <code>codex login</code>, then paste that
-          subscription’s <code>~/.codex/auth.json</code>. A metered <code>OPENAI_API_KEY</code> is
-          rejected — subscription only.
+          Select a configured account and connect it to grant this project access. Listing an
+          account does not connect it. Account-wide reviewer seats are not project owner grants.
+          To connect an independent account, run <code>codex login</code> and paste its auth.json.
         </p>
         <p className="cset-codex-status" data-status={currentCodexStatus?.status ?? 'unknown'}>
           {currentCodexStatus === null
@@ -1115,6 +1145,19 @@ export function SettingsTab({
           {currentCodexStatus?.detail !== undefined ? ` — ${currentCodexStatus.detail}` : ''}
         </p>
         {currentCodexError !== null ? <p className="cset-error">{currentCodexError}</p> : null}
+        <label className="cset-label" htmlFor="cset-codex-account">Configured Codex account</label>
+        <select id="cset-codex-account" className="cset-input" value={codexAccount}
+          disabled={codexBusy || !currentCodexStatus?.available_accounts?.length}
+          onChange={event => setCodexAccount(event.target.value)}>
+          <option value="">Select an account…</option>
+          {currentCodexStatus?.available_accounts?.map(account => <option key={account.source_row_id} value={account.source_row_id}>
+            {account.label ?? account.account}
+          </option>)}
+        </select>
+        <button type="button" className="cset-btn cset-btn-primary" onClick={grantCodex}
+          disabled={codexBusy || !currentCodexStatus?.available_accounts?.some(account => account.source_row_id === codexAccount)}>
+          Connect selected account to project
+        </button>
         {/* Show removal whenever a project-override ROW exists — including an
             expired one the resolver skipped (which masks itself behind the global
             default), so a stale override is never un-removable. */}
@@ -1138,7 +1181,7 @@ export function SettingsTab({
           }}
         >
           <label className="cset-label" htmlFor="cset-codex-auth">
-            Paste ~/.codex/auth.json (project override)
+            Paste auth.json for an independent account (project override)
           </label>
           <textarea
             id="cset-codex-auth"
