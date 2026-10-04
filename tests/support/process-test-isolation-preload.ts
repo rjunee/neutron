@@ -2,14 +2,17 @@
  * Replaying the original invocation preserves case names, shared hooks, filters,
  * timeouts and counts. No test module has loaded at this preload boundary. */
 import { spawnSync } from 'node:child_process'
-import { readFileSync, readlinkSync } from 'node:fs'
+import { existsSync, readFileSync, readlinkSync } from 'node:fs'
 import { assertProcessTestIsolation, needsProcessTestIsolation, processTestLauncher } from '@neutronai/trident/process-test-isolation.ts'
 
 if (process.platform === 'linux') {
   // Bun's process.argv omits test CLI flags. The kernel retains the actual argv,
   // including -t and --timeout; copying process.argv silently changes coverage.
   const argv = readFileSync('/proc/self/cmdline', 'utf8').replace(/\0$/, '').split('\0')
-  if (needsProcessTestIsolation(argv, process.cwd())) {
+  // A provisioned host's protected relay registration must not authenticate
+  // synthetic children or turn credentialless fixtures into registered installs.
+  // The launcher masks it in a private mount; explicit relay fixtures stay real.
+  if (needsProcessTestIsolation(argv, process.cwd()) || existsSync('/etc/neutron/claude-capacity')) {
     let isolated = false
     try { assertProcessTestIsolation(); isolated = true } catch { /* establish it below */ }
     if (!isolated) {

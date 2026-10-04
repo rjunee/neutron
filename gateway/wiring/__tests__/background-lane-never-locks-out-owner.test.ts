@@ -29,7 +29,8 @@
  * the incident's own message is asserted directly in the last block.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 
 import { buildLlmCallSubstrate } from '../build-llm-call-substrate.ts'
 import {
@@ -48,6 +49,13 @@ import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/cla
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
+
+// These synthetic self-host pools must never discover the host's native route.
+let unregisteredRoute: ReturnType<typeof spyOn>
+beforeEach(() => {
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
+afterEach(() => { unregisteredRoute.mockRestore() })
 
 /** The single-credential pool every Open install actually runs on. */
 function onePool(): CredentialPool {

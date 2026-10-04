@@ -25,7 +25,8 @@
  * flaky way to check that one option is copied. Links 1 and 2 are the real boot.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -68,8 +69,11 @@ const SAVED_ENV_KEYS = [
 let savedEnv: Record<string, string | undefined> = {}
 let tmpDir: string
 let db: ProjectDb
+let unregisteredRoute: ReturnType<typeof spyOn>
 
 beforeEach(() => {
+  // Synthetic self-host credentials and offline boots cannot inherit a host route.
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   savedEnv = {}
   for (const k of SAVED_ENV_KEYS) savedEnv[k] = process.env[k]
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-arbiter-'))
@@ -88,6 +92,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  unregisteredRoute.mockRestore()
   db.close()
   for (const k of SAVED_ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k]

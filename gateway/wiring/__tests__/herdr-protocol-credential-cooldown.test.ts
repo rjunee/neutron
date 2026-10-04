@@ -1,4 +1,5 @@
-import { afterEach, expect, spyOn, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { buildLlmCallSubstrate } from '../build-llm-call-substrate.ts'
 import { newCredentialPool } from '@neutronai/runtime/credential-pool.ts'
 import { createPersistentReplSubstrate } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
@@ -10,6 +11,12 @@ import type { Event } from '@neutronai/runtime/events.ts'
 
 const spec = { prompt: 'fixture', tools: [], model_preference: ['claude-opus-4-7'] }
 let restore: (() => void) | undefined
+// Exercise the synthetic self-host pool, independent of native host registration.
+let unregisteredRoute: ReturnType<typeof spyOn>
+beforeEach(() => {
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+})
+afterEach(() => { unregisteredRoute.mockRestore() })
 afterEach(() => { restore?.(); restore = undefined })
 
 for (const [name, pong] of [

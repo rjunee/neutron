@@ -22,7 +22,8 @@
  * carries the 3-tool fallback and this goes RED.
  */
 
-import { afterEach, beforeEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -54,8 +55,11 @@ const SAVED_ENV_KEYS = [
 let savedEnv: Record<string, string | undefined> = {}
 let tmpDir: string
 let db: ProjectDb
+let unregisteredRoute: ReturnType<typeof spyOn>
 
 beforeEach(() => {
+  // Exercise the synthetic self-host credential, independent of host registration.
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   savedEnv = {}
   for (const k of SAVED_ENV_KEYS) savedEnv[k] = process.env[k]
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-reminder-surface-'))
@@ -74,6 +78,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  unregisteredRoute.mockRestore()
   db.close()
   for (const k of SAVED_ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k]

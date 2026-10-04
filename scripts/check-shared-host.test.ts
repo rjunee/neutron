@@ -20,6 +20,7 @@ function fixture(gitRepo = true) {
   symlinkSync(identityReader, join(root, 'scripts/shared-host-suite-identity.ts'))
   writeFileSync(join(root, '.gitignore'), 'node_modules/\nlinked-workspace/\n')
   const assertHeld = 'exec 8<"$FIXTURE_COMMON_DIR"\nif flock -n 8; then exit 98; fi\n'
+  writeFileSync(join(root, 'scripts/ci/lint.sh'), assertHeld + 'echo lint >> "$FIXTURE_CALLS"\nexit "${FIXTURE_LINT_EXIT:-0}"\n')
   writeFileSync(join(root, 'scripts/ci/typecheck-all.sh'), assertHeld + 'echo typecheck >> "$FIXTURE_CALLS"\nif [ "${FIXTURE_HOLD:-0}" = 1 ]; then echo ready; read -r release; fi\nexit "${FIXTURE_TYPECHECK_EXIT:-0}"\n')
   writeFileSync(join(root, 'scripts/run-tests.sh'), assertHeld + 'echo suite >> "$FIXTURE_CALLS"\nprintf "%s\\n" "$NEUTRON_TEST_JOBS/${NEUTRON_TEST_CONCURRENCY:-default}/$NEUTRON_TEST_CHUNK_SIZE" >> "$FIXTURE_CALLS"\n[ -z "${NEUTRON_TEST_SHARD:-}${NEUTRON_TEST_PLAN_ONLY:-}${NEUTRON_TEST_ROOT:-}${NEUTRON_TEST_DISCOVER_OVERRIDE:-}${NEUTRON_BUN_BIN:-}" ] || exit 99\nif [ "${FIXTURE_RUN_STALE_PROSE_GUARD:-0}" = 1 ]; then bun scripts/ci/stale-prose-guard.ts || exit "$?"; fi\nif [ -n "${FIXTURE_MUTATE_INPUT:-}" ]; then printf changed > "$FIXTURE_MUTATE_INPUT"; fi\nexit "${FIXTURE_SUITE_EXIT:-0}"\n')
   if (gitRepo) {
@@ -40,12 +41,12 @@ function fixture(gitRepo = true) {
   return { scratch, root, peer, remote, env, run, calls: (checkout = root) => readFileSync(callsPath(checkout), 'utf8') }
 }
 
-test('executable runs both unchanged gates with the directory lock held and no subset selectors', () => {
+test('executable runs lint before both unchanged gates with the directory lock held and no subset selectors', () => {
   const f = fixture()
   try {
     const result = f.run({ NEUTRON_TEST_SHARD: '1/8', NEUTRON_TEST_PLAN_ONLY: '1', NEUTRON_TEST_ROOT: '/unused-fixture', NEUTRON_TEST_DISCOVER_OVERRIDE: 'subset', NEUTRON_BUN_BIN: 'fake', NEUTRON_TEST_JOBS: '18' })
     expect(result.status).toBe(0)
-    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls()).toBe('lint\ntypecheck\nsuite\n4/default/100\n')
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })
 
@@ -80,7 +81,7 @@ test.each(['installed', 'linked workspace', 'tracked'])('a successful suite cann
     const changed = f.run({ FIXTURE_MUTATE_INPUT: path })
     expect(changed.status).toBe(2)
     expect(changed.stderr).toContain('suite input identity changed or became unavailable')
-    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\ntypecheck\nsuite\n4/default/100\n')
+    expect(f.calls()).toBe('lint\ntypecheck\nsuite\n4/default/100\nlint\ntypecheck\nsuite\n4/default/100\n')
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })
 
@@ -113,21 +114,25 @@ test('two real Git worktrees contend through the executable; release admits the 
     const released = new Promise(resolve => holder.once('exit', resolve))
     holder.stdin.end('release\n')
     expect(await released).toBe(0)
-    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls()).toBe('lint\ntypecheck\nsuite\n4/default/100\n')
     expect(f.run({}, f.peer).status).toBe(0)
-    expect(f.calls(f.peer)).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls(f.peer)).toBe('lint\ntypecheck\nsuite\n4/default/100\n')
   } finally {
     holder.kill()
     rmSync(f.scratch, { recursive: true, force: true })
   }
 })
 
-test.each(['typecheck', 'suite'])('%s failure remains a failure and releases admission to another worktree', (gate) => {
+test.each(['lint', 'typecheck', 'suite'])('%s failure remains a failure and releases admission to another worktree', (gate) => {
   const f = fixture()
   try {
-    const failed = f.run({ [gate === 'typecheck' ? 'FIXTURE_TYPECHECK_EXIT' : 'FIXTURE_SUITE_EXIT']: '17' })
+    const failed = f.run({ [gate === 'lint' ? 'FIXTURE_LINT_EXIT' : gate === 'typecheck' ? 'FIXTURE_TYPECHECK_EXIT' : 'FIXTURE_SUITE_EXIT']: '17' })
     expect(failed.status).toBe(17)
-    expect(f.calls()).toBe(gate === 'typecheck' ? 'typecheck\n' : 'typecheck\nsuite\n4/default/100\n')
+    expect(f.calls()).toBe(gate === 'lint' ? 'lint\n' : gate === 'typecheck' ? 'lint\ntypecheck\n' : 'lint\ntypecheck\nsuite\n4/default/100\n')
+    if (gate === 'lint') {
+      expect(failed.stderr).toContain('lint preflight failed; typechecks and full suite not started; no receipt')
+      expect(failed.stdout).not.toContain('suite input identity unchanged')
+    }
     expect(f.run({}, f.peer).status).toBe(0)
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })
@@ -168,7 +173,7 @@ test('a stale tracking ref refuses before typecheck and suite; fetching admits b
     expect(() => f.calls()).toThrow()
     execFileSync('git', ['-C', f.root, 'fetch', '--quiet', 'origin', 'main'])
     expect(f.run().status).toBe(0)
-    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls()).toBe('lint\ntypecheck\nsuite\n4/default/100\n')
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })
 
@@ -177,7 +182,7 @@ test('file://localhost origin admits a current base and refuses a stale one', ()
   try {
     execFileSync('git', ['-C', f.root, 'remote', 'set-url', 'origin', `file://localhost${f.remote}`])
     expect(f.run().status).toBe(0)
-    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls()).toBe('lint\ntypecheck\nsuite\n4/default/100\n')
     const writer = join(f.scratch, 'writer')
     execFileSync('git', ['clone', '--quiet', f.remote, writer])
     writeFileSync(join(writer, 'new.txt'), 'upstream moved\n')
@@ -187,7 +192,7 @@ test('file://localhost origin admits a current base and refuses a stale one', ()
     const refused = f.run()
     expect(refused.status).toBe(2)
     expect(refused.stderr).toContain('origin/main is stale')
-    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls()).toBe('lint\ntypecheck\nsuite\n4/default/100\n')
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })
 
@@ -197,7 +202,7 @@ test('inherited prose range overrides are cleared before the consuming guard run
     const result = f.run({ STALE_PROSE_BASE_SHA: 'nonexistent-base', STALE_PROSE_HEAD_SHA: 'nonexistent-head', FIXTURE_RUN_STALE_PROSE_GUARD: '1' })
     expect(result.status).toBe(0)
     expect(result.stdout).toContain('stale-prose-guard: OK')
-    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls()).toBe('lint\ntypecheck\nsuite\n4/default/100\n')
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })
 
@@ -220,7 +225,7 @@ test('cleared range overrides preserve the real guard veto and admit corrected p
     const refused = f.run(overrides)
     expect(refused.status).toBe(1)
     expect(refused.stderr).toContain('stale-prose-guard: FAILED')
-    expect(f.calls()).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls()).toBe('lint\ntypecheck\nsuite\n4/default/100\n')
     writeFileSync(join(f.root, 'limit.md'), 'LIMIT is 5.\n')
     commit()
     const admitted = f.run(overrides)
@@ -279,6 +284,6 @@ test('a local source clone with stale main follows its upstream, then admits a c
     execFileSync('git', ['-C', nested, 'fetch', '--quiet', 'origin', 'main'])
     const admitted = spawnSync('bash', [join(nested, 'scripts/check-shared-host.sh')], { encoding: 'utf8', env: f.env({ FIXTURE_COMMON_DIR: join(nested, '.git') }, nested) })
     expect(admitted.status).toBe(0)
-    expect(f.calls(nested)).toBe('typecheck\nsuite\n4/default/100\n')
+    expect(f.calls(nested)).toBe('lint\ntypecheck\nsuite\n4/default/100\n')
   } finally { rmSync(f.scratch, { recursive: true, force: true }) }
 })

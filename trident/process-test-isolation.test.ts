@@ -5,6 +5,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertProcessTestIsolation, needsProcessTestIsolation, processTestLauncher } from './process-test-isolation.ts'
+import { loadClaudeCapacityPin, nativeRelayRouteFingerprint } from '@neutronai/runtime/workers/claude-capacity-client.ts'
+import { prepareNativeRequestRelay } from '@neutronai/runtime/adapters/claude-code/persistent/native-request-relay.ts'
+
+test('default native discovery sees no invoking host registration', () => {
+  expect(loadClaudeCapacityPin()).toBeUndefined()
+  expect(nativeRelayRouteFingerprint()).toBeUndefined()
+  expect(prepareNativeRequestRelay({})).toBeUndefined()
+})
 
 test('physical suite selection contains the complete invocation and preserves filter arguments', () => {
   for (const args of [[], ['trident'], ['host-suite'], ['trident/codex-build.test.ts'],
@@ -49,17 +57,18 @@ test('private namespace init reaps exited orphans and preserves live children an
   expect(stderr).toContain('Ran 4 tests')
 })
 
-for (const installed of [true, false]) test(`private boundary isolates operator authority with installed=${installed} and preserves neighboring configuration`, async () => {
+for (const authorityRoot of ['native-host-recovery', 'claude-capacity'])
+for (const installed of [true, false]) test(`private boundary isolates ${authorityRoot} with installed=${installed} and preserves neighboring configuration`, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'process-operator-boundary-'))
   const etc = join(dir, 'etc'), neutron = join(etc, 'neutron')
   const uid = process.getuid!(), gid = process.getgid!()
-  const authority = join(neutron, 'native-host-recovery', `${uid}.json`)
+  const authority = join(neutron, authorityRoot, `${uid}.json`)
   const marker = 'operator authority must stay outside the test instance\n'
   try {
     await mkdir(neutron, { recursive: true })
     await writeFile(join(neutron, 'boundary-neighbor'), 'neighbor preserved\n')
     if (installed) {
-      await mkdir(join(neutron, 'native-host-recovery'))
+      await mkdir(join(neutron, authorityRoot))
       await writeFile(authority, marker)
     }
     const before = installed ? await stat(authority) : undefined
@@ -73,7 +82,7 @@ spec.loader.exec_module(isolation)
 isolation.require_boundary()
 assert os.getuid() == ${uid} and os.getgid() == ${gid}
 assert Path('/etc/neutron/boundary-neighbor').read_text() == 'neighbor preserved\\n'
-config = Path('/etc/neutron/native-host-recovery') / (str(os.geteuid()) + '.json')
+config = Path('/etc/neutron/${authorityRoot}') / (str(os.geteuid()) + '.json')
 assert not config.exists(), 'live operator authority leaked into the test instance'
 if ${installed ? 'True' : 'False'}:
     config.write_text('private test authority')
@@ -99,7 +108,7 @@ print('private authority boundary verified')
         expect(after[key]).toBe(before![key])
       }
     } else {
-      await expect(stat(join(neutron, 'native-host-recovery'))).rejects.toThrow()
+      await expect(stat(join(neutron, authorityRoot))).rejects.toThrow()
     }
   } finally {
     await rm(dir, { recursive: true, force: true })

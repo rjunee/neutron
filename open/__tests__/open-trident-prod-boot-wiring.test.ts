@@ -30,6 +30,7 @@ import { buildCoreModules } from '@neutronai/gateway/composition/build-core-modu
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -56,8 +57,11 @@ const SAVED_ENV_KEYS = [
 let savedEnv: Record<string, string | undefined> = {}
 let tmpDir: string
 let db: ProjectDb
+let unregisteredRoute: ReturnType<typeof spyOn>
 
 beforeEach(() => {
+  // Synthetic self-host credentials and offline boots cannot inherit a host route.
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   savedEnv = {}
   for (const k of SAVED_ENV_KEYS) savedEnv[k] = process.env[k]
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-trident-'))
@@ -77,6 +81,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  unregisteredRoute.mockRestore()
   db.close()
   for (const k of SAVED_ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k]

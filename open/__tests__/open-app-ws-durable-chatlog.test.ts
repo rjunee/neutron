@@ -43,6 +43,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import * as ambientAuth from '../ambient-claude-auth.ts'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { CodexOwnerBindings } from '../wiring/codex-owner-binding.ts'
 import { CodexOwnerControls } from '../wiring/codex-owner-controls.ts'
 import * as durableOwner from '../wiring/codex-durable-owner.ts'
@@ -106,7 +107,10 @@ function recordingSubstrate(): Substrate {
   }
 }
 
+let unregisteredRoute: ReturnType<typeof spyOn>
 beforeEach(() => {
+  // Synthetic self-host credentials and offline boots cannot inherit a host route.
+  unregisteredRoute = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   savedEnv = {}
   for (const k of SAVED_ENV_KEYS) savedEnv[k] = process.env[k]
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-chatlog-'))
@@ -124,6 +128,7 @@ beforeEach(() => {
 })
 
 afterEach(async () => {
+  unregisteredRoute.mockRestore()
   if (harness !== null) { await harness.close(); harness = null }
   for (const k of SAVED_ENV_KEYS) {
     if (savedEnv[k] === undefined) delete process.env[k]
