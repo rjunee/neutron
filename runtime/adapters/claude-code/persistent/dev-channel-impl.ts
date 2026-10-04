@@ -242,6 +242,14 @@ const httpServer = Bun.serve({
       }
     }
 
+    // Authenticated host acknowledgement of a correlated native terminal error.
+    // A foreign turn cannot erase the current scalar or older stale-reply debt.
+    if (req.method === 'POST' && url.pathname === '/turn-ended') {
+      const body = (await req.json()) as { turn_id?: unknown }
+      const retired = typeof body.turn_id === 'string' && turnEcho.onTerminalFailure(body.turn_id)
+      return Response.json({ status: retired ? 'retired' : 'uncorrelated' }, { status: retired ? 200 : 409 })
+    }
+
     // Inbound user turn → inject into the CC session as a <channel> message.
     if (req.method === 'POST' && url.pathname === '/message') {
       try {

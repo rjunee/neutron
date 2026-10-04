@@ -30,6 +30,52 @@ export class ReplSession {
   private readyResolve: (() => void) | undefined
   readonly ready: Promise<void>
   activeTurn: ActiveTurn | undefined
+  private nativeTurn: { turn: ActiveTurn; promptId?: string } | undefined
+  /** Exact error-ended turn whose reply scalar must be retired before reuse. */
+  failedNativeTurnId: string | undefined
+
+  /** Arm before sending: a native prompt hook can arrive before the POST returns.
+   * The unguessable turn ID is not available to the CLI until this injection. */
+  armNativeTurn(turnId: string): void {
+    const turn = this.activeTurn
+    if (turn === undefined || turn.settled || turn.turnId !== turnId) return
+    if (this.nativeTurn?.turn !== turn) this.nativeTurn = { turn }
+  }
+
+  /** Called only after the sink authenticates this child generation. Bind the
+   * native prompt UUID to its exact injected channel envelope before accepting a
+   * terminal API failure. Screen text, transcript replay and retry notices cannot
+   * enter this path. Subagent failures never settle their parent's conversation. */
+  onNativeTurnHook(body: Record<string, unknown>): 'bound' | 'failed' | 'ignored' {
+    const binding = this.nativeTurn
+    const turn = this.activeTurn
+    if (this.fenced || binding === undefined || turn === undefined || binding.turn !== turn
+      || turn.settled || turn.channel.closed || body['session_id'] !== this.sessionId
+      || body['agent_id'] !== undefined) return 'ignored'
+    const promptId = body['prompt_id']
+    if (typeof promptId !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(promptId)) return 'ignored'
+    if (body['hook_event_name'] === 'UserPromptSubmit') {
+      // Do not let an unrelated native prompt leave the previous prompt armed.
+      delete binding.promptId
+      const prefix = `<channel source="${this.channelName}" session_id="${this.sessionId}" user="neutron" turn_id="${turn.turnId}">\n`
+      const prompt = body['prompt']
+      if (typeof prompt !== 'string' || !prompt.startsWith(prefix)
+        || prompt.indexOf('\n</channel>') !== prompt.length - '\n</channel>'.length) return 'ignored'
+      binding.promptId = promptId
+      return 'bound'
+    }
+    if (body['hook_event_name'] !== 'StopFailure' || binding.promptId !== promptId
+      || typeof body['error'] !== 'string' || body['error'].length === 0) return 'ignored'
+    const message = typeof body['last_assistant_message'] === 'string' && body['last_assistant_message'].trim()
+      ? body['last_assistant_message'] : typeof body['error_details'] === 'string' && body['error_details'].trim()
+        ? body['error_details'] : `Native API turn failed: ${body['error']}`
+    turn.settled = true
+    this.failedNativeTurnId = turn.turnId
+    turn.channel.push({ kind: 'error', message: message.slice(0, 4000), retryable: false })
+    turn.channel.close()
+    turn.settle()
+    return 'failed'
+  }
   /** Legacy pool label (`options.project_id`). It can spell both General and
    *  the literal project "general" identically; MCP authority uses toolProjectId. */
   projectId: string | undefined

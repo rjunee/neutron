@@ -703,6 +703,9 @@ export class ReplSink {
         session.onReply(text, turnId)
         return Response.json({ status: 'ok' })
       }
+      if (url.pathname === '/native-turn') {
+        return Response.json({ status: session.onNativeTurnHook(body) })
+      }
       if (url.pathname === '/typing') {
         session.onTyping()
         return Response.json({ status: 'ok' })

@@ -85,6 +85,8 @@ export interface BuildSettingsInput {
   hookPath?: string
   /** Override the bun binary used to run the hook. Default `bun`. */
   bunBin?: string
+  /** Native lifecycle hooks authenticate as the exact spawned generation. */
+  nativeTurn?: { sinkPort: number; sinkToken: string }
   /**
    * WAVE 3.5 task B — when supplied, a `PostToolUse` hook (matcher `TodoWrite`) is
    * wired ALONGSIDE the Stop hook, forwarding the agent's TodoWrite list to the
@@ -105,21 +107,30 @@ export interface BuildSettingsInput {
    * Optional CC `permissions` block written ALONGSIDE the Stop hook (task 6).
    * When provided, a `permissions` key is emitted into the settings JSON with
    * exactly the sub-keys the caller set (empty/undefined sub-arrays are dropped
-   * so the written policy is minimal). Absent ⇒ today's behavior (Stop hook
-   * only, no `permissions` key), byte-identical for every existing caller. */
+   * so the written policy is minimal). Absent means no `permissions` key. */
   permissions?: SettingsPermissions
 }
 
 /**
  * Write the per-session settings JSON wiring the Stop hook and return the
- * path. The hook guarantees a channel-originated turn cannot end without a
- * `reply()` tool call — the exactly-one-reply invariant the bridge depends on.
+ * path. Ordinary channel turns require a `reply()` tool call; native terminal
+ * API failures use StopFailure instead of Stop and settle as errors.
  */
 export function buildSettings(input: BuildSettingsInput): string {
   const hookPath = input.hookPath ?? ENFORCE_REPLY_HOOK_PATH
   const bunBin = input.bunBin ?? 'bun'
   const hooks: Record<string, unknown> = {
     Stop: [{ matcher: '', hooks: [{ type: 'command', command: `${bunBin} ${hookPath}` }] }],
+  }
+  if (input.nativeTurn !== undefined) {
+    const nativeHook = {
+      type: 'http',
+      url: `http://127.0.0.1:${input.nativeTurn.sinkPort}/native-turn`,
+      headers: { 'X-Sink-Token': input.nativeTurn.sinkToken },
+      timeout: 5,
+    }
+    hooks['UserPromptSubmit'] = [{ hooks: [nativeHook] }]
+    hooks['StopFailure'] = [{ hooks: [nativeHook] }]
   }
   if (input.pipelineGuard !== undefined) {
     const guardPath = input.pipelineGuard.hookPath ?? PIPELINE_GUARD_HOOK_PATH

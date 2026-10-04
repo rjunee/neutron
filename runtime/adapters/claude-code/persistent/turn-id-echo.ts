@@ -28,6 +28,18 @@
 export class TurnIdEcho {
   private currentTurnId: string | undefined
   private debt = 0
+  private endedTurnId: string | undefined
+
+  /** The host proved this exact turn ended with native StopFailure. It cannot
+   * produce a later reply, so retiring its scalar must not bank stale-reply debt.
+   * Repeating an acknowledgement after a lost HTTP response is idempotent. */
+  onTerminalFailure(turnId: string): boolean {
+    if (this.endedTurnId === turnId) return true
+    if (this.currentTurnId !== turnId) return false
+    this.currentTurnId = undefined
+    this.endedTurnId = turnId
+    return true
+  }
 
   /**
    * Record an injected turn. Call AFTER the channel notification resolves (so a
