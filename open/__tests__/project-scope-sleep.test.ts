@@ -9,7 +9,10 @@
  * a scripted Herdr server (the manager's journal and every RPC are production) and
  * the REAL persistent spawn path. Each child is a real dev-channel peer.
  */
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
+import { capacityFixture } from '@neutronai/runtime/workers/claude-capacity-client.test-support.ts'
+import * as processIdentity from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,11 +25,12 @@ import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
+import { deriveReplSupervisionPaths } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { herdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
-import { createPersistentReplSubstrate, retirePersistentRepl, shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/pool.ts'
+import { createPersistentReplSubstrate, poolKeyFor, retirePersistentRepl, shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/pool.ts'
 import { committedDispatches, retiringSessionKeys } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { registerSupervisedSubstrate } from '@neutronai/runtime/adapters/claude-code/persistent/supervision.ts'
-import { getRecord } from '@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts'
+import { disownPane, getRecord, patchRecord } from '@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
 import type { PtyChild, PtyHost } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
@@ -49,6 +53,14 @@ import { ritualApprovalToolName, ritualEgressApprovalToolName } from '@neutronai
 const dirs: string[] = []
 const peers: Array<ReturnType<typeof lifecycleReplHost>> = []
 const closers: Array<() => void> = []
+const routeFingerprint = capacity.nativeRelayRouteFingerprint
+let routeLookup: ReturnType<typeof spyOn>
+let pinLookup: ReturnType<typeof spyOn>
+beforeEach(() => {
+  // The scripted native process uses synthetic self-host authentication.
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
+  pinLookup = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
+})
 afterEach(async () => {
   for (const close of closers.splice(0)) close()
   for (const peer of peers.splice(0)) for (const { child } of peer.children) child.kill()
@@ -56,6 +68,8 @@ afterEach(async () => {
   retiringSessionKeys.clear()
   setNativeChildLiveness(OWNER_USER_ID, undefined)
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  pinLookup.mockRestore()
+  routeLookup.mockRestore()
 })
 function tempDir(prefix: string): string {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix))); dirs.push(dir); return dir
@@ -166,7 +180,7 @@ async function rig(overrides: Partial<ProjectScopeLifecycleDeps> = {}, options: 
   ] })
   const argvs: string[][] = []
   const placedHost = placedLifecycleHost(server, strict, peer.host, argvs)
-  const registryPath = join(root, 'repl-registry.json')
+  const registryPath = deriveReplSupervisionPaths(join(root, 'cwd')).replRegistryPath
   const factory = (opts: ClaudeCodeSubstrateOptions): Substrate => {
     const persistent: PersistentReplSubstrateOptions = {
       substrate_instance_id: opts.substrate_instance_id, cwd: join(root, 'cwd'),
@@ -291,6 +305,66 @@ test('capable server atomically retires empty scope workspace and wake preserves
   expect(livePane(r)!.workspace_id).not.toBe(workspace)
   expect(r.peer.children[1]!.sessionId).toBe(first.sessionId)
   expect(readFileSync(join(r.transcripts, `${first.sessionId}.jsonl`), 'utf8')).toBe(transcript)
+})
+
+for (const previous of ['asleep', 'dead', 'asleep-nocred', 'dead-foreign'] as const) test(`registered Chat resumes its ${previous} original native session despite every local identity being parked`, async () => {
+  const relay = await capacityFixture()
+  const readIdentity = processIdentity.readProcessIdentity
+  const identity = readIdentity(process.pid)!
+  const r = await rig()
+  if (previous === 'asleep-nocred') r.pool.credentials[0]!.id = '_nocred'
+  // Only the fixture process boundary is synthetic. Route fingerprinting, Unix
+  // registration, lifecycle retirement and the persisted --resume ID are real.
+  const processLookup = spyOn(processIdentity, 'readProcessIdentity').mockImplementation(pid =>
+    r.peer.children.some(({ child }) => child.pid === pid && !child.hasExited()) ? identity : readIdentity(pid))
+  try {
+    // Start with the pre-registration credential key and retain its durable SID.
+    expect(await turn(r, 'p-one')).toBe(true)
+    const first = r.peer.children[0]!
+    const key = keyOf(r, first.sessionId)!
+    await until(() => getRecord(r.registryPath, key)?.has_session === true)
+    if (!previous.startsWith('dead')) {
+      expect(await r.lifecycle.sleep('p-one')).toMatchObject({ status: 'retired', sessionId: first.sessionId })
+    } else {
+      await r.server.call('pane.close', { pane_id: livePane(r)!.pane_id })
+      first.child.kill()
+      await shutdownAllPersistentRepls()
+      expect(getRecord(r.registryPath, key)?.asleep_at).toBeUndefined()
+      patchRecord(r.registryPath, key, { capped_at: 123 })
+    }
+    if (previous === 'dead-foreign') {
+      const foreignKey = poolKeyFor({ substrate_instance_id: 'cc-agent-foreign', user_id: 'foreign',
+        project_id: 'p-one', conversationProjectId: 'p-one', credential_identity: 'foreign-asleep' })
+      const rows = JSON.parse(readFileSync(r.registryPath, 'utf8'))
+      rows[foreignKey] = { ...disownPane(getRecord(r.registryPath, key)!), sessionKey: foreignKey,
+        sessionId: 'foreign-asleep-session', pid: undefined, asleep_at: Date.now() + 1 }
+      writeFileSync(r.registryPath, JSON.stringify(rows))
+      // Positive control: the legacy scope-only sleep lookup really sees the
+      // newer foreign record, while registered chat must use its exact identity.
+      expect(r.lifecycle.resumeCredentialFor!('p-one')).toBe('foreign-asleep')
+    }
+    for (const credential of r.pool.credentials) reportFailure(r.pool, credential.id, 429)
+    const before = JSON.stringify(r.pool)
+    routeLookup.mockImplementation(() => routeFingerprint(relay.pin))
+    pinLookup.mockReturnValue(relay.pin)
+    r.restart()
+    const events = await collect(r.wired.liveAgentSubstrate!.start(specFor('p-one')))
+    expect(events.filter(event => event.kind === 'error')).toEqual([])
+    expect(completed(events)).toBe(true)
+    expect(r.peer.children).toHaveLength(2)
+    expect(r.peer.children[1]!.sessionId).toBe(first.sessionId)
+    expect(r.argvs[1]).toContain('--resume')
+    expect(r.argvs[1]![r.argvs[1]!.indexOf('--resume') + 1]).toBe(first.sessionId)
+    expect(keyOf(r, first.sessionId)).toBe(key)
+    expect(JSON.stringify(r.pool)).toBe(before)
+    expect(relay.requests.map(request => request.kind)).toEqual(['claude-native-register'])
+    expect(relay.requests.map(request => request.parentSessionId)).toEqual([first.sessionId])
+    expect(getRecord(r.registryPath, key)?.reuse?.auth_fingerprint).toBe(routeFingerprint(relay.pin))
+    if (previous.startsWith('dead')) expect(getRecord(r.registryPath, key)?.capped_at).toBe(123)
+  } finally {
+    processLookup.mockRestore()
+    await relay.close()
+  }
 })
 
 test('scope sleep preserves a foreign pane arriving at guarded workspace retirement', async () => {

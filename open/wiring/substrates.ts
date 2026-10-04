@@ -31,6 +31,7 @@
 
 import {
   buildLlmCallSubstrate,
+  hasRegisteredClaudeRoute,
   type BuildLlmCallSubstrateInput,
   type LlmCallSubstrate,
 } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
@@ -177,11 +178,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   const buildProvider = { ...phaseSpecProvider }
   delete buildProvider.configuredChat
 
-  // Credential availability and provider selection are independent. A live
-  // resolver can exist before any credential does; that boot must retain the
-  // null substrates consumed by deterministic callers. With credentials, keep
-  // resolution live so project overrides and instance changes apply per turn.
-  const harnessAvailable = llmPool !== null || openaiFullyWired
+  // The protected native route owns its account bank. A local credential pool
+  // is neither required nor evidence about that bank's availability.
+  const harnessAvailable = hasRegisteredClaudeRoute() || llmPool !== null || openaiFullyWired
   const conversationalAvailable = harnessAvailable || ctx.env['NEUTRON_PROJECT_MODELS'] !== undefined
   const anthropicPoolArg: Pick<BuildLlmCallSubstrateInput, 'pool' | 'resolvePool'> =
     llmPool !== null ? { pool: llmPool } : { resolvePool: async (): Promise<null> => null }
@@ -268,7 +267,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           // nudge, fire and the other disposable substrates keep the configured host.
           ...(ctx.conversationTerminal === undefined ? {} : { conversationTerminal: ctx.conversationTerminal }),
           // #1226 — credential rotation is a verified Chat handoff at the scope's
-          // lifecycle owner (pin while usable; retire the old exact owner first).
+          // lifecycle owner (registered routes preserve the key independently of
+          // account availability; direct-auth rotation retires the exact old owner).
           ...(ctx.conversationLifecycle === undefined ? {} : { conversationLifecycle: ctx.conversationLifecycle }),
           repl_pane_label: `chat · ${project_slug}`,
           cwd: owner_home,

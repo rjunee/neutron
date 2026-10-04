@@ -18,7 +18,9 @@ import { honourDiffOutput } from '@neutronai/trident/testing/diff-output-host.ts
  *     factories throwing.
  */
 
-import { beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
+import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
+import { generateKeyPairSync } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
@@ -149,8 +151,48 @@ async function drainEveryWiredSubstrate(w: ReturnType<typeof wireSubstrates>): P
 // and every profile that opts into the credential then calls it. CI found this;
 // a local single-file run never could. Clear it so this file measures its own
 // wiring rather than whatever ran before it.
+let routeLookup: ReturnType<typeof spyOn>
 beforeEach(() => {
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   githubSpawnEnvRef.resolve = undefined
+})
+afterEach(() => routeLookup.mockRestore())
+
+test('registered route wires initial project Chat without a local account pool', async () => {
+  const pin: capacity.ClaudeCapacityPin = { version: 1, hostId: 'fixture-host', instanceId: 'fixture-instance',
+    socketPath: '/synthetic/relay.sock', claudeConfigDir: '/synthetic/claude',
+    publicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString() }
+  // Restore briefly to derive the canonical value, then provide only that
+  // provisioned-route observation at the filesystem boundary.
+  routeLookup.mockRestore()
+  const route = capacity.nativeRelayRouteFingerprint(pin)!
+  routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(route)
+  const { ctx, captured } = makeCtx({ llmPool: null })
+  const wired = wireSubstrates(ctx)
+  const chat = wired.makeProjectLiveAgentSubstrate('fixture-project')
+  expect(chat).not.toBeNull()
+  await drain(chat!)
+  expect(captured).toHaveLength(1)
+  expect(captured[0]!.credential_identity).toBe(route)
+  expect(captured[0]!.conversationProjectId).toBe('fixture-project')
+  expect(captured[0]!.enableToolBridge).toBe(true)
+  expect(captured[0]!.env?.ANTHROPIC_API_KEY).toBeUndefined()
+})
+
+test('unavailable Claude registration leaves Codex usable and selected Claude refuses locally', async () => {
+  routeLookup.mockImplementation(() => { throw new capacity.NativeRelayUnavailable('Synthetic unavailable registration') })
+  const starts: Array<string | undefined> = []
+  const { ctx, captured } = makeCtx({ llmPool: null,
+    providerResolver: () => ({ provider: 'openai-codex', source: 'project' }),
+    startCodexOwner: projectId => { starts.push(projectId); return cannedHandle('codex-owner') },
+  })
+  const wired = wireSubstrates(ctx)
+  await drain(wired.makeProjectLiveAgentSubstrate('fixture-project')!)
+  expect(starts).toEqual(['fixture-project'])
+  expect(captured).toHaveLength(0)
+  const claude = wireSubstrates({ ...ctx, providerResolver: () => ({ provider: 'anthropic', source: 'project' }) })
+  await expect(drain(claude.liveAgentSubstrate!)).rejects.toBeInstanceOf(capacity.NativeRelayUnavailable)
+  expect(captured).toHaveLength(0)
 })
 
 describe('wireSubstrates — instance ids + tool-bridge invariants', () => {

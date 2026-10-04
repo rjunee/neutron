@@ -9209,7 +9209,11 @@ test('native planner retains execution time after measured real REPL writer queu
   try {
     for (let n = 0; n < 200 && session.turnSlotHeld < 2; n++) await Bun.sleep(5)
     expect(session.turnSlotHeld).toBe(2)
-    await Bun.sleep(1_200)
+    // Match the actor's Date.now queue accounting: a single sleep can wake
+    // before 1,200 integer milliseconds have elapsed. Keep the writer held
+    // until this observed queued interval reaches the asserted duration.
+    const releaseAt = Date.now() + 1_200
+    while (Date.now() < releaseAt) await Bun.sleep(Math.max(1, releaseAt - Date.now()))
     release()
     const outcome = await running
     expect(outcome, why(f, outcome)).toMatchObject({ kind: 'merged' })
