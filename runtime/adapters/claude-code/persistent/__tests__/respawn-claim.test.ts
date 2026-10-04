@@ -16,7 +16,7 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
-function fixture(force = false) {
+function fixture() {
   expect(flockAvailable()).toBe(true)
   const dir = mkdtempSync(join(tmpdir(), 'respawn-claim-'))
   dirs.push(dir)
@@ -25,7 +25,6 @@ function fixture(force = false) {
   const row: ReplRegistryRecord = {
     sessionKey: key, sessionId: 'resume-session', cwd: dir,
     channelName: 'neutron-15ab0d54e889689d70965ba3f945b480', has_session: true, recent_respawns: [],
-    ...(force ? { capped_at: 1 } : {}),
   }
   saveRegistry(path, { [key]: row })
   // Intercept only the final spawn boundary. Registry, lock, plan and dispatch are real.
@@ -36,7 +35,7 @@ function fixture(force = false) {
 
 for (const force of [false, true]) {
   test(`unheld lock refuses without changing bytes or spawning, force=${force}`, () => {
-    const { path, key, row, calls, options } = fixture(force)
+    const { path, key, row, calls, options } = fixture()
     const before = readFileSync(path, 'utf8')
     let attempts = 0
     setFlockImplForTests(() => { attempts += 1; return 1 })
@@ -54,7 +53,7 @@ for (const force of [false, true]) {
   })
 
   test(`held lock claims a stamp and spawns one resume, force=${force}`, () => {
-    const { path, key, row, calls, options } = fixture(force)
+    const { path, key, row, calls, options } = fixture()
     let attempts = 0
     setFlockImplForTests(() => { attempts += 1; return 0 })
     const outcome = respawnReplSession(options, key, 'admin-endpoint', 'manual', force)

@@ -20,7 +20,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { AgentSpec } from '../../../../substrate.ts'
@@ -1120,7 +1120,6 @@ describe('S2 supervision — operator respawn uses the OWNING substrate options,
     // Register A first, B last (B would win under per-registry keying).
     registerSupervisedSubstrate(optsA)
     registerSupervisedSubstrate(optsB)
-    patchRecord(registryPath, keyA, { capped_at: Date.now() })
     const aSpawnsBefore = a.spawns.length
     const bSpawnsBefore = b.spawns.length
 
@@ -1149,9 +1148,9 @@ describe('S2 supervision — operator respawn uses the OWNING substrate options,
   })
 })
 
-describe('S2 supervision — operator force path (admin endpoint) clears capped_at + is double-spawn-safe', () => {
-  it('respawnSupervisedSession force-recovers a hard-capped REPL and clears capped_at', async () => {
-    const { host, spawns } = makeFakeReplHost()
+describe('S2 supervision — operator force path respects cap authority and is double-spawn-safe', () => {
+  it('respawnSupervisedSession refuses a hard-capped REPL without writes or termination', async () => {
+    const { host, spawns, children } = makeFakeReplHost()
     const registryPath = tmpRegistry()
     const opts = baseOptions(host, registryPath)
     // Register the live substrate exactly as the runtime selector does, so the
@@ -1162,18 +1161,17 @@ describe('S2 supervision — operator force path (admin endpoint) clears capped_
     const key = onlyKey(registryPath)
     expect(await waitForHasSession(registryPath, key)).toBe(true)
 
-    // Auto-watchdog gave up: the record is hard-capped. The ONLY release path is
-    // the operator force respawn (admin endpoint → respawnSupervisedSession).
+    // Owner force recovery cannot release the independent operator's latch.
     patchRecord(registryPath, key, { capped_at: Date.now() })
     expect(getRecord(registryPath, key)?.capped_at).toBeDefined()
     const baseline = spawns.length
+    const before = readFileSync(registryPath, 'utf8')
 
     const out = respawnSupervisedSession(registryPath, key)
-    expect(out.ok).toBe(true)
-    expect(await waitForSpawnCount(spawns, baseline + 1)).toBe(true) // the force respawn fired
-    expect(spawns.length).toBe(baseline + 1)
-    expect(spawns[spawns.length - 1]?.isResume).toBe(true)
-    expect(getRecord(registryPath, key)?.capped_at).toBeUndefined() // cap cleared
+    expect(out.ok).toBe(false)
+    expect(spawns.length).toBe(baseline)
+    expect(children[0]!.hasExited()).toBe(false)
+    expect(readFileSync(registryPath, 'utf8')).toBe(before)
   })
 
   it('two rapid operator force requests spawn EXACTLY ONCE (force honors the in-flight gate)', async () => {
@@ -1185,11 +1183,10 @@ describe('S2 supervision — operator force path (admin endpoint) clears capped_
     await drain(sub.start(spec('hi')))
     const key = onlyKey(registryPath)
     expect(await waitForHasSession(registryPath, key)).toBe(true)
-    patchRecord(registryPath, key, { capped_at: Date.now() })
     const baseline = spawns.length
 
-    // Two back-to-back force requests (the operator double-tap). force clears the
-    // cap/cooldown but must STILL honor the in-flight serialization — acceptance
+    // Two back-to-back requests on an uncapped session must honor the
+    // in-flight serialization — acceptance
     // #3 "exactly ONE spawn per sessionKey" on the operator path (Argus r1
     // IMPORTANT #3 / Codex P2).
     const first = respawnSupervisedSession(registryPath, key)

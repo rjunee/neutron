@@ -1508,6 +1508,42 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     finishNativeQuota: () => worker(quotaDispatch) }
 }
 
+test('native Unix Messages transport consumes a complete project build without network fallback', async () => {
+  const f = await fixture()
+  const { prepareNativeRequestRelay } = await import('@neutronai/runtime/adapters/claude-code/persistent/native-request-relay.ts')
+  const capacity = await capacityFixture(); cleanups.push(() => capacity.close())
+  const launch = prepareNativeRequestRelay({ ANTHROPIC_API_KEY: 'synthetic-not-forwarded' },
+    { ...capacity.pin, socketPath: join(f.dir, 'native-http.sock') })!
+  const scope = launch.env.ANTHROPIC_CUSTOM_HEADERS!.split(': ')[1]!
+  let messages = 0
+  const relay = Bun.serve({ unix: launch.env.ANTHROPIC_UNIX_SOCKET!, async fetch(request) {
+    expect(request.method).toBe('POST')
+    expect(new URL(request.url).pathname).toBe('/v1/messages')
+    expect(request.headers.get('x-neutron-native-scope')).toBe(scope)
+    messages++
+    return Response.json({ fixture: 'native-model-boundary' })
+  } })
+  cleanups.push(async () => { await relay.stop(true) })
+  const url = `${launch.env.ANTHROPIC_BASE_URL}/v1/messages?beta=true`
+  const send = (unix?: string) => fetch(url, { method: 'POST', body: '{}',
+    headers: { 'x-neutron-native-scope': scope }, ...(unix === undefined ? {} : { unix }),
+    signal: AbortSignal.timeout(1000) })
+  // Only the model boundary is synthetic. The full real dispatch-to-merge
+  // harness below cannot progress until the launched transport delivers bytes.
+  const submit = f.session.child.submitLine!
+  f.session.child.submitLine = async (line: string) => {
+    expect((await send(launch.env.ANTHROPIC_UNIX_SOCKET)).status).toBe(200)
+    await submit(line)
+  }
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(messages).toBeGreaterThan(0)
+  const before = messages
+  await expect(send(`${launch.env.ANTHROPIC_UNIX_SOCKET}.missing`)).rejects.toThrow()
+  await expect(send()).rejects.toThrow()
+  expect(messages).toBe(before)
+}, 30_000)
+
 test('host-terminated capped Chat resumes through current launch and signed cap rearm before consuming a full build', async () => {
   const f = await fixture()
   const { generateKeyPairSync, sign } = await import('node:crypto')

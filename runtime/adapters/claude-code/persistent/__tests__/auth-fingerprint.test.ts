@@ -98,7 +98,7 @@ test('a registered route overrides credentials without creating a fingerprint ke
   const route = routeFingerprint(pin)
   if (route === undefined) throw new Error('Synthetic registered route must have a fingerprint')
   routeLookup.mockImplementation(() => routeFingerprint(pin))
-  expect(route).toMatch(/^native-relay-v2:[0-9a-f]{64}$/)
+  expect(route).toMatch(/^native-relay-v3:[0-9a-f]{64}$/)
   expect(authFingerprintFor(undefined, path)).toBe(route)
   expect(authFingerprintFor({ ANTHROPIC_API_KEY: 'synthetic-auth-token' }, path)).toBe(route)
   expect(existsSync(path)).toBe(false)

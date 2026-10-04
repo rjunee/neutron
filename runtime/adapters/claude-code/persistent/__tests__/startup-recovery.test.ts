@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import * as capacity from '../../../../workers/claude-capacity-client.ts'
+import { createHash, generateKeyPairSync } from 'node:crypto'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -23,6 +24,7 @@ const key = 'startup-recovery-test'
 const cleanup: (() => void | Promise<void>)[] = []
 let routeLookup: ReturnType<typeof spyOn>
 let pinLookup: ReturnType<typeof spyOn>
+const realRouteFingerprint = capacity.nativeRelayRouteFingerprint
 beforeEach(() => {
   // These fake native parents carry self-host fingerprints, never host credentials.
   routeLookup = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
@@ -82,6 +84,23 @@ test('absent/retired authority stays asleep, while a captured active row resumes
   expect(await recoverStartupRepl(f.options, key, [{ name: 'Read' }], { spawn: f.spawn })).toEqual({ status: 'skipped' })
   expect(f.calls).toHaveLength(0)
   expect(await f.recover()).toEqual({ status: 'resumed' })
+})
+
+test('a stored HTTPS-era native route refuses unchanged; a genuinely captured current route can recover', async () => {
+  const f = fixture()
+  const pin = { version: 1 as const, hostId: 'fixture', instanceId: 'fixture', socketPath: '/fixture/native.sock',
+    claudeConfigDir: f.dir, publicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString() }
+  const current = realRouteFingerprint(pin)!
+  const legacy = `native-relay-v2:${createHash('sha256').update(JSON.stringify([
+    pin.hostId, pin.instanceId, pin.socketPath, pin.publicKey,
+  ])).digest('hex')}`
+  routeLookup.mockReturnValue(current)
+  const old = { ...f.row, reuse: { ...f.row.reuse!, auth_fingerprint: legacy } }
+  expect((await f.recover(old)).status).toBe('refused')
+  expect(f.calls).toHaveLength(0)
+  expect(JSON.parse(readFileSync(f.options.replRegistryPath!, 'utf8'))[key]).toEqual(old)
+  expect(await f.recover({ ...f.row, reuse: { ...f.row.reuse!, auth_fingerprint: current } })).toEqual({ status: 'resumed' })
+  expect(f.calls).toHaveLength(1)
 })
 
 test.each(['Agent,Read', ''])('startup reconstructs recorded tools %j without adding current grants', async surface => {

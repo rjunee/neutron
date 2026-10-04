@@ -1,6 +1,6 @@
 /**
  * admin-respawn-session.test.ts — the operator force-recover endpoint
- * (S2 § 2 row #13 / DoD "admin-respawn-session live; clears capped_at").
+ * (S2 § 2 row #13; capped sessions require independent signed rearm).
  * Covers the pure status mapping + the Request adapter's auth + rate-limit +
  * param resolution.
  */
@@ -96,7 +96,7 @@ describe('handleAdminRespawnSessionRequest — auth + rate-limit + params', () =
     expect(seen).toBe('from-body')
   })
 
-  it('forces the respawn so capped_at can be operator-released', async () => {
+  it('passes the exact requested key to guarded force recovery', async () => {
     // The production `respawn` dep wraps respawnReplSession(..., force=true);
     // here we assert the endpoint calls respawn for the resolved key (the force
     // semantics live in respawnReplSession and are covered in repl-supervision).

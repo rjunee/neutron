@@ -328,9 +328,10 @@ async function spawnSession(
   writeFileSync(mcpConfigPath, JSON.stringify({ mcpServers }, null, 2), { mode: 0o600 })
   // Task 6 (T5 write-containment) — forward the optional `permissions` block onto
   // the per-session settings write so a ritual write-containment REPL's deny rules
-  // land in `--settings`. Absent ⇒ the Stop-hook-only write, unchanged.
+  // land in `--settings` alongside the reply and native lifecycle hooks.
   buildSettings({
     settingsPath,
+    nativeTurn: { sinkPort: sink.port, sinkToken: childToken },
     // WAVE 3.5 task B — wire the TodoWrite→Work Board PostToolUse hook on the REPLs
     // that opt into the Neutron tool bridge. The disposable Trident build REPLs + the
     // untrusted history-import REPL never enable the bridge, so their TodoWrite stays
@@ -2001,6 +2002,18 @@ export async function injectMessage(
   // header against the `SINK_TOKEN` it was baked with (`dev-channel-impl.ts`), and
   // that is now per-incarnation. Derived rather than stored so it cannot drift from
   // what the sink authorizes.
+  if (session.failedNativeTurnId !== undefined) {
+    const failedTurnId = session.failedNativeTurnId
+    const retired = await fetch(`http://127.0.0.1:${channelPort}/turn-ended`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': sink.credentialFor(session) },
+      body: JSON.stringify({ turn_id: failedTurnId }),
+      signal: AbortSignal.timeout(2_000),
+    })
+    if (!retired.ok) throw new Error('persistent-repl: native failed-turn correlation retirement unavailable')
+    if (session.failedNativeTurnId === failedTurnId) session.failedNativeTurnId = undefined
+  }
+  session.armNativeTurn(turnId)
   const resp = await fetch(`http://127.0.0.1:${channelPort}/message`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Sink-Token': sink.credentialFor(session) },

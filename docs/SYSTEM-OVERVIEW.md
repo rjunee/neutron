@@ -53,6 +53,21 @@ provider prompts. The decision and deployment alternatives are recorded in
 SPEC.md on 2026-09-30. Outstanding repeated-episode and live acceptance are in
 `docs/spec-items/claude-same-agent-continuation.md`.
 
+For an operator-coordinated native transport upgrade, the root-only local
+`open/operator-maintenance.ts` actuator can hold one registered scope's canonical
+admission fence while existing work drains. Migration 0167 prevents old gateway
+recovery from reopening that operation-bound hold. The actuator observes original
+and replacement native ownership but never kills a process or clears work/caps.
+The fixed bootstrap records its reviewed DDL in a protected operator audit while
+preserving the entire canonical migration ledger; the ordinary upgraded runner
+later executes migration 0167 and records normal provenance. Old-code restart
+therefore remains compatible. Canonical sleep remains the retirement authority.
+An already-slept unobserved replacement uses an explicit completed-sleep/transcript
+census observation, never a fabricated historical process identity. Exact release requires asleep
+and physical-exit evidence plus the newly served process's protected target tree,
+entrypoint, listener and health identity; pending/unknown replay refuses. See
+`docs/spec-items/project-herdr-workspaces.md` for the operator contract.
+
 ## The spine — how to reach the rest of this file
 
 Added 2026-08-31. This file is ~8,900 lines. Reading it end to end costs more than the orientation

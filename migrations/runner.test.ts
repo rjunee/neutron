@@ -231,6 +231,7 @@ test('first apply runs all migrations in order and records them in _migrations',
     164,
     165,
     166,
+    167,
   ])
   expect(result.skipped).toEqual([])
 
@@ -241,6 +242,10 @@ test('first apply runs all migrations in order and records them in _migrations',
     .all()
   expect(rows.map((r) => r.version)).toEqual(result.applied)
   expect(rows.find((r) => r.version === 154)).toMatchObject({ version: 154, name: 'ralph_task_total' })
+  expect(rows.find((r) => r.version === 167)).toEqual({
+    version: 167,
+    name: 'operator_maintenance_holds',
+  })
   for (const table of ['code_trident_runs', 'work_board_items']) {
     expect(db.query<{ name: string; notnull: number }, []>(`PRAGMA table_info(${table})`).all())
       .toContainEqual(expect.objectContaining({ name: 'task_total', notnull: 0 }))

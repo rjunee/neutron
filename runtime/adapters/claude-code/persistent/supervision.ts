@@ -69,8 +69,8 @@ export function registerSupervisedSubstrate(options: PersistentReplSubstrateOpti
 /**
  * Operator force-recover entry point for the admin-respawn HTTP endpoint:
  * resolve the OWNING substrate's live options for `sessionKey` and actuate a
- * FORCED `--resume` respawn (clears `capped_at` so a hard-capped REPL the
- * auto-watchdog stopped retrying is released). `replRegistryPath` scopes the
+ * FORCED `--resume` respawn of an uncapped session. A capped session requires
+ * independent signed cap rearm first. `replRegistryPath` scopes the
  * lookup to this instance: a session whose registered options point at a DIFFERENT
  * registry is treated as not-found, so the operator route can only recover
  * sessions belonging to the resolved instance. Returns `session-not-found` when no
@@ -229,8 +229,8 @@ function recentRespawnCount(record: ReplRegistryRecord, now: number): number {
  * per-key gate + a registry-flock in-flight stamp serialize concurrent callers
  * so EXACTLY ONE spawn fires (brief § 6 acceptance #3). Respawn-is-always-resume
  * via `dispatchWedgeRespawn → planRespawn → executeRespawn` (brief § 6
- * acceptance #2 & #4). `force` (operator) bypasses the cooldown/cap checks, honors both in-flight gates,
- * and clears `capped_at`.
+ * acceptance #2 & #4). `force` bypasses the rolling retry count for an uncapped
+ * session, honors both in-flight gates, and cannot release a latched cap.
  */
 export function respawnReplSession(
   options: PersistentReplSubstrateOptions,
@@ -248,7 +248,7 @@ export function respawnReplSession(
     // Another respawn for this key is already running in-process. The
     // process-local gate applies to `force` too: two rapid operator force
     // requests must NOT both spawn (acceptance #3 — exactly ONE spawn per
-    // sessionKey). `force` only bypasses the cooldown/cap below, never the
+    // sessionKey). `force` only bypasses the rolling retry count below, never the
     // in-flight serialization. (Argus r1 IMPORTANT #3.)
     return { ok: false, reason: 'spawn-failed', sessionKey }
   }
@@ -273,25 +273,27 @@ export function respawnReplSession(
       }
       // Establish ownership before consulting this scope's child authority.
       // A wedged parent does not prove its native children are terminal; force
-      // bypasses cooldown/cap only, never this guard or its no-write refusal.
+      // bypasses the rolling retry count only, never this guard or its no-write refusal.
       if (hasUnresolvedNativeChild(options)) {
         return { registry, result: { kind: 'child-unresolved' }, skipSave: true }
       }
+      // Owner-authenticated force recovery has no independent cap-release
+      // authority. Refuse before any claim/write or child actuation; only the
+      // signed exact-episode rearm operation may remove this latch.
+      if (rec.capped_at !== undefined) return { registry, result: { kind: 'capped' }, skipSave: true }
       const inFlight =
         rec.respawn_in_flight_at !== undefined && now - rec.respawn_in_flight_at < RESPAWN_IN_FLIGHT_TTL_MS
       if (force) {
-        // Operator force-recover: clear cap + bypass the cooldown/cap-count,
-        // BUT still honor the cross-process in-flight stamp so two rapid force
+        // Uncapped operator recovery bypasses the rolling retry count, but
+        // still honors the cross-process in-flight stamp so two rapid force
         // requests (this or another process) can't both spawn the same
         // sessionKey (acceptance #3 — exactly ONE spawn). Argus r1 IMPORTANT #3.
         if (inFlight) return { registry, result: { kind: 'in-flight' } }
-        const { capped_at: _dropped, ...rest } = rec
-        const next: ReplRegistryRecord = { ...rest, respawn_in_flight_at: now }
+        const next: ReplRegistryRecord = { ...rec, respawn_in_flight_at: now }
         registry[sessionKey] = next
         return { registry, result: { kind: 'go', record: next } }
       }
       if (inFlight) return { registry, result: { kind: 'in-flight' } }
-      if (rec.capped_at !== undefined) return { registry, result: { kind: 'capped' } }
       if (recentRespawnCount(rec, now) >= RESPAWN_CAP_MAX) {
         // Trip the hard cap — auto-recovery OFF until an operator clears it.
         // `just_tripped` marks the healthy→capped RISING EDGE (the `capped_at`

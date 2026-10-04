@@ -9,6 +9,8 @@ import { createPersistentReplSubstrate, poolKeyFor, shutdownAllPersistentRepls }
 import { pool } from '../pool-state.ts'
 import { lifecycleReplHost } from './lifecycle-repl-host.ts'
 import type { AgentSpec } from '../../../../substrate.ts'
+import { capacityFixture } from '../../../../workers/claude-capacity-client.test-support.ts'
+import { getRecord } from '../repl-registry.ts'
 import { classifyPaneForAdoption } from '../orphan-adoption.ts'
 import { setNativeChildLiveness } from '../native-child-liveness.ts'
 
@@ -17,6 +19,7 @@ const launchOwner = 'native-launch-evidence-owner'
 const body = '#!/bin/sh\nprintf "2.1.285 (Claude Code)\\n"\n'
 let pinLookup: ReturnType<typeof spyOn<typeof capacity, 'loadClaudeCapacityPin'>>
 let routeLookup: ReturnType<typeof spyOn<typeof capacity, 'nativeRelayRouteFingerprint'>>
+const realRouteFingerprint = capacity.nativeRelayRouteFingerprint
 beforeEach(() => {
   // The synthetic executable and lifecycle PTY model an UNREGISTERED self-host.
   pinLookup = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(undefined)
@@ -49,6 +52,43 @@ test('observes actual executable bytes/version and binds only the successful hos
   expect(Object.isFrozen(evidence.argv)).toBe(true)
   expect(Object.isFrozen(evidence.executable)).toBe(true)
   expect(readNativeParentLaunchEvidence({})).toBeUndefined()
+})
+
+test('a genuine registered launch captures the current Unix protocol and route fingerprint', async () => {
+  const authority = await capacityFixture()
+  const fake = lifecycleReplHost()
+  const route = realRouteFingerprint(authority.pin)!
+  pinLookup.mockReturnValue(authority.pin); routeLookup.mockReturnValue(route)
+  const launches: Array<Record<string, string | undefined>> = []
+  setNativeChildLiveness(launchOwner, () => false)
+  const options = { substrate_instance_id: 'native-wire-launch', user_id: launchOwner, project_id: 'project',
+    conversationProjectId: 'project', cwd: dir, claude_bin: join(dir, 'claude'), skipTrustSeed: true,
+    replRegistryPath: join(dir, 'registry.json'), idleQuietMs: 0,
+    captureConfig: { maxAttempts: 1, attemptDelayMs: 1 },
+    assertConfig: { readyBudgetMs: 5000, readyIntervalMs: 25, healthBudgetMs: 5000, healthIntervalMs: 25 },
+    ptyHost: { async spawn(argv: string[], opts: Parameters<typeof fake.host.spawn>[1]) {
+      launches.push(opts.env ?? {})
+      const child = await fake.host.spawn(argv, opts)
+      // The fake PTY owns no OS process; this live fixture identity lets the
+      // real signed registration transport attest the synthetic parent.
+      Object.defineProperty(child, 'pid', { value: process.pid })
+      return child
+    } },
+  }
+  try {
+    const substrate = createPersistentReplSubstrate(options)
+    for await (const event of substrate.start({ prompt: 'ready', model_preference: ['claude-opus-4-7'],
+      tools: [{ name: 'Read' }] as AgentSpec['tools'] }).events) {
+      if (event.kind === 'error') throw new Error(event.message)
+    }
+    expect(launches).toHaveLength(1)
+    expect(launches[0]!.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:0')
+    expect(launches[0]!.ANTHROPIC_UNIX_SOCKET).toBe(authority.pin.socketPath)
+    const session = await pool.get(poolKeyFor(options))
+    expect(session?.authFingerprint).toBe(route)
+    expect(getRecord(options.replRegistryPath, poolKeyFor(options))?.reuse?.auth_fingerprint).toBe(route)
+    expect(authority.requests.some(request => request.kind === 'claude-native-register')).toBe(true)
+  } finally { await shutdownAllPersistentRepls(); await authority.close() }
 })
 
 test('Agent-only, General, missing executable and failed version probe supply no evidence', async () => {

@@ -5,9 +5,9 @@
  * LIFTED from Nova `gateway/admin-respawn-topic.ts`. The param adapts
  * `?name=<topic>` → `?session=<sessionKey>`; the route is
  * `POST /admin/respawn-session`. It routes into the guarded `respawnReplSession`
- * actuation with `force=true`, which clears any `capped_at` so the operator can
- * release a hard-capped REPL the auto-watchdog has stopped retrying (the Nova
- * "stuck-turn cap-hit" release semantic).
+ * actuation with `force=true` for an uncapped REPL. A latched `capped_at` refuses
+ * unchanged until independently signed exact cap rearm releases it. A forced
+ * restart is not turn cancellation: an interrupted inbound may be replayed.
  *
  * Split into a pure param-handler (`handleAdminRespawnSession`) that's trivially
  * unit-testable, plus a Bun `Request → Response` adapter
@@ -20,7 +20,7 @@ import type { RespawnOutcome } from './session-respawn.ts'
 import { constantTimeEqual } from '../../../constant-time-equal.ts'
 
 /** Constant-time token compare (length-checked) for the privileged operator
- *  endpoint — this route force-respawns + clears caps, so a `!==` compare leaking
+ *  endpoint — this route force-respawns uncapped sessions, so a `!==` compare leaking
  *  the token via timing is a real regression (Codex P2). The length pre-check
  *  leaks only the token LENGTH (standard for `timingSafeEqual`, which requires
  *  equal-length buffers). */
