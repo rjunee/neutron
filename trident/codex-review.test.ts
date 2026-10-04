@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { acquireCodexAccountWriteLease } from '../runtime/adapters/codex-cli/account-writer-lock.ts'
+import { holdCodexNativeLock } from '../tests/support/codex-native-lock-holder.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-review.sh')
@@ -57,7 +58,7 @@ process.on('exit', reapFixtures)
 
 interface RunOpts {
   /** Hold the same admission reservation as an active account owner. */
-  accountBusy?: boolean
+  accountBusy?: true | 'native'
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
   authed?: boolean
   /** Don't set CODEX_HOME at all. */
@@ -149,7 +150,8 @@ function run(opts: RunOpts = {}): {
     script = join(isolatedTrident, 'codex-review.sh')
     writeFileSync(script, readFileSync(SCRIPT))
   }
-  const lease = opts.accountBusy ? acquireCodexAccountWriteLease(codexHome) : undefined
+  const lease = opts.accountBusy === 'native' ? holdCodexNativeLock(codexHome)
+    : opts.accountBusy ? acquireCodexAccountWriteLease(codexHome) : undefined
   const res = (() => {
     try { return spawnSync(BASH, [script, 'main'], { cwd: dir, encoding: 'utf8', env }) }
     finally { lease?.close() }
@@ -172,8 +174,8 @@ function run(opts: RunOpts = {}): {
 }
 
 describe('trident/codex-review.sh — exit-code contract', () => {
-  test('single-seat active owner defers review without launching another writer', () => {
-    const busy = run({ authed: true, codexLoginExit: 0, accountBusy: true })
+  for (const accountBusy of [true, 'native'] as const) test(`single-seat ${accountBusy === 'native' ? 'POSIX-only native owner' : 'startup reservation'} defers review without launching another writer`, () => {
+    const busy = run({ authed: true, codexLoginExit: 0, accountBusy })
     expect(busy.status).toBe(5)
     expect(busy.stderr).toContain('accountBusy')
     expect(busy.stderr).toContain('DEFERRED')

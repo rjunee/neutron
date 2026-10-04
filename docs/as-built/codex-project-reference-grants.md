@@ -57,6 +57,18 @@ additional must-fail mutations were killed and restored: dropping the transferre
 lease, bypassing admission in each shell consumer, and always-busy overrefusal in
 each shell consumer. These results do not substitute for the paired writer-lock
 descendant-lifetime correction or final integrated acceptance.
+Both shell consumers also pass a separate-process POSIX-only native-lock
+control. Its independent reservation probe proves the startup flock is free,
+and its non-Codex holder cannot trigger native census refusal; each consumer
+still defers without executing Codex. Paired available-account controls pass
+(four selected shell tests, 24 assertions).
+
+The corrected-source fourteen-file consuming run completed with 1,007 passes
+and one failure (10,455 assertions), including passing project-build E2E cases.
+The sole failure was the stdio native-retirement test at transport creation;
+its original custom error detail was not retained, so no cause is assigned.
+The bounded guard/transport/bootstrap rerun passed all 18 tests (81 assertions).
+That rerun does not turn the failed consolidated receipt into a passing gate.
 
 The paired web/phone selection UI is recorded in
 `codex-existing-account-project-selection.md`. Synthetic service/API checks cover

@@ -37,6 +37,7 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { assertProcessTestIsolation } from './process-test-isolation.ts'
 import { acquireCodexAccountWriteLease } from '../runtime/adapters/codex-cli/account-writer-lock.ts'
+import { holdCodexNativeLock } from '../tests/support/codex-native-lock-holder.ts'
 
 assertProcessTestIsolation()
 
@@ -150,7 +151,7 @@ interface RunOpts {
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
   authed?: boolean
   /** Hold the same admission reservation as an active account owner. */
-  accountBusy?: boolean
+  accountBusy?: true | 'native'
   /** Don't set CODEX_HOME at all. */
   noCodexHome?: boolean
   /** Mock `codex` on PATH whose `login status` exits with this code. null → no CLI. */
@@ -732,7 +733,8 @@ printf '%s\\n' "$rc" > "$STATUSFILE"
     env['STATUSFILE'] = supervisorStatusFile
     return ['/bin/sh', [sup, BASH, ...argv]]
   })()
-  const lease = opts.accountBusy ? acquireCodexAccountWriteLease(codexHome) : undefined
+  const lease = opts.accountBusy === 'native' ? holdCodexNativeLock(codexHome)
+    : opts.accountBusy ? acquireCodexAccountWriteLease(codexHome) : undefined
   const res = (() => {
     try {
       return spawnSync(spawnCmd, spawnArgs, {
@@ -1788,8 +1790,8 @@ describe('trident/codex-build.sh — exit-code contract', () => {
     expect(stdout).toContain('I am done')
   })
 
-  test('single-seat active owner defers build without launching another writer', () => {
-    const busy = run({ authed: true, codexLoginExit: 0, accountBusy: true })
+  for (const accountBusy of [true, 'native'] as const) test(`single-seat ${accountBusy === 'native' ? 'POSIX-only native owner' : 'startup reservation'} defers build without launching another writer`, () => {
+    const busy = run({ authed: true, codexLoginExit: 0, accountBusy })
     expect(busy.status).toBe(5)
     expect(busy.stderr).toContain('accountBusy')
     expect(busy.stderr).toContain('DEFERRED')
