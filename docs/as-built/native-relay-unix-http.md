@@ -96,6 +96,28 @@ output is not full-suite evidence.
 After integrating all three source changes, both exact root and Trident
 TypeScript checks and the full CI lint script passed again.
 
+The first combined canonical host gate at `560884032` exited 1 with complete
+coverage: 1,784 of 1,784 files and 19 lanes. Exactly one test failed, in
+`tests/integration/no-direct-anthropic-api.test.ts`: its old provider-HTTPS
+configuration exception still asserted the removed launcher literal. The other
+18 lanes passed; that complete run is a failed gate, not publication evidence.
+
+The test-only repair removes the obsolete provider-host stripping exception
+recorded historically in `native-relay-ci-registry-conformance.md`; that immutable
+record is not rewritten. No launcher file is allow-listed. The repository scan
+now shares the same bounded refusal checks as its controls: registered socket
+assignment, one shared base-URL assignment, direct fetch/HTTP imports, base-URL
+reads and the enumerated computed-field spellings. Ordinary foreign code is
+accepted while foreign provider references still refuse. This textual guard is
+not general computed-destination analysis. The focused guard passed two tests
+with 15 assertions. Allow-all and reject-all mutations failed actual refusal and
+acceptance assertions respectively; restored checks passed. A documentation
+search found the old exception only in that frozen historical shard and the
+replaced test commentary, with the current native-transport norm as its positive
+control. No production source changed in this repair. Both exact root and
+Trident type checks and full CI lint passed after the repair; no replacement
+canonical full-gate result is claimed here.
+
 This change advances #1416's native transport acceptance, not its closure.
 Live provider response, original-child quota continuation and actual project
 dispatch remain separate acceptance evidence.

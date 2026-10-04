@@ -149,52 +149,52 @@ function stripComments(src: string): string {
 
 const NATIVE_RELAY_CONFIG = 'runtime/adapters/claude-code/persistent/native-request-relay.ts'
 
-/**
- * The CLI needs its upstream Host while ANTHROPIC_UNIX_SOCKET selects the
- * provisioned relay. Permit only that standalone default assignment immediately
- * after the pinned socket assignment, not the file or other host references.
- * Reusing the base-URL field or introducing an HTTP API invalidates the exception:
- * a direct request must not hide behind the legitimate configuration literal.
- */
-function sourceForFence(relPath: string, body: string): string {
-  const stripped = stripComments(body)
-  if (relPath !== NATIVE_RELAY_CONFIG) return stripped
-  if ((stripped.match(/\bANTHROPIC_BASE_URL\b/g) ?? []).length !== 1) return stripped
-  if (/\b(?:fetch|XMLHttpRequest|axios|undici)\b|['"](?:node:)?https?['"]/.test(stripped)) return stripped
-  return stripped.replace(
-    /(^[ \t]*routed\.ANTHROPIC_UNIX_SOCKET = pin\.socketPath\r?\n)[ \t]*routed\.ANTHROPIC_BASE_URL = 'https:\/\/api\.anthropic\.com'[ \t]*(?=\r?$)/m,
-    '$1',
-  )
+// The launcher only configures the official CLI's Unix transport. It has no
+// provider-host exception and must not become a second HTTP client. These are
+// bounded textual controls, not a general computed-destination analysis.
+function fenceViolations(relPath: string, body: string): string[] {
+  const source = stripComments(body)
+  const patterns = relPath === NATIVE_RELAY_CONFIG ? [...FORBIDDEN_PATTERNS,
+    /\b(?:fetch|XMLHttpRequest|axios|undici)\b|['"](?:node:)?https?['"]/,
+    /['"`]ANTHROPIC_(?:BASE_URL)?['"`]|['"`]BASE_URL['"`]/,
+  ] : FORBIDDEN_PATTERNS
+  const violations = patterns.filter(pattern => pattern.test(source)).map(pattern => `forbidden /${pattern.source}/`)
+  if (relPath === NATIVE_RELAY_CONFIG) {
+    if (!/^\s*routed\.ANTHROPIC_UNIX_SOCKET = pin\.socketPath\s*$/m.test(source)) violations.push('missing pinned Unix socket assignment')
+    if (!/^\s*routed\.ANTHROPIC_BASE_URL = NATIVE_RELAY_BASE_URL\s*$/m.test(source)
+      || (source.match(/\bANTHROPIC_BASE_URL\b/g) ?? []).length !== 1) violations.push('base URL must only configure the shared native sentinel')
+  }
+  return violations
 }
 
-function forbiddenMatches(relPath: string, body: string): RegExp[] {
-  const source = sourceForFence(relPath, body)
-  return FORBIDDEN_PATTERNS.filter(pattern => pattern.test(source))
-}
-
-test('native relay upstream default is configuration only; direct and foreign uses still fail', () => {
+test('native Unix launcher is configuration only; direct and foreign uses still fail', () => {
   const body = readFileSync(join(process.cwd(), NATIVE_RELAY_CONFIG), 'utf8')
-  expect(body).toContain("routed.ANTHROPIC_BASE_URL = 'https://api.anthropic.com'")
-  expect(forbiddenMatches(NATIVE_RELAY_CONFIG, body)).toEqual([])
+  expect(body).toContain('routed.ANTHROPIC_BASE_URL = NATIVE_RELAY_BASE_URL')
+  expect(fenceViolations(NATIVE_RELAY_CONFIG, body)).toEqual([])
+  expect(fenceViolations('runtime/foreign.ts', 'export const fixture = true')).toEqual([])
   // Positive control: another current file legitimately names the provider, but
-  // does not acquire this configuration exception when scanned as ordinary code.
+  // still fails when scanned as ordinary code rather than its allow-listed path.
   const banner = readFileSync(join(process.cwd(), 'runtime/adapters/claude-code/persistent/rate-limit-banner.ts'), 'utf8')
-  expect(forbiddenMatches('runtime/foreign.ts', banner).length).toBeGreaterThan(0)
+  expect(fenceViolations('runtime/foreign.ts', banner).length).toBeGreaterThan(0)
   for (const [path, mutant] of [
-    ['runtime/foreign.ts', body],
+    ['runtime/foreign.ts', "const endpoint = 'https://api.anthropic.com'"],
+    [NATIVE_RELAY_CONFIG, body.replace('= NATIVE_RELAY_BASE_URL', "= 'https://api.anthropic.com'")],
     [NATIVE_RELAY_CONFIG, body.replace('routed.ANTHROPIC_UNIX_SOCKET = pin.socketPath', 'routed.ANTHROPIC_UNIX_SOCKET = foreign.socketPath')],
     [NATIVE_RELAY_CONFIG, body + "\nfetch('https://api.anthropic.com/v1/messages')\n"],
     [NATIVE_RELAY_CONFIG, body.replace('return { env: routed,', 'fetch(routed.ANTHROPIC_BASE_URL); return { env: routed,')],
+    [NATIVE_RELAY_CONFIG, body + '\nconst endpoint = routed.ANTHROPIC_BASE_URL\n'],
+    [NATIVE_RELAY_CONFIG, body + "\nconst endpoint = routed['ANTHROPIC_' + 'BASE_URL']\n"],
     [NATIVE_RELAY_CONFIG, body.replace('return { env: routed,', "const send = globalThis['fetch']; send(routed['ANTHROPIC_' + 'BASE_URL']); return { env: routed,")],
     [NATIVE_RELAY_CONFIG, body + "\nimport { request as send } from 'node:https'; send(endpoint)\n"],
+    [NATIVE_RELAY_CONFIG, body + "\nimport { request as send } from 'node:http'; send(endpoint)\n"],
   ]) {
-    expect(forbiddenMatches(path!, mutant!).length, path).toBeGreaterThan(0)
+    expect(fenceViolations(path!, mutant!).length, path).toBeGreaterThan(0)
   }
 })
 
 test('no direct api.anthropic.com fetches in owner-facing LLM call sites', () => {
   const base = process.cwd()
-  const violations: Array<{ file: string; pattern: string; line: string }> = []
+  const violations: Array<{ file: string; rule: string }> = []
   for (const root of ROOTS) {
     const rootDir = join(base, root)
     for (const relPath of walkTsFiles(rootDir, base)) {
@@ -205,21 +205,12 @@ test('no direct api.anthropic.com fetches in owner-facing LLM call sites', () =>
       } catch {
         continue
       }
-      const stripped = sourceForFence(relPath, body)
-      for (const pat of FORBIDDEN_PATTERNS) {
-        const m = stripped.match(pat)
-        if (m === null) continue
-        const idx = stripped.search(pat)
-        const lineStart = stripped.lastIndexOf('\n', idx) + 1
-        const lineEnd = stripped.indexOf('\n', idx)
-        const line = stripped.slice(lineStart, lineEnd === -1 ? undefined : lineEnd)
-        violations.push({ file: relPath, pattern: pat.source, line: line.trim().slice(0, 200) })
-      }
+      for (const rule of fenceViolations(relPath, body)) violations.push({ file: relPath, rule })
     }
   }
   if (violations.length > 0) {
     const report = violations
-      .map((v) => `  ${v.file}: matched /${v.pattern}/ in: ${v.line}`)
+      .map((v) => `  ${v.file}: ${v.rule}`)
       .join('\n')
     throw new Error(
       `Architectural fence-post FAILED: ${violations.length} direct-anthropic-api violations found.\n` +
