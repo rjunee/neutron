@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { assertProcessTestIsolation, needsProcessTestIsolation, processTestLauncher } from './process-test-isolation.ts'
-import { loadClaudeCapacityPin, nativeRelayRouteFingerprint } from '../runtime/workers/claude-capacity-client.ts'
-import { prepareNativeRequestRelay } from '../runtime/adapters/claude-code/persistent/native-request-relay.ts'
+import { loadClaudeCapacityPin, nativeRelayRouteFingerprint } from '@neutronai/runtime/workers/claude-capacity-client.ts'
+import { prepareNativeRequestRelay } from '@neutronai/runtime/adapters/claude-code/persistent/native-request-relay.ts'
 
 test('default native discovery sees no invoking host registration', () => {
   expect(loadClaudeCapacityPin()).toBeUndefined()
