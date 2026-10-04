@@ -50,6 +50,12 @@ test.each(['idle', 'busy', 'unknown', 'late-admission', 'legacy'] as const)('pro
     expect(['refused', 'unknown']).toContain(result.status)
     expect(server.panes.has(pane.pane_id)).toBe(true)
     expect(server.callsTo('pane.retire_held_owned')).toHaveLength(0)
+    if (fault === 'late-admission') {
+      expect(server.inputHolds.size).toBe(0)
+      // The known pre-mutation refusal must not strand a newly admitted wake.
+      const replacement = await manager.applyLayout(server, { type: 'pane', cwd: dir, command: ['next-native'] }, placement)
+      expect(server.panes.has(replacement.layout.root.pane_id)).toBe(true)
+    }
   }
   expect(server.callsTo('workspace.close')).toHaveLength(0)
 })

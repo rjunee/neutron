@@ -97,3 +97,32 @@ test('foreign splits survive relic cleanup and prevent empty-workspace retiremen
   expect(f.server.panes.has(f.pane.pane_id)).toBe(false)
   expect(f.read().state).toBe('ready')
 })
+
+test('uncertain pre-retirement release re-holds its exact token and re-proves idle after intervening input', async () => {
+  const f = await fixture()
+  f.pane.argv = ['working-command']; f.server.lostReleaseReply = true
+  expect((await f.manager.retireEmptyWorkspace(f.server, scope, await f.manager.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+  expect(f.read().retirement.relic.releasing).toBe(true)
+  expect(f.read().retirement.relic.issued).not.toBe(true)
+  expect(f.server.inputHolds.size).toBe(0)
+  f.server.inputEpoch = 2; f.pane.argv = ['/bin/bash']
+  const restarted = new ProjectWorkspaceManager(f.path, f.proc)
+  expect(await restarted.retireEmptyWorkspace(f.server, scope, await restarted.inspectChat(f.server, scope), () => true)).toEqual({ status: 'retired' })
+  const holds = f.server.callsTo('pane.hold_owned_input')
+  expect(holds).toHaveLength(2)
+  expect(holds[0]!.params.hold_token).toBe(holds[1]!.params.hold_token)
+  expect(f.server.callsTo('pane.retire_held_owned')[0]!.params.input_epoch).toBe(2)
+})
+
+test('an already issued uncertain retirement cannot be relabelled as a releasable input hold', async () => {
+  const f = await fixture()
+  f.server.beforeHeldRetirement = () => { throw new Error('retirement response unknown') }
+  expect((await f.manager.retireEmptyWorkspace(f.server, scope, await f.manager.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+  expect(f.read().retirement.relic.issued).toBe(true)
+  delete f.server.beforeHeldRetirement; f.pane.argv = ['working-command']
+  const restarted = new ProjectWorkspaceManager(f.path, f.proc)
+  expect((await restarted.retireEmptyWorkspace(f.server, scope, await restarted.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+  expect(f.server.callsTo('pane.release_owned_input')).toHaveLength(0)
+  expect(f.read().state).toBe('retiring')
+  expect(f.server.inputHolds.size).toBe(1)
+})

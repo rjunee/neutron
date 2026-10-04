@@ -53,7 +53,7 @@ interface WorkspaceRecord {
   relinquishedChats?: ChatSlot[]
   workers?: Record<string, WorkerOperation>
   retirement?: { operationId: string; revision: string;
-    relic?: { pane: string; holdToken: string; inputEpoch?: number; issued?: boolean } }
+    relic?: { pane: string; holdToken: string; inputEpoch?: number; issued?: boolean; releasing?: boolean } }
 }
 
 const TOKEN = 'neutron_project_owner'
@@ -579,10 +579,25 @@ export class ProjectWorkspaceManager {
         if (reply.type !== 'pane_owned_input' || !isDeepStrictEqual(reply.target, target)
           || reply.hold_token !== held.holdToken || reply.status !== 'held'
           || !Number.isSafeInteger(reply.input_epoch) || (reply.input_epoch as number) < 0
-          || held.inputEpoch !== undefined && held.inputEpoch !== reply.input_epoch) throw new Error('relic input hold unconfirmed')
-        held = { ...held, inputEpoch: reply.input_epoch as number }
+          || held.inputEpoch !== undefined && held.inputEpoch !== reply.input_epoch && held.releasing !== true) throw new Error('relic input hold unconfirmed')
+        // An acknowledged re-hold may observe input after an uncertain release,
+        // but only before any retire RPC was issued. Re-prove idle from scratch.
+        if (held.releasing && held.issued) throw new Error('relic release phase is invalid')
+        held = { ...held, inputEpoch: reply.input_epoch as number, releasing: false }
         save({ ...record, retirement: { ...record.retirement!, relic: held } })
         const params = { target, hold_token: held.holdToken, input_epoch: held.inputEpoch! }
+        const releaseUnissued = async () => {
+          if (held.issued) throw new Error('previous relic retirement remains unconfirmed')
+          held = { ...held, releasing: true }
+          save({ ...record, retirement: { ...record.retirement!, relic: held } })
+          const released = object(await client.call('pane.release_owned_input', params))
+          if (released.type !== 'pane_owned_input' || !isDeepStrictEqual(released.target, target)
+            || released.hold_token !== held.holdToken || released.input_epoch !== held.inputEpoch || released.status !== 'released') {
+            throw new Error('relic input release unconfirmed')
+          }
+          const { retirement: _reservation, ...retained } = record
+          save({ ...retained, state: 'ready', revision: randomUUID() })
+        }
         // The hold blocks new terminal input. Foreground identity alone is never
         // the lifetime authority: the host checks the original birth again below.
         const info = object(object(await client.call('pane.process_info', { pane_id: chat.pane })).process_info)
@@ -593,13 +608,7 @@ export class ProjectWorkspaceManager {
         if (info.pane_id !== chat.pane || typeof info.shell_pid !== 'number' || foreground?.pid !== info.shell_pid
           || !Array.isArray(argv) || argv.length !== 1 || typeof argv[0] !== 'string'
           || !/^(?:.*\/)?-?(?:bash|sh|zsh|fish|dash)$/.test(argv[0]) || shell === undefined || canRetire?.() !== true) {
-          const released = object(await client.call('pane.release_owned_input', params))
-          if (released.type !== 'pane_owned_input' || !isDeepStrictEqual(released.target, target)
-            || released.hold_token !== held.holdToken || released.input_epoch !== held.inputEpoch || released.status !== 'released') {
-            throw new Error('relic input release unconfirmed')
-          }
-          const { retirement: _reservation, ...retained } = record
-          save({ ...retained, state: 'ready', revision: randomUUID() })
+          await releaseUnissued()
           throw new Error('relic is not an idle shell')
         }
         const checked = object(await client.call('pane.check_owned_input', params))
@@ -608,10 +617,13 @@ export class ProjectWorkspaceManager {
           throw new Error('relic input hold changed')
         }
         if (!isDeepStrictEqual(inspectIdleRelicShell(info.shell_pid, this.relicProc), shell)) throw new Error('relic shell census changed')
+        if (canRetire?.() !== true) {
+          await releaseUnissued()
+          throw new Error('relic scope is no longer idle')
+        }
         held = { ...held, issued: true }
         save({ ...record, retirement: { ...record.retirement!, relic: held } })
       }
-      if (canRetire?.() !== true) throw new Error('relic scope is no longer idle')
       const retired = object(await client.call('pane.retire_held_owned', {
         target, hold_token: held.holdToken, input_epoch: held.inputEpoch!,
       }))

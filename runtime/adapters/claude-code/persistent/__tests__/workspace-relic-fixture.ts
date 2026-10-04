@@ -23,6 +23,8 @@ export class RelicWorkspaceServer extends FakeHerdrWorkspaceServer {
   readonly inputHolds = new Map<string, { token: unknown; epoch: number }>()
   beforeHeldRetirement?: () => void
   lostRetirementReply = false
+  lostReleaseReply = false
+  inputEpoch = 1
   alteredHoldReply = false
   changedEpoch = false
   birthReceipts = true
@@ -62,12 +64,13 @@ export class RelicWorkspaceServer extends FakeHerdrWorkspaceServer {
     let status = 'mismatch'
     if (matches) {
       if (method === 'pane.hold_owned_input' && (!hold || hold.token === params.hold_token)) {
-        this.inputHolds.set(id, hold ?? { token: params.hold_token, epoch: 1 }); status = 'held'
+        this.inputHolds.set(id, hold ?? { token: params.hold_token, epoch: this.inputEpoch }); status = 'held'
       } else if (hold?.token === params.hold_token && hold?.epoch === params.input_epoch) {
         status = method === 'pane.release_owned_input' ? 'released' : 'held'
         if (status === 'released') this.inputHolds.delete(id)
       }
     }
+    if (status === 'released' && this.lostReleaseReply) { this.lostReleaseReply = false; throw new Error('release reply lost') }
     return { type: 'pane_owned_input', target, hold_token: this.alteredHoldReply ? 'foreign' : params.hold_token,
       input_epoch: this.inputHolds.get(id)?.epoch ?? hold?.epoch ?? null, status }
   }

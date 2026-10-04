@@ -86,6 +86,11 @@ retirement capabilities. It durably reserves the hold token and input epoch,
 checks exact acknowledgements and journal compare-and-swap, and retires only
 through `pane.retire_held_owned`. Lost replies retain the reservation for exact
 retry; no raw close, lease deletion or inferred historical receipt is permitted.
+Before any retirement is issued, a known busy/refused scope releases its exact
+hold and restores readiness under compare-and-swap. Release intent is durable:
+an uncertain release can re-hold the same original target/token, accept the
+newly acknowledged epoch and re-prove idle from scratch. An already issued
+uncertain retirement never acquires this release/re-arm authority.
 
 An apparently idle shell foreground is insufficient. While input is held, a
 strict local kernel census must identify the same shell PID/start/boot, UID,

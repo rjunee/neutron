@@ -14,6 +14,12 @@ lifecycle also supplies a synchronous admission recheck at retirement. Lost
 replies retain exact retry authority; foreign splits prevent atomic empty
 workspace retirement and survive. Missing legacy receipts are never inferred
 from current live state; their obligation remains visible without blocking wake.
+Independent review identified two pre-retirement recovery gaps: late admission
+now releases the exact hold before restoring readiness; uncertain releases carry
+durable intent and re-hold only the original target/token before re-proving idle
+at the newly acknowledged epoch. Already-issued uncertain retirement cannot
+take that release path. Focused restart/lost-release and actual next-wake
+controls cover these repairs.
 
 The normative item records a separate protected current-shell operator authority
 for legacy cleanup. This public change does not implement that privileged
@@ -21,7 +27,7 @@ actuator or claim deployment cleanup. There are no raw-close fallbacks, lease
 deletions, registry repairs or transcript writes.
 
 Measured locally: 89 focused manager/empty-workspace/lifecycle tests passed;
-the subsequently extended new relic/census/lifecycle group passed all 28 tests.
+the subsequently extended new relic/census/lifecycle group passed all 30 tests.
 The three consuming `open/__tests__/project-build-e2e.test.ts` project/General
 placement fixtures passed (55 assertions; remaining cases filtered). Root and
 Trident type checks and changed-file lint passed. A restrictive mutant restoring
