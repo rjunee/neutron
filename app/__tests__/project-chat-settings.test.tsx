@@ -8,6 +8,67 @@ const { installRouting, resetRouting } = await import('./support/stubs/expo-rout
 const { default: SettingsTab } = await import('../app/projects/[id]/settings');
 afterAll(() => { resetRouting(); resetHarnessGlobals(); });
 
+test('phone existing account selection grants only after Connect and removes only the project connection', async () => {
+  const { ProjectChatSettings } = await import('../components/ProjectChatSettings');
+  const account = { source_row_id: 'fixture-row', account_identity: 'fixture-identity', account: 'seat-1', label: 'Configured fixture' };
+  const writes: { path: string; method: string; body: unknown }[] = [];
+  let connected = false;
+  let refused = true;
+  let finishBeta!: (response: Response) => void;
+  const beta = new Promise<Response>(resolve => { finishBeta = resolve; });
+  const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+    const path = new URL(url).pathname;
+    const method = init?.method ?? 'GET';
+    if (path.endsWith('/settings')) return Response.json({ project: { model_provider: null }, model_provider_resolution: { provider: 'anthropic', source: 'instance' } });
+    if (method !== 'GET') {
+      writes.push({ path, method, body: init?.body ? JSON.parse(String(init.body)) : null });
+      if (init?.body && JSON.parse(String(init.body)).auth) return Response.json({ code: 'existing_account_requires_grant', message: 'Select the existing configured account' }, { status: 400 });
+      if (refused) return Response.json({ code: 'project_account_unavailable', message: 'Select the configured account again' }, { status: 409 });
+      connected = method === 'POST';
+    }
+    if (path.includes('/beta/')) return beta;
+    return Response.json({ available_accounts: [account], override_present: connected,
+      owner_credential: { configured: connected, checked_at: '2026-10-04T00:00:00Z', detail: connected ? 'Project grant connected' : 'Project grant required' } });
+  };
+  const props = { projectId: 'alpha', baseUrl: 'https://example.test', token: 'fixture', fetchImpl };
+  const screen = await mountScreen(createElement(ProjectChatSettings, props));
+  try {
+    expect(writes).toEqual([]);
+    const connect = () => screen.host.querySelector('[aria-label="Connect selected account to project"]') as HTMLButtonElement;
+    expect(connect().disabled).toBe(true);
+    await act(async () => {
+      const input = screen.host.querySelector('[aria-label="Project Codex auth.json"]') as HTMLTextAreaElement;
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!.call(input, 'synthetic-auth');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await screen.press('Connect project Codex');
+    expect(screen.text()).toContain('existing_account_requires_grant');
+    expect(screen.text()).toContain('Select the existing configured account');
+    expect(screen.text()).toContain('Configured fixture');
+    await screen.press('Select Codex account Configured fixture');
+    expect(writes).toHaveLength(1);
+    await screen.press('Connect selected account to project');
+    expect(screen.text()).toContain('Select the configured account again');
+    expect(screen.text()).not.toContain('Project grant connected');
+    refused = false;
+    await screen.press('Select Codex account Configured fixture');
+    await screen.press('Connect selected account to project');
+    expect(writes.at(-1)).toEqual({ path: '/api/app/projects/alpha/codex-auth', method: 'POST', body: { source_row_id: account.source_row_id, account_identity: account.account_identity } });
+    expect(screen.text()).toContain('Project grant connected');
+    await screen.press('Remove project Codex connection');
+    expect(writes.at(-1)).toEqual({ path: '/api/app/projects/alpha/codex-auth', method: 'DELETE', body: null });
+    expect(screen.text()).toContain('Configured fixture');
+    await screen.rerender(createElement(ProjectChatSettings, { ...props, projectId: 'beta' }));
+    expect(screen.text()).not.toContain('Configured fixture');
+    expect(screen.text()).not.toContain('Project grant required');
+    expect(connect().disabled).toBe(true);
+    await act(async () => { finishBeta(Response.json({ message: 'Beta unavailable' }, { status: 503 })); });
+    await screen.settle();
+    expect(screen.text()).toContain('Beta unavailable');
+    expect(screen.text()).not.toContain('Configured fixture');
+  } finally { screen.unmount(); }
+});
+
 test('phone project settings select either provider and connect only the current project credential', async () => {
   const original = globalThis.fetch;
   const providers: Record<string, string | null> = { alpha: null, beta: 'anthropic' };

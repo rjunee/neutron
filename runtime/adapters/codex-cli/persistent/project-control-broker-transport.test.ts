@@ -1,11 +1,14 @@
 import { expect, test } from 'bun:test'
 import { join } from 'node:path'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { createProjectControlStdioTransport } from './project-control-broker-transport.ts'
 
 test('stdio retirement proof waits for the exact spawned process to exit after SIGTERM', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'codex-retirement-'))
   const transport = createProjectControlStdioTransport({
     binary: join(import.meta.dir, 'fixtures', 'retirement-child.ts'), cwd: import.meta.dir,
-    codexHome: import.meta.dir, env: { PATH: process.env.PATH ?? '' },
+    codexHome: home, env: { PATH: process.env.PATH ?? '' },
   })
   try {
     await new Promise<void>((resolve, reject) => transport.listen(value => {
@@ -24,5 +27,5 @@ test('stdio retirement proof waits for the exact spawned process to exit after S
     expect(receipt.code).toBe(0)
     expect(receipt.signal).toBeNull()
     expect(() => process.kill(receipt.pid, 0)).toThrow()
-  } finally { transport.close() }
+  } finally { transport.close(); await transport.exited; rmSync(home, { recursive: true, force: true }) }
 })

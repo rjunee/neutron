@@ -20,7 +20,7 @@ import { ReviewPermissionBusy } from '@neutronai/runtime/adapters/codex-cli/pers
 import { CodexRolloutObserver } from '@neutronai/runtime/adapters/codex-cli/persistent/rollout-observer.ts'
 import { DurableOwnerMcp } from '@neutronai/runtime/adapters/codex-cli/persistent/durable-owner-mcp.ts'
 import type { ResolvedOwnerMcpServer } from '@neutronai/runtime/mcp-servers.ts'
-import { assertOwnerScope, privatePath } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
+import { assertOwnerScope, ownerRoot, privatePath } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 import { abortAccountHandoff, completeAccountHandoff, prepareAccountHandoff, readGeneralOwnerAuthority } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-account-handoff.ts'
 import { probeCodexAccountViability } from '@neutronai/runtime/adapters/codex-cli/persistent/project-account-probe.ts'
 import type { ProjectWorkspaceLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
@@ -56,6 +56,8 @@ function assertWorkProjection(projectId: string, cwd: string, request: BoundedWo
 export interface CodexOwnerProject {
   cwd: string
   codexHome: string
+  ownerRootDirectory?: string
+  projectGrantIdentity?: string
   credentialIdentity: string
   env: NodeJS.ProcessEnv
   /** Fixed instance locator, independent of the selected global credential home. */
@@ -105,7 +107,7 @@ export class CodexOwnerBindings {
   readonly controls = new CodexOwnerControls({
     lookup: async projectId => {
       const entry = await this.owners.get(projectId)
-      if (entry) assertOwnerScope(entry.project.codexHome, projectId)
+      if (entry) assertOwnerScope(ownerRoot(entry.project), projectId)
       return entry?.owner
     },
     authorize: async projectId => {
@@ -116,7 +118,7 @@ export class CodexOwnerBindings {
       const facts = this.readBinding(owner.binding)
       const projectId = this.ownerProjects.get(owner)
       if (projectId === undefined) throw new Error('Codex owner credential home identity changed')
-      assertOwnerScope(facts.codexHome, projectId)
+      assertOwnerScope(ownerRoot(facts), projectId)
       return facts
     },
     busy: projectId => this.retiring.has(projectId) || this.busy.has(projectId) || !!this.builds.get(projectId)?.input || this.decodingBuilds.has(projectId),
@@ -187,7 +189,7 @@ export class CodexOwnerBindings {
       })
       const current = (): boolean => {
         try {
-          assertOwnerScope(project.codexHome, options.projectId)
+          assertOwnerScope(ownerRoot(project), options.projectId)
           const now = this.readBinding(owner.binding)
           return !this.closed && !released && now.bindingRevision === facts.bindingRevision
             && owner.broker.state().phase !== 'closed' && !this.refused.has(options.projectId)
@@ -273,9 +275,9 @@ export class CodexOwnerBindings {
           if (workBytes && bounded) {
             const work = JSON.parse(workBytes)
             if (work.kind === 'bounded-work') {
-              if (ownerWorkBytes(project.codexHome) !== workBytes) throw new Error('Codex work evidence changed during dispatch')
+              if (ownerWorkBytes(ownerRoot(project)) !== workBytes) throw new Error('Codex work evidence changed during dispatch')
               workBytes = JSON.stringify({ ...work, turnId, epoch: owner.broker.state().epoch })
-              writeFileSync(join(project.codexHome, '.neutron-owner-work.json'), workBytes, { mode: 0o600 })
+              writeFileSync(join(ownerRoot(project), '.neutron-owner-work.json'), workBytes, { mode: 0o600 })
             }
           }
           control.receipt(turnId)
@@ -329,10 +331,11 @@ export class CodexOwnerBindings {
     const raw = supplied ?? await this.scopeProject(projectId)
     const current = { ...raw, cwd: realpathSync(raw.cwd), codexHome: realpathSync(raw.codexHome) }
     if (current.cwd !== previous.cwd || current.codexHome !== previous.codexHome
+      || ownerRoot(current) !== ownerRoot(previous) || current.projectGrantIdentity !== previous.projectGrantIdentity
       || !current.credentialIdentity || current.credentialIdentity !== previous.credentialIdentity) {
       throw new Error('Codex owner project credential identity changed; explicit reconciliation required')
     }
-    assertOwnerScope(current.codexHome, projectId)
+    assertOwnerScope(ownerRoot(current), projectId)
   }
 
   constructor(private readonly project: (projectId: string) => Promise<CodexOwnerProject>,
@@ -371,8 +374,8 @@ export class CodexOwnerBindings {
     let pending = this.owners.get(projectId)
     if (pending) return pending.then(async entry => {
       await this.revalidateProject(projectId, entry.project)
-      if (existsSync(join(entry.project.codexHome, '.neutron-owner-work.json'))
-        && ownerWorkBytes(entry.project.codexHome) !== recoveringWork) {
+      if (existsSync(join(ownerRoot(entry.project), '.neutron-owner-work.json'))
+        && ownerWorkBytes(ownerRoot(entry.project)) !== recoveringWork) {
         throw new CodexWorkRecoveryRequired('Codex interrupted host work requires native reconciliation')
       }
       return projectId === null ? this.handoffGeneral(entry) : entry
@@ -383,7 +386,7 @@ export class CodexOwnerBindings {
         const raw = await this.scopeProject(projectId)
         if (!raw.credentialIdentity) throw new Error('Codex owner requires a credential identity')
         const project = { ...raw, cwd: realpathSync(raw.cwd), codexHome: realpathSync(raw.codexHome) }
-        assertOwnerScope(project.codexHome, projectId)
+        assertOwnerScope(ownerRoot(project), projectId)
         const env: Record<string, string> = {}
         for (const [key, value] of Object.entries(project.env)) {
           if (value !== undefined && !CODEX_CLI_AUTH_ENV_VARS.includes(key)) env[key] = value
@@ -392,15 +395,17 @@ export class CodexOwnerBindings {
         beforeOpening?.(project)
         const projectWorkspace = project.projectWorkspace
         openingAttempted = true
-        const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(project.codexHome, 'owner.sock'),
+        const owner = await this.bootstrap({ projectId, binary: 'codex', socketPath: join(ownerRoot(project), 'owner.sock'),
           cwd: project.cwd, codexHome: project.codexHome, env,
+          ...(project.ownerRootDirectory ? { ownerRootDirectory: project.ownerRootDirectory } : {}),
+          ...(project.projectGrantIdentity ? { projectGrantIdentity: project.projectGrantIdentity } : {}),
           ...(projectWorkspace === undefined ? {} : { projectWorkspace,
             ...(this.projectWorkspaceHost === undefined ? {} : { projectWorkspaceHost: this.projectWorkspaceHost }) }),
           ...(projectId === null ? { generalAuthorityPath: project.generalAuthorityPath } : {}) })
         try {
           const facts = this.readBinding(owner.binding)
-          if (existsSync(join(project.codexHome, '.neutron-owner-work.json'))) {
-            const bytes = ownerWorkBytes(project.codexHome)
+          if (existsSync(join(ownerRoot(project), '.neutron-owner-work.json'))) {
+            const bytes = ownerWorkBytes(ownerRoot(project))
             if (recoveringWork !== bytes) {
               if (JSON.parse(bytes)?.kind === 'bounded-work') throw new CodexWorkRecoveryRequired('Codex interrupted host work requires native reconciliation')
               throw new Error('Codex interrupted host work requires native reconciliation')
@@ -410,7 +415,8 @@ export class CodexOwnerBindings {
           // Active work after restart has no reconstructed host consumer. Never
           // replay a prompt or approval, and never create a replacement owner.
           if (owner.broker.state().phase !== 'idle') throw new Error('Codex surviving turn requires native reconciliation')
-          if (this.closed || facts.cwd !== project.cwd || facts.codexHome !== project.codexHome) {
+          if (this.closed || facts.cwd !== project.cwd || facts.codexHome !== project.codexHome
+            || ownerRoot(facts) !== ownerRoot(project) || facts.projectGrantIdentity !== project.projectGrantIdentity) {
             throw new Error('Codex factory returned a foreign or closed project binding')
           }
           this.ownerFacts.set(owner, facts)
@@ -544,9 +550,9 @@ export class CodexOwnerBindings {
       this.retiring.add(projectId)
       try {
         const project = await this.scopeProject(projectId)
-        assertOwnerScope(project.codexHome, projectId)
+        assertOwnerScope(ownerRoot(project), projectId)
         const general = projectId === null && project.generalAuthorityPath ? readGeneralOwnerAuthority(project.generalAuthorityPath) : undefined
-        const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd, general?.rootDirectory)
+        const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd, general?.rootDirectory ?? ownerRoot(project))
         if (['.neutron-owner-launch.json', '.neutron-owner-helper.json', '.neutron-owner-authority.json', '.neutron-owner-retiring.json']
           .some(file => durableOwnerPathExists(join(generation.stateDirectory, file)))) {
           return { status: 'unknown', reason: 'Durable Codex owner requires attachment before retirement' }
@@ -609,7 +615,7 @@ export class CodexOwnerBindings {
           this.readBinding(cached.binding)
           await refreshOwner(cached)
           if (cached.broker.state().phase === 'closed') throw new Error('Codex owner frontend is closed')
-          if (durableOwnerPathExists(join(project.codexHome, '.neutron-owner-work.json'))) {
+          if (durableOwnerPathExists(join(ownerRoot(project), '.neutron-owner-work.json'))) {
             throw new CodexWorkRecoveryRequired('Codex interrupted host work requires native reconciliation')
           }
           return { status: 'adopted' }
@@ -620,7 +626,7 @@ export class CodexOwnerBindings {
             || this.controls.isSwitching(projectId) || this.decodingBuilds.has(projectId)
             || this.builds.get(projectId)?.input || this.reviews.has(projectId)
             || this.reviewQueue.has(projectId) || this.buildObservations.has(projectId)
-            || durableOwnerPathExists(join(project.codexHome, '.neutron-owner-work.json'))) throw error
+            || durableOwnerPathExists(join(ownerRoot(project), '.neutron-owner-work.json'))) throw error
           this.retiring.add(projectId)
           try {
             await cached.close()
@@ -635,7 +641,7 @@ export class CodexOwnerBindings {
         }
       }
       const general = projectId === null && project.generalAuthorityPath ? readGeneralOwnerAuthority(project.generalAuthorityPath) : undefined
-      const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd, general?.rootDirectory)
+      const generation = locateDurableOwnerGeneration(project.codexHome, project.cwd, general?.rootDirectory ?? ownerRoot(project))
       if (!durableOwnerPathExists(join(generation.stateDirectory, '.neutron-owner-launch.json'))
         && !(generation.resume && 'kind' in generation.resume.receipt && generation.resume.receipt.kind === 'crash')) {
         return { status: 'skipped' }
@@ -658,12 +664,12 @@ export class CodexOwnerBindings {
     // Quarantine must remain durable even when a lost helper response closes its
     // live attestation. This is the already-attested home, never a new authority.
     const facts = this.ownerFacts.get(owner) ?? this.readBinding(owner.binding)
-    const path = join(facts.codexHome, '.neutron-owner-work.json')
+    const path = join(ownerRoot(facts), '.neutron-owner-work.json')
     if (bounded && existsSync(path)) throw new Error('Codex interrupted host work requires native reconciliation')
     if (!existsSync(path)) writeFileSync(path, JSON.stringify(bounded
       ? { version: 1, kind: 'bounded-work', ...bounded, facts, turnId: null, epoch: null }
       : { threadId: facts.threadId, bindingRevision: facts.bindingRevision }), { flag: 'wx', mode: 0o600 })
-    return ownerWorkBytes(facts.codexHome)
+    return ownerWorkBytes(ownerRoot(facts))
   }
 
   /** Reconcile only the exact recorded generation and request. Native history
@@ -685,7 +691,7 @@ export class CodexOwnerBindings {
       if (this.closed || this.retiring.has(projectId) || this.busy.has(projectId) || this.refused.has(projectId)
         || !isDeepStrictEqual(this.readBinding(owner.binding), work.facts)
         || state.phase !== 'idle' || state.unresolved !== null || state.activeTurnId !== null
-        || state.epoch !== work.epoch || ownerWorkBytes(project.codexHome) !== bytes) {
+        || state.epoch !== work.epoch || ownerWorkBytes(ownerRoot(project)) !== bytes) {
         throw new Error('Codex work recovery authority changed or remains unresolved')
       }
     }
@@ -732,7 +738,7 @@ export class CodexOwnerBindings {
 
   private finishWork(projectId: string | null, owner: CodexOwnerBootstrap): void {
     if (!('refreshState' in owner) || this.refused.has(projectId)) return
-    const path = join(this.readBinding(owner.binding).codexHome, '.neutron-owner-work.json')
+    const path = join(ownerRoot(this.readBinding(owner.binding)), '.neutron-owner-work.json')
     if (existsSync(path)) unlinkSync(path)
   }
 
@@ -780,12 +786,12 @@ export class CodexOwnerBindings {
         finally { admissionTimer.abort() }
         if (this.retiring.has(projectId) || this.closed || this.refused.has(projectId)) return { kind: 'unknown', detail: 'Codex owner requires native reconciliation' }
         if (this.busy.has(projectId)) return { kind: 'unknown', detail: 'Codex owner has an active host turn' }
-        if (existsSync(join(project.codexHome, '.neutron-owner-work.json'))) {
+        if (existsSync(join(ownerRoot(project), '.neutron-owner-work.json'))) {
           if (recovery) {
             const timer = new AbortController()
             const stopped = AbortSignal.any([signal, timer.signal])
             try {
-              const bytes = ownerWorkBytes(project.codexHome)
+              const bytes = ownerWorkBytes(ownerRoot(project))
               return await Promise.race([
                 (async () => {
                   const proof = await this.inspectWork(projectId, project, request, bytes, stopped)
@@ -795,8 +801,8 @@ export class CodexOwnerBindings {
                   // No await between the final byte comparison and removal. A
                   // replacement marker is never this request's to settle.
                   stopped.throwIfAborted()
-                  if (ownerWorkBytes(project.codexHome) !== bytes) throw new Error('Codex work recovery marker was replaced')
-                  unlinkSync(join(project.codexHome, '.neutron-owner-work.json'))
+                  if (ownerWorkBytes(ownerRoot(project)) !== bytes) throw new Error('Codex work recovery marker was replaced')
+                  unlinkSync(join(ownerRoot(project), '.neutron-owner-work.json'))
                   return outcome
                 })(),
                 delay(Math.max(1, deadline - Date.now()), undefined, { signal: stopped })
@@ -809,7 +815,7 @@ export class CodexOwnerBindings {
           return { kind: 'unknown', detail: 'Codex interrupted host work requires native reconciliation' }
         }
         const owner = this.resolvedOwners.get(projectId)
-        if (!owner && existsSync(join(project.codexHome, '.neutron-owner-launch.json'))) {
+        if (!owner && existsSync(join(ownerRoot(project), '.neutron-owner-launch.json'))) {
           return { kind: 'unknown', detail: 'Existing Codex owner must be reattached before build admission' }
         }
         if (owner) {

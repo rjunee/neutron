@@ -21,13 +21,14 @@
  */
 
 import { accessSync, constants, realpathSync, statSync } from 'node:fs'
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { delimiter, join } from 'node:path'
 
 import type { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import type { CredentialScope } from '@neutronai/project-credentials/store.ts'
 import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+import { acquireCodexAccountWriteLease, withCodexAccountWriteLease } from '@neutronai/runtime/adapters/codex-cli/account-writer-lock.ts'
 import {
   codexProbeSubject,
   deriveCodexStatus,
@@ -40,6 +41,7 @@ import {
   type CodexStatusDetail,
 } from './codex-auth.ts'
 import { ownedCodexProjectHome } from './codex-project-owner.ts'
+import { readCodexProjectGrant, type CodexProjectGrant } from './codex-project-grant.ts'
 import { probeCodexSeat, type CodexProbeDeps, type CodexProbeOutcome } from './codex-probe.ts'
 import {
   DEFAULT_SLOT,
@@ -275,6 +277,17 @@ export interface CodexOwnerCredentialStatus {
   detail: string
 }
 
+export interface CodexProjectOwnerCredential {
+  codexHome: string
+  credentialIdentity: string
+  ownerRootDirectory?: string
+  projectGrantIdentity?: string
+}
+
+function accountIdentity(account: string): string {
+  return createHash('sha256').update(JSON.stringify(['chatgpt-account', account])).digest('hex')
+}
+
 class CodexOwnerCredentialError extends Error {}
 
 export interface CodexCredentialServiceDeps {
@@ -448,7 +461,7 @@ export class CodexCredentialService {
     target?: CodexTarget,
     opts?: { label?: string | null },
   ): Promise<CodexConnectResult> {
-    return this.store.codexCustody.run(owner_slug, () => this.connectAdmitted(owner_slug, pasted, target, opts))
+    return this.serializeAccountMutation(owner_slug, () => this.connectAdmitted(owner_slug, pasted, target, opts))
   }
 
   private async connectAdmitted(owner_slug: OwnerHandle, pasted: unknown, target?: CodexTarget,
@@ -458,27 +471,35 @@ export class CodexCredentialService {
     if (!v.ok || v.normalized === undefined) {
       return { ok: false, mode: v.mode, ...(v.code !== undefined ? { code: v.code } : {}), ...(v.error !== undefined ? { error: v.error } : {}) }
     }
+    const duplicate = this.duplicateCustody(owner_slug, v.normalized, project_id, CODEX_CREDENTIAL_SERVICE)
+    if (duplicate) {
+      return { ok: false, code: scope === 'project' ? 'existing_account_requires_grant' : 'duplicate_account',
+        error: 'This Codex account already has credential custody; select its configured account or reconcile custody instead of copying credentials' }
+    }
     // An owner-supplied name wins over the generic description. Without this the
     // first seat was the ONE seat that could not be named: the label the owner
     // typed was accepted by the surface, carried through `connectAccount`, and
     // then dropped on the floor by this delegation.
     const supplied = typeof opts?.label === 'string' && opts.label.trim().length > 0 ? opts.label.trim() : null
-    this.homeFor(scope, project_id)
-    await this.store.setCodex(owner_slug, {
-      service: CODEX_CREDENTIAL_SERVICE,
-      plaintext: v.normalized,
-      scope,
-      project_id,
-      label:
-        supplied ??
-        (scope === 'project'
-          ? 'ChatGPT subscription (codex review — project override)'
-          : 'ChatGPT subscription (codex cross-model review)'),
-      expires_at: null,
-    })
-    const { path } = materializeCodexAuth({ codexHome: this.homeFor(scope, project_id), authJson: v.normalized })
-    const status = deriveCodexStatus(v.normalized, { materialized: true, now: this.now })
-    return { ok: true, mode: 'subscription', status: status.status, scope, path }
+    const home = this.homeFor(scope, project_id)
+    const lease = acquireCodexAccountWriteLease(home)
+    try {
+      await this.store.setCodex(owner_slug, {
+        service: CODEX_CREDENTIAL_SERVICE,
+        plaintext: v.normalized,
+        scope,
+        project_id,
+        label:
+          supplied ??
+          (scope === 'project'
+            ? 'ChatGPT subscription (codex review — project override)'
+            : 'ChatGPT subscription (codex cross-model review)'),
+        expires_at: null,
+      })
+      const { path } = materializeCodexAuth({ codexHome: home, authJson: v.normalized })
+      const status = deriveCodexStatus(v.normalized, { materialized: true, now: this.now })
+      return { ok: true, mode: 'subscription', status: status.status, scope, path }
+    } finally { lease.close() }
   }
 
   /**
@@ -494,6 +515,14 @@ export class CodexCredentialService {
 
   private statusAdmitted(owner_slug: OwnerHandle, target?: CodexTarget): CodexStatusResult {
     const project_id = (target?.project_id ?? '').trim()
+    const project = project_id ? this.store.resolveProject(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE) : null
+    if (project && readCodexProjectGrant(project.plaintext)) {
+      const owner_credential = this.projectOwnerCredentialStatus(owner_slug, project_id)
+      if (owner_credential.configured !== true) return { ...deriveCodexStatus(null, { materialized: false, now: this.now }), scope: 'project', override_present: true, owner_credential }
+      const credential = this.inspectProjectOwnerCredential(owner_slug, project_id)
+      return { ...deriveCodexStatus(readMaterializedAuth(credential.home) ?? credential.plaintext, { materialized: true, now: this.now }),
+        scope: 'project', override_present: true, owner_credential }
+    }
     const resolved = this.store.resolve(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     const stored = resolved?.plaintext ?? null
     const scope = resolved?.scope ?? null
@@ -528,12 +557,29 @@ export class CodexCredentialService {
   /** Native owners require an explicit project grant and a stable subscription identity.
    * Reviewer rotation and inherited global seats cannot authorize a project owner. */
   private inspectProjectOwnerCredential(owner: OwnerHandle, projectId: string): {
-    home: string; plaintext: string; credentialIdentity: string
+    home: string; plaintext: string; credentialIdentity: string; ownerRootDirectory: string; projectGrantIdentity: string
+    sourceService: string; sourceProjectId: string
   } {
     if (!/^[A-Za-z0-9_.-]{1,128}$/.test(projectId)) throw new CodexOwnerCredentialError('Codex chat requires a project')
     const stored = this.store.resolveProject(owner, projectId, CODEX_CREDENTIAL_SERVICE)
     if (!stored) throw new CodexOwnerCredentialError('Connect a Codex subscription to this project to use Codex chat')
     const home = ownedCodexProjectHome(this.codexHome, projectId)
+    const grant = readCodexProjectGrant(stored.plaintext)
+    if (grant) {
+      const source = this.projectAccounts(owner).find(account => account.source_row_id === grant.source_row_id
+        && account.account_identity === grant.account_identity)
+      if (!source) throw new CodexOwnerCredentialError('The project Codex account grant is no longer available')
+      const credential = this.resolveGeneralOwnerCredential(owner, this.slotHome(source.account))
+      const slot = this.rotation.listSlots(owner).find(slot => slot.slot === source.account)
+      const disk = readMaterializedAuth(credential.codexHome)!
+      if (slot?.cooling_reason === 'unauthorized' || this.cachedVerdict(owner, source.account, disk) === 'revoked') {
+        throw new CodexOwnerCredentialError('The project Codex account has been revoked')
+      }
+      const sourceService = codexSlotService(source.account)
+      return { home: credential.codexHome, plaintext: this.store.resolve(owner, undefined, sourceService)!.plaintext,
+        credentialIdentity: credential.credentialIdentity, ownerRootDirectory: home,
+        projectGrantIdentity: grant.grant_id, sourceService, sourceProjectId: '' }
+    }
     const storedAccount = readAccountId(stored.plaintext)
     if (!validateCodexSubscriptionAuth(stored.plaintext, this.now).ok || !storedAccount) {
       throw new CodexOwnerCredentialError('The project Codex credential requires a subscription account identity')
@@ -551,7 +597,9 @@ export class CodexCredentialService {
       throw new CodexOwnerCredentialError(status.detail ?? 'The project Codex credential is unavailable')
     }
     return { home, plaintext: stored.plaintext,
-      credentialIdentity: createHash('sha256').update(JSON.stringify(['chatgpt-account', storedAccount])).digest('hex') }
+      credentialIdentity: accountIdentity(storedAccount), ownerRootDirectory: home,
+      projectGrantIdentity: this.store.getMeta(owner, projectId, CODEX_CREDENTIAL_SERVICE)!.id,
+      sourceService: CODEX_CREDENTIAL_SERVICE, sourceProjectId: projectId }
   }
 
   projectOwnerCredentialStatus(owner: OwnerHandle, projectId: string): CodexOwnerCredentialStatus {
@@ -570,16 +618,73 @@ export class CodexCredentialService {
     }
   }
 
-  resolveProjectOwnerCredential(owner: OwnerHandle, projectId: string): { codexHome: string; credentialIdentity: string } {
+  resolveProjectOwnerCredential(owner: OwnerHandle, projectId: string): CodexProjectOwnerCredential {
     return this.store.codexCustody.runSync(owner, () => this.resolveProjectOwnerCredentialAdmitted(owner, projectId))
   }
 
-  private resolveProjectOwnerCredentialAdmitted(owner: OwnerHandle, projectId: string): { codexHome: string; credentialIdentity: string } {
+  private resolveProjectOwnerCredentialAdmitted(owner: OwnerHandle, projectId: string): CodexProjectOwnerCredential {
     const credential = this.inspectProjectOwnerCredential(owner, projectId)
-    this.selfHealAndHarvestBack(owner, CODEX_CREDENTIAL_SERVICE, credential.home, credential.plaintext, {
-      scope: 'project', project_id: projectId,
+    this.selfHealAndHarvestBack(owner, credential.sourceService, credential.home, credential.plaintext, {
+      scope: credential.sourceProjectId ? 'project' : 'global', project_id: credential.sourceProjectId,
     })
-    return { codexHome: credential.home, credentialIdentity: credential.credentialIdentity }
+    return { codexHome: credential.home, credentialIdentity: credential.credentialIdentity,
+      ownerRootDirectory: credential.ownerRootDirectory, projectGrantIdentity: credential.projectGrantIdentity }
+  }
+
+  /** Refuse a second materialized authority for the same account, in any scope. */
+  private duplicateCustody(owner: OwnerHandle, plaintext: string, projectId: string, service: string): boolean {
+    const account = readAccountId(plaintext)
+    if (!account) return false
+    return this.store.listCodexCustody(owner).some(source => {
+      if (source.project_id === projectId && source.service === service) return false
+      if (readCodexProjectGrant(source.plaintext)) return false
+      const slot = codexServiceSlot(source.service)
+      if (slot === null) return false
+      const home = source.scope === 'project' ? ownedCodexProjectHome(this.codexHome, source.project_id) : this.slotHome(slot)
+      const disk = readMaterializedAuth(home)
+      return readAccountId(source.plaintext) === account || (disk !== null && readAccountId(disk) === account)
+    })
+  }
+
+  /** Available owner-bound accounts; selection never transfers authentication bytes. */
+  projectAccounts(owner: OwnerHandle): Array<{ source_row_id: string; account: string; label: string | null; account_identity: string }> {
+    return this.store.listGlobal(owner).flatMap(meta => {
+      const account = codexServiceSlot(meta.service)
+      if (account === null) return []
+      const stored = this.store.resolve(owner, undefined, meta.service)
+      const identity = stored && readAccountId(stored.plaintext)
+      return identity ? [{ source_row_id: meta.id, account, label: meta.label, account_identity: accountIdentity(identity) }] : []
+    })
+  }
+
+  async grantProjectAccount(owner: OwnerHandle, projectId: string, input: {
+    source_row_id: string; account_identity: string; expires_at?: string | null
+  }): Promise<CodexConnectResult & { grant?: CodexProjectGrant }> {
+    return this.serializeAccountMutation(owner, async () => {
+      const source = this.projectAccounts(owner).find(account => account.source_row_id === input.source_row_id
+        && account.account_identity === input.account_identity)
+      if (!source) return { ok: false, code: 'project_account_unavailable', error: 'Select a currently configured Codex account' }
+      try {
+        this.resolveGeneralOwnerCredential(owner, this.slotHome(source.account))
+        if (this.rotation.listSlots(owner).some(slot => slot.slot === source.account && slot.cooling_reason === 'unauthorized')) {
+          throw new CodexOwnerCredentialError('The selected Codex account has been revoked')
+        }
+      } catch (error) {
+        if (!(error instanceof CodexOwnerCredentialError)) throw error
+        return { ok: false, code: 'project_account_unavailable', error: error.message }
+      }
+      if (input.expires_at !== undefined && input.expires_at !== null
+        && (!Number.isFinite(Date.parse(input.expires_at)) || Date.parse(input.expires_at) <= this.now())) {
+        return { ok: false, code: 'invalid_grant_expiry', error: 'Project grant expiry must be a future timestamp' }
+      }
+      const home = ownedCodexProjectHome(this.codexHome, projectId)
+      if (readMaterializedAuth(home) !== null) return { ok: false, code: 'project_custody_conflict', error: 'Existing project credentials require explicit custody reconciliation' }
+      const grant: CodexProjectGrant = { kind: 'codex-project-grant', version: 1, grant_id: randomUUID(),
+        source_row_id: source.source_row_id, account_identity: source.account_identity }
+      await this.store.setCodex(owner, { service: CODEX_CREDENTIAL_SERVICE, scope: 'project', project_id: projectId,
+        plaintext: JSON.stringify(grant), label: source.label, expires_at: input.expires_at ?? null })
+      return { ok: true, status: 'connected', mode: 'subscription', scope: 'project', grant }
+    })
   }
 
   /** General uses the selected global seat in place. Owner admission never
@@ -650,10 +755,14 @@ export class CodexCredentialService {
       // Only a REAL override is a separate seat; a fallback to the global default
       // is the `default` slot, probed by the loop below.
       if (resolved !== null && resolved.scope === 'project') {
+        if (readCodexProjectGrant(resolved.plaintext)) {
+          // Its canonical account is probed by the global loop below.
+        } else {
         const home = ownedCodexProjectHome(this.codexHome, project_id ?? '')
         jobs.push(
           this.probeSeat(owner_slug, projectSeatKey(project_id), this.liveAuthFor(home, resolved.plaintext), null),
         )
+        }
       }
     }
     for (const seat of this.syncSlots(owner_slug)) {
@@ -867,16 +976,25 @@ export class CodexCredentialService {
    * project overrides intact.
    */
   async disconnect(owner_slug: OwnerHandle, target?: CodexTarget): Promise<{ ok: boolean }> {
-    return this.store.codexCustody.run(owner_slug, () => this.disconnectAdmitted(owner_slug, target))
+    return this.serializeAccountMutation(owner_slug, () => this.disconnectAdmitted(owner_slug, target))
   }
 
   private async disconnectAdmitted(owner_slug: OwnerHandle, target?: CodexTarget): Promise<{ ok: boolean }> {
     const { scope, project_id } = this.normalizeTarget(target)
-    if (scope === 'global') return this.removeAccount(owner_slug, DEFAULT_SLOT)
-    this.homeFor(scope, project_id)
-    const removed = await this.store.deleteCodex(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
-    removeCodexAuth(this.homeFor(scope, project_id))
-    return { ok: removed }
+    if (scope === 'global') return this.removeAccountSerialized(owner_slug, DEFAULT_SLOT)
+    const home = this.homeFor(scope, project_id)
+    const row = this.store.listCodexCustody(owner_slug).find((row) => row.project_id === project_id && row.service === CODEX_CREDENTIAL_SERVICE)
+    // Revoking metadata never mutates the account's native auth, and remains
+    // available while its native writer is busy (including an expired grant).
+    if (row && readCodexProjectGrant(row.plaintext)) {
+      return { ok: await this.store.deleteCodex(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE) }
+    }
+    const lease = acquireCodexAccountWriteLease(home)
+    try {
+      const removed = await this.store.deleteCodex(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
+      removeCodexAuth(home)
+      return { ok: removed }
+    } finally { lease.close() }
   }
 
   /**
@@ -898,6 +1016,7 @@ export class CodexCredentialService {
     // nothing about the override can be perturbed by pool state.
     const override = this.store.resolve(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
     if (override !== null && override.scope === 'project') {
+      if (readCodexProjectGrant(override.plaintext)) return this.inspectProjectOwnerCredential(owner_slug, project_id!).home
       const home = ownedCodexProjectHome(this.codexHome, project_id ?? '')
       this.selfHealAndHarvestBack(owner_slug, CODEX_CREDENTIAL_SERVICE, home, override.plaintext, {
         scope: 'project',
@@ -1139,7 +1258,11 @@ export class CodexCredentialService {
   ): void {
     const onDisk = readMaterializedAuth(home)
     if (onDisk === null) {
-      materializeCodexAuth({ codexHome: home, authJson: storedPlaintext })
+      withCodexAccountWriteLease(home, () => {
+        // The first observation preceded admission; never overwrite a native
+        // refresh which completed before we acquired the account lease.
+        if (readMaterializedAuth(home) === null) materializeCodexAuth({ codexHome: home, authJson: storedPlaintext })
+      })
       return
     }
     let diskRefresh: unknown
@@ -1169,22 +1292,28 @@ export class CodexCredentialService {
     if (existing === null || existing.scope !== target.scope) return
     fireAndForget(
       'codex_credential_harvest_back',
-      this.store
-        .setCodex(owner_slug, {
+      this.serializeAccountMutation(owner_slug, async () => {
+        const current = this.store.getMeta(owner_slug, target.project_id, service)
+        const resolved = target.scope === 'project'
+          ? this.store.resolveProject(owner_slug, target.project_id, service)
+          : this.store.resolve(owner_slug, undefined, service)
+        // A queued refresh is not a grant. Removal/recreation, explicit account
+        // replacement or expiry while waiting cannot be undone by old bytes.
+        if (!current || current.id !== existing.id || current.scope !== target.scope || !resolved
+          || resolved.plaintext !== storedPlaintext
+          || readAccountId(resolved.plaintext) !== storedAccount
+          || !shouldHarvestBack(diskRefresh, (JSON.parse(resolved.plaintext) as { last_refresh?: unknown }).last_refresh)) return
+        await this.store.setCodex(owner_slug, {
           service,
-          plaintext: validated.normalized,
+          plaintext: validated.normalized!,
           scope: target.scope,
           project_id: target.project_id,
-          label: existing.label,
-          expires_at: existing.expires_at,
+          label: current.label,
+          expires_at: current.expires_at,
         })
-        .then(() => {
-          // Length only — never the bundle, and never any field of it.
-          this.log('codex_credential_harvested_back', {
-            service,
-            bytes: validated.normalized?.length ?? 0,
-          })
-        }),
+        // Length only — never the bundle, and never any field of it.
+        this.log('codex_credential_harvested_back', { service, bytes: validated.normalized?.length ?? 0 })
+      }),
       (err: unknown) => {
         this.log('codex_credential_harvest_back_failed', {
           service,
@@ -1464,7 +1593,7 @@ export class CodexCredentialService {
     // replaced a seat.
     const replaced = this.store.getMeta(owner_slug, '', codexSlotService(requested)) !== null
     if (requested === DEFAULT_SLOT) {
-      const result = await this.connect(owner_slug, pasted, undefined, { label: opts?.label ?? null })
+      const result = await this.connectAdmitted(owner_slug, pasted, undefined, { label: opts?.label ?? null })
       if (result.ok) {
         this.rotation.upsertSlot(owner_slug, DEFAULT_SLOT, opts?.label ?? null)
         // THE FIRST SEAT RECONNECTS LIKE EVERY OTHER SEAT. This branch delegates
@@ -1487,23 +1616,29 @@ export class CodexCredentialService {
         slot: requested,
       }
     }
-    await this.store.setCodex(owner_slug, {
-      service: codexSlotService(requested),
-      plaintext: v.normalized,
-      scope: 'global',
-      project_id: '',
-      label: opts?.label ?? `ChatGPT subscription (codex seat '${requested}')`,
-      expires_at: null,
-    })
-    const { path } = materializeCodexAuth({ codexHome: this.slotHome(requested), authJson: v.normalized })
-    this.rotation.upsertSlot(owner_slug, requested, opts?.label ?? null)
-    // A reconnect clears an `unauthorized` cooldown; waiting alone cannot.
-    // Explicit operator release and successful probes can also clear it.
-    // Reconnection additionally stamps the seat
-    // so the harvest ignores the previous occupant's rollouts.
-    this.rotation.markConnected(owner_slug, requested, this.now())
-    const status = deriveCodexStatus(v.normalized, { materialized: true, now: this.now })
-    return { ok: true, mode: 'subscription', status: status.status, scope: 'global', path, slot: requested, replaced }
+    if (this.duplicateCustody(owner_slug, v.normalized, '', codexSlotService(requested))) {
+      return { ok: false, code: 'duplicate_account', error: 'This account already has Codex credential custody', slot: requested }
+    }
+    const lease = acquireCodexAccountWriteLease(this.slotHome(requested))
+    try {
+      await this.store.setCodex(owner_slug, {
+        service: codexSlotService(requested),
+        plaintext: v.normalized,
+        scope: 'global',
+        project_id: '',
+        label: opts?.label ?? `ChatGPT subscription (codex seat '${requested}')`,
+        expires_at: null,
+      })
+      const { path } = materializeCodexAuth({ codexHome: this.slotHome(requested), authJson: v.normalized })
+      this.rotation.upsertSlot(owner_slug, requested, opts?.label ?? null)
+      // A reconnect clears an `unauthorized` cooldown; waiting alone cannot.
+      // Explicit operator release and successful probes can also clear it.
+      // Reconnection additionally stamps the seat
+      // so the harvest ignores the previous occupant's rollouts.
+      this.rotation.markConnected(owner_slug, requested, this.now())
+      const status = deriveCodexStatus(v.normalized, { materialized: true, now: this.now })
+      return { ok: true, mode: 'subscription', status: status.status, scope: 'global', path, slot: requested, replaced }
+    } finally { lease.close() }
   }
 
   /**
@@ -1628,12 +1763,19 @@ export class CodexCredentialService {
    */
   async disconnectAllAccounts(owner_slug: OwnerHandle): Promise<{ ok: boolean; removed: string[] }> {
     return this.serializeAccountMutation(owner_slug, async () => {
-      const removed: string[] = []
-      for (const slot of this.connectedSlots(owner_slug)) {
-        const { ok } = await this.removeAccountSerialized(owner_slug, slot)
-        if (ok) removed.push(slot)
-      }
-      return { ok: removed.length > 0, removed }
+      const slots = this.connectedSlots(owner_slug)
+      const leases: ReturnType<typeof acquireCodexAccountWriteLease>[] = []
+      try {
+        // Admit the whole requested pool before deleting any row. A busy later
+        // seat must not turn an unqualified disconnect into a partial success.
+        for (const slot of slots) leases.push(acquireCodexAccountWriteLease(this.slotHome(slot)))
+        const removed: string[] = []
+        for (const slot of slots) {
+          const { ok } = await this.removeAccountWithLease(owner_slug, slot)
+          if (ok) removed.push(slot)
+        }
+        return { ok: removed.length > 0, removed }
+      } finally { for (const lease of leases.reverse()) lease.close() }
     })
   }
 
@@ -1656,6 +1798,13 @@ export class CodexCredentialService {
   private async removeAccountSerialized(owner_slug: OwnerHandle, slot: string): Promise<{ ok: boolean }> {
     const normalized = normalizeSlot(slot)
     if (normalized === null) return { ok: false }
+    const lease = acquireCodexAccountWriteLease(this.slotHome(normalized))
+    try { return await this.removeAccountWithLease(owner_slug, normalized) }
+    finally { lease.close() }
+  }
+
+  /** Caller holds the corresponding canonical account's write lease. */
+  private async removeAccountWithLease(owner_slug: OwnerHandle, normalized: string): Promise<{ ok: boolean }> {
     const removed = await this.store.deleteCodex(owner_slug, '', codexSlotService(normalized))
     removeCodexAuth(this.slotHome(normalized))
     this.rotation.removeSlot(owner_slug, normalized)
@@ -1679,7 +1828,9 @@ export class CodexCredentialService {
     // global default), so a stray project override never materializes here.
     const resolved = this.store.resolve(owner_slug, undefined, CODEX_CREDENTIAL_SERVICE)
     if (resolved === null) return false
-    materializeCodexAuth({ codexHome: this.codexHome, authJson: resolved.plaintext })
+    withCodexAccountWriteLease(this.codexHome, () => {
+      if (readMaterializedAuth(this.codexHome) === null) materializeCodexAuth({ codexHome: this.codexHome, authJson: resolved.plaintext })
+    })
     return true
   }
 }

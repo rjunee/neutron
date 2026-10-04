@@ -7,6 +7,16 @@ export interface ProjectChatSettings {
 }
 export interface ProjectCodexStatus {
   owner_credential?: { configured: boolean | null; checked_at: string; detail: string }
+  available_accounts?: ProjectCodexAccount[]
+  override_present?: boolean
+  grant?: { kind: 'codex-project-grant'; version: 1; grant_id: string; source_row_id: string; account_identity: string }
+}
+/** Public account metadata; selecting it grants access without copying auth. */
+export interface ProjectCodexAccount {
+  source_row_id: string
+  account: string
+  label: string | null
+  account_identity: string
 }
 export const CHAT_PROVIDER_CHOICES = [
   { value: 'inherit', label: 'Follow instance' },
@@ -50,6 +60,18 @@ export class ProjectChatSettingsClient extends GatewayHttpClient {
 
   async connectCredential(projectId: string, auth: string): Promise<ProjectCodexStatus> {
     await this.req(this.path(projectId, 'codex-auth'), { method: 'POST', body: { auth } })
+    return this.credential(projectId)
+  }
+
+  async grantCredential(projectId: string, account: Pick<ProjectCodexAccount, 'source_row_id' | 'account_identity'>): Promise<ProjectCodexStatus> {
+    await this.req(this.path(projectId, 'codex-auth'), { method: 'POST', body: {
+      source_row_id: account.source_row_id, account_identity: account.account_identity,
+    } })
+    return this.credential(projectId)
+  }
+
+  async disconnectCredential(projectId: string): Promise<ProjectCodexStatus> {
+    await this.req(this.path(projectId, 'codex-auth'), { method: 'DELETE' })
     return this.credential(projectId)
   }
 }

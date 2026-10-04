@@ -342,6 +342,38 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-10-04 — Explicit Codex project grants reference configured accounts.
+
+A project can explicitly select an already configured subscription through its
+authenticated settings route. The project credential stores only a source row
+identity, stable account digest, grant version and expiry. A global reviewer
+connection alone still grants no project-owner authority. Existing independent
+project credentials retain their pinned account; pasting an already configured
+global account into a project is refused instead of creating another refresh copy.
+
+Both credential forms resolve to one native owner contract: canonical account
+home, project owner state directory, account identity and explicit grant identity.
+Native Codex uses the account home in place. Neutron keeps each project's full
+ownership marker, journals, work records and control sockets in its own state
+directory. Grant replacement or removal/recreation invalidates retained owners;
+same-account refresh preserves identity and finite expiry. This narrows the
+2026-09-14 directory rule's coupling of credentials and project state, while
+retaining its full-project marker requirement. Acceptance remains in
+`docs/spec-items/instance-project-provider-resolution.md`.
+
+Explicit grants do not authorize parallel native refresh writers for one account.
+An account already held by another native consumer must refuse new admission
+visibly; distinct accounts remain independent. Every consuming launch and every
+auth-file mutation must participate in the same account-lifetime exclusion before
+this reference path can be deployed.
+This supersedes the 2026-09-12 inference that sharing an account implies no
+account contention: native refresh coordination is process-local. The kernel
+lease must survive in the actual native executable after helper/gateway death;
+credential mutation takes the same short lease. Existing unwrapped consumers
+are refused by census, but later unwrapped launches cannot be prevented by that
+snapshot. External consumers must use the admission launcher or be retired before
+full live exclusion is claimed.
+
 ### 2026-09-30 — Native Claude requests use the registered host quota relay.
 
 A provisioned host route makes the existing native Claude CLI send requests over

@@ -10,6 +10,7 @@ import type {
 import { detectCodexScreenPrompt, type CodexScreenPrompt } from './screen-prompts.ts'
 import { NativeModelPicker } from '../../native-model-picker.ts'
 import { ReplModelError, type ReplModelState, type ReplModelSwitch } from '../../../repl-model.ts'
+import { codexAccountWriterCommand, resolveCodexNativeBinary } from '../account-writer-lock.ts'
 
 export type CodexSessionRecovery = 'started' | 'adopted' | 'restarted-after-loss'
 
@@ -239,7 +240,7 @@ export class CodexProjectSessionHost {
     const argv = [this.bin, '--enable', 'multi_agent_v2']
     if (options.model !== undefined) argv.push('--model', options.model)
     let identity: string[]
-    try { identity = resolveIdentity(argv, options) } catch {
+    try { identity = resolveIdentity([resolveCodexNativeBinary(this.bin, options.cwd, options.env), ...argv.slice(1)], options) } catch {
       throw new Error('codex project session refused: launch identity cannot be resolved')
     }
     let screenPrompt: CodexScreenPrompt | undefined
@@ -273,11 +274,11 @@ export class CodexProjectSessionHost {
         child = await this.host.attach(recorded.pane_handle, spawnOptions)
         recovery = 'adopted'
       } else {
-        child = await this.host.spawn(identity, spawnOptions)
+        child = await this.host.spawn(codexAccountWriterCommand(this.bin, argv.slice(1), options.env.CODEX_HOME), spawnOptions)
         recovery = 'restarted-after-loss'
       }
     } else {
-      child = await this.host.spawn(identity, spawnOptions)
+      child = await this.host.spawn(codexAccountWriterCommand(this.bin, argv.slice(1), options.env.CODEX_HOME), spawnOptions)
       recovery = 'started'
     }
 

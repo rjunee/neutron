@@ -7,16 +7,29 @@ import { codexOwnerTerminal } from './project-owner-workspace.ts'
 import { privatePath } from './project-owner-helper-protocol.ts'
 import { startCodexOwnerHelper } from './project-owner-helper.ts'
 import { finishOwnerHelperLifetime } from './project-owner-helper-lifetime.ts'
+import { acquireCodexAccountWriteLease, CodexAccountWriterError, type CodexAccountWriteLease } from '../account-writer-lock.ts'
+import { recordOwnerAdmissionRefusal } from './project-owner-admission-refusal.ts'
 
 if (import.meta.main) {
   const path = process.argv[2]
   const socketPath = process.env.HERDR_SOCKET_PATH
   if (!path || process.env.HERDR_ENV !== '1' || !socketPath || !process.env.HERDR_PANE_ID) throw new Error('Owner helper requires an explicit Herdr pane and private launch file')
   privatePath(path, 'file')
-  const options = JSON.parse(readFileSync(path, 'utf8')) as Parameters<typeof startCodexOwnerHelper>[0]
+  const launchBytes = readFileSync(path, 'utf8')
+  const options = JSON.parse(launchBytes) as Parameters<typeof startCodexOwnerHelper>[0]
     & { projectWorkspace?: ProjectWorkspaceLaunch }
-  const helper = await startCodexOwnerHelper({ ...options,
-    ...codexOwnerTerminal(options.projectWorkspace, options.projectId, async () => createHerdrRpc({ socketPath })) })
+  let accountWriteLease: CodexAccountWriteLease
+  try { accountWriteLease = acquireCodexAccountWriteLease(options.codexHome) }
+  catch (error) {
+    if (!(error instanceof CodexAccountWriterError)) throw error
+    await recordOwnerAdmissionRefusal(path, launchBytes, error)
+    process.exit(73)
+  }
+  const helper = await (async () => {
+    try { return await startCodexOwnerHelper({ ...options, accountWriteLease,
+      ...codexOwnerTerminal(options.projectWorkspace, options.projectId, async () => createHerdrRpc({ socketPath })) }) }
+    finally { accountWriteLease.close() }
+  })()
   process.stdout.write('Native Codex owner helper ready; gateway clients may attach.\n')
   fireAndForget('codex-owner-helper.lifetime', finishOwnerHelperLifetime(helper, code => process.exit(code)), () => process.exit(1))
   let stopping = false

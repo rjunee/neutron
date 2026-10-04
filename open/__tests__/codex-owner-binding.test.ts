@@ -179,7 +179,24 @@ test('pre-gateway owner survives an explicit installed-MCP upgrade refusal witho
   await f.bindings.close()
 })
 
-function fixture(remote = false, general = false) {
+test('explicit account reference isolates owner state and refuses replaced grants before chat, control and build', async () => {
+  const f = fixture(false, false, true)
+  expect((await collect(f.bindings.start('project-one', spec('first')))).at(-1)?.kind).toBe('completion')
+  const one = f.factsFor('project-one')
+  expect(one.ownerRootDirectory).not.toBe(one.codexHome)
+  expect(one.controlSocketPath).toBe(join(one.ownerRootDirectory!, 'owner.sock'))
+  expect(await f.bindings.controls.model('project-one')).toBeTruthy()
+  const build = await consumingBuild(f)
+  f.grant('replacement-grant')
+  expect((await collect(f.bindings.start('project-one', spec('stale grant')))).at(-1)?.kind).toBe('error')
+  await expect(f.bindings.controls.model('project-one')).rejects.toThrow('identity changed')
+  expect(await build.worker.run(build.request, 'in-repl', new AbortController().signal)).toMatchObject({ kind: 'unknown', detail: expect.stringContaining('identity changed') })
+  expect(f.calls).toHaveLength(1)
+  expect(f.launched).toEqual(['project-one'])
+  await f.bindings.close()
+})
+
+function fixture(remote = false, general = false, sharedAccount = false) {
   const dir = mkdtempSync(join(tmpdir(), 'owner-binding-test-')); dirs.push(dir)
   const facts = new Map<CodexOwnerBinding, CodexOwnerBindingFacts>()
   const owners = new Map<string, CodexOwnerBootstrap>()
@@ -197,6 +214,7 @@ function fixture(remote = false, general = false) {
   let fail = false
   let authorized = true
   let credentialIdentity = 'fixture-credential'
+  let grantIdentity = 'fixture-grant'
   let wrongReceipt = false
   let approval = false
   let capability = true
@@ -213,7 +231,11 @@ function fixture(remote = false, general = false) {
     mkdirSync(codexHome, { recursive: true, mode: 0o700 })
     if (projectId !== null && !existsSync(join(codexHome, 'project-owner.json'))) writeFileSync(join(codexHome, 'project-owner.json'), JSON.stringify(projectId))
     homes.set(projectId, codexHome)
-    return { cwd, codexHome, credentialIdentity, env: { OPENAI_API_KEY: 'must-not-reach-native', PATH: process.env.PATH } }
+    const canonicalHome = sharedAccount ? join(dir, 'canonical-account') : codexHome
+    mkdirSync(canonicalHome, { recursive: true, mode: 0o700 })
+    return { cwd, codexHome: canonicalHome, credentialIdentity,
+      ...(sharedAccount ? { ownerRootDirectory: codexHome, projectGrantIdentity: grantIdentity } : {}),
+      env: { OPENAI_API_KEY: 'must-not-reach-native', PATH: process.env.PATH } }
   }
   const bindings = new CodexOwnerBindings(resolveProject, async options => {
     const project = options.projectId
@@ -223,7 +245,9 @@ function fixture(remote = false, general = false) {
     if (fail) throw new Error('Existing owner needs explicit recovery')
     const binding = {} as CodexOwnerBinding
     const identity: CodexOwnerBindingFacts = { capabilities: { multiAgentV2: true, evidence: 'native-thread-feature-report' }, threadId: `native-${project}`, sessionId: `session-${project}`,
-      cwd: options.cwd, codexHome: options.codexHome, rolloutPath: join(options.codexHome, 'rollout.jsonl'),
+      cwd: options.cwd, codexHome: options.codexHome, rolloutPath: join(options.codexHome, `rollout-${project}.jsonl`),
+      ...(options.ownerRootDirectory ? { ownerRootDirectory: options.ownerRootDirectory } : {}),
+      ...(options.projectGrantIdentity ? { projectGrantIdentity: options.projectGrantIdentity } : {}),
       paneHandle: `pane-${project}`, bindingRevision: createHash('sha256').update(`${project}:${launched.length}`).digest('hex'), generation: 1, brokerGeneration: 1,
       credentialFingerprint: 'fixture', modelProvider: 'fixture', controlSocketPath: options.socketPath,
       nativeMetadata: { sessionId: `session-${project}`, source: 'vscode', originator: 'owner-bootstrap-probe' } }
@@ -303,7 +327,7 @@ function fixture(remote = false, general = false) {
         if (failReply) throw new Error('Reply delivery unknown')
       },
     })
-    owners.set(options.codexHome, owner)
+    owners.set(options.ownerRootDirectory ?? options.codexHome, owner)
     return owner
   }, binding => {
     const identity = facts.get(binding)
@@ -327,6 +351,7 @@ function fixture(remote = false, general = false) {
     },
     authorize: (value: boolean) => { authorized = value },
     credential: (value: string) => { credentialIdentity = value },
+    grant: (value: string) => { grantIdentity = value },
     delayTerminalState: (reads: number) => { terminalLag = reads },
     gateProject: (gate: Promise<void> | undefined) => { projectGate = gate },
     gateOpening: (gate: Promise<void> | undefined) => { openingGate = gate },

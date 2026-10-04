@@ -463,6 +463,16 @@ export class ProjectCredentialStore {
     return this.resolveUnchecked(owner_slug, project_id, service)
   }
 
+  /** Owner credential authority inventory, including expired rows, for duplicate-copy refusal. */
+  listCodexCustody(owner_slug: OwnerHandle): Array<ProjectCredentialRecord & { plaintext: string }> {
+    return this.db.prepare<CredentialDbRow, [string]>(
+      `SELECT * FROM project_credentials WHERE owner_slug = ? AND (service = 'codex' OR service LIKE 'codex-acct-%')`,
+    ).all(owner_slug).map(row => {
+      const { ciphertext, ...metadata } = row
+      return { ...metadata, plaintext: this.crypto.decryptEnvelope(ciphertext) }
+    })
+  }
+
   /** An explicit project grant, without consulting or decrypting global defaults. */
   resolveProject(owner_slug: OwnerHandle, project_id: string, service: string): ResolvedCredential | null {
     const svc = service.trim().toLowerCase()

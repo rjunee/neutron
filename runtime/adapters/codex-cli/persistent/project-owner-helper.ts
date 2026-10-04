@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { bootstrapCodexOwner, readCodexOwnerBinding, type CodexOwnerBootstrap } from './project-control-bootstrap.ts'
 import { BROKER_MAX_MESSAGE_BYTES } from './project-control-broker-transport.ts'
 import { OwnerHelperRegistry } from './project-owner-helper-registry.ts'
-import { assertOwnerScope, exactFacts, helperIdentity, object, requireIndependentOwnerHost, socketIdentity, type HelperIdentity, type OwnerHelperDescriptor } from './project-owner-helper-protocol.ts'
+import { assertOwnerScope, ownerRoot, exactFacts, helperIdentity, object, requireIndependentOwnerHost, socketIdentity, type HelperIdentity, type OwnerHelperDescriptor } from './project-owner-helper-protocol.ts'
 import { validateOwnerResume, type CodexOwnerRetirementReceipt } from './project-owner-retirement.ts'
 
 /** The caller must launch this helper through an independent durable host.
@@ -12,18 +12,18 @@ import { validateOwnerResume, type CodexOwnerRetirementReceipt } from './project
  */
 export async function startCodexOwnerHelper(options: Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; gatewayIdentity: HelperIdentity }) {
   requireIndependentOwnerHost(options.gatewayIdentity)
-  assertOwnerScope(options.codexHome, options.projectId)
-  const stateDirectory = options.ownerStateDirectory ?? options.codexHome
+  assertOwnerScope(ownerRoot(options), options.projectId)
+  const stateDirectory = options.ownerStateDirectory ?? ownerRoot(options)
   // Keep Unix socket lengths bounded; journals/descriptors remain immutable in
   // generation directories, while this exact dead predecessor socket is reused.
-  let socketPath = join(options.codexHome, options.resume?.handoff
+  let socketPath = join(ownerRoot(options), options.resume?.handoff
     ? `.neutron-handoff-${createHash('sha256').update(stateDirectory).digest('hex').slice(0, 12)}.sock` : '.neutron-owner-helper.sock')
   const descriptorPath = join(stateDirectory, '.neutron-owner-helper.json')
   if (options.resume) {
     validateOwnerResume(stateDirectory, options.resume, options.cwd, options.codexHome)
     const previous = JSON.parse(readFileSync(join(options.resume.predecessorDirectory, '.neutron-owner-authority.json'), 'utf8')) as OwnerHelperDescriptor
     if (!options.resume.handoff) {
-      if (dirname(previous.socketPath) !== options.codexHome) throw new Error('Retired helper socket is outside its account home')
+      if (dirname(previous.socketPath) !== ownerRoot(options)) throw new Error('Retired helper socket is outside its owner root')
       socketPath = previous.socketPath
     }
     if (existsSync(socketPath)) {
@@ -43,7 +43,7 @@ function serveOwnerHelper(owner: CodexOwnerBootstrap, socketPath: string, descri
   const facts = readCodexOwnerBinding(owner.binding)
   const helper = helperIdentity()
   const token = randomBytes(32).toString('hex')
-  const assertOwner = () => { assertOwnerScope(facts.codexHome, projectId); readCodexOwnerBinding(owner.binding) }
+  const assertOwner = () => { assertOwnerScope(ownerRoot(facts), projectId); readCodexOwnerBinding(owner.binding) }
   const registry = new OwnerHelperRegistry(owner.broker, assertOwner)
   let observation = 0
   let resolveRetired!: () => void

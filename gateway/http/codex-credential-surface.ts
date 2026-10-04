@@ -9,9 +9,9 @@
  * The Codex subscription is a GLOBAL, trident-wide credential (trident runs
  * across ANY project), so the PRIMARY surface is the account-wide route with NO
  * project segment — connected from the General admin UI. A per-project OVERRIDE
- * route stays for the edge case (one project needs a different subscription); an
- * override wins over the global default for that project (store resolver:
- * project → global → unset).
+ * route creates explicit native project-owner authority: either a metadata-only
+ * reference to a configured account or an independent subscription. Global
+ * reviewer fallback remains separate from that owner grant.
  *
  *   GLOBAL (primary — General admin UI):
  *   - `GET    /api/app/codex-auth`                       → global status + every seat
@@ -36,19 +36,21 @@
  *
  *   PROJECT OVERRIDE (optional — per-project Settings):
  *   - `GET    /api/app/projects/<project_id>/codex-auth` → effective status (project→global)
- *   - `POST   /api/app/projects/<project_id>/codex-auth` → connect a project override
+ *   - `POST   /api/app/projects/<project_id>/codex-auth` → explicit { source_row_id, account_identity, expires_at? } or independent { auth }
  *   - `DELETE /api/app/projects/<project_id>/codex-auth` → remove the project override
  *
- * The POST body carries the owner's pasted `~/.codex/auth.json`. Validation +
+ * A credential POST carries the owner's pasted `~/.codex/auth.json`. Validation +
  * the metered-key rejection + materialization all live in `CodexCredentialService`
  * — this surface is just auth + routing + JSON. A metered `OPENAI_API_KEY` paste
  * comes back as HTTP 400 `metered_key`; a good subscription bundle returns
  * `{ ok, status: 'connected', scope }` after materializing to the scope's CODEX_HOME.
+ * Account selection stores only grant metadata and never materializes auth.
  */
 
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { ProjectCredentialValidationError } from '@neutronai/project-credentials/store.ts'
 import { CodexCustodyAdmissionError } from '@neutronai/project-credentials/codex-custody-gate.ts'
+import { CodexAccountWriterError } from '@neutronai/runtime/adapters/codex-cli/account-writer-lock.ts'
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { CodexAdoptionInitialState, CodexCredentialService, CodexTarget } from '@neutronai/trident/codex-credential.ts'
@@ -146,7 +148,7 @@ export function createCodexCredentialSurface(
             // as it was before.
             await service.refreshSeatLiveness(owner_slug, target)
             const status = service.status(owner_slug, target)
-            if (!isGlobal) return jsonOk({ ...status })
+            if (!isGlobal) return jsonOk({ ...status, available_accounts: service.projectAccounts(owner_slug) })
             const { accounts, next } = service.accountsView(owner_slug)
             // THE TOP-LEVEL STATUS IS ABOUT THE POOL, NOT ABOUT THE FIRST SEAT —
             // and the rule lives on the SERVICE, so this route and the
@@ -166,6 +168,16 @@ export function createCodexCredentialSurface(
             // Accept `auth` (canonical) or `auth_json` / `value` aliases.
             const pasted = body['auth'] ?? body['auth_json'] ?? body['value']
             if (!isGlobal) {
+              if (body['source_row_id'] !== undefined || body['account_identity'] !== undefined) {
+                if (typeof body['source_row_id'] !== 'string' || typeof body['account_identity'] !== 'string'
+                  || (body['expires_at'] !== undefined && body['expires_at'] !== null && typeof body['expires_at'] !== 'string')
+                  || pasted !== undefined) return jsonError(400, 'invalid_project_account', 'Select an account using its row and identity, without credential bytes')
+                const result = await service.grantProjectAccount(owner_slug, target.project_id!, {
+                  source_row_id: body['source_row_id'], account_identity: body['account_identity'],
+                  ...(body['expires_at'] === undefined ? {} : { expires_at: body['expires_at'] as string | null }) })
+                if (!result.ok) return jsonError(409, result.code!, result.error!)
+                return jsonOk({ status: result.status, mode: result.mode, scope: result.scope, grant: result.grant }, 201)
+              }
               const result = await service.connect(owner_slug, pasted, target)
               if (!result.ok) {
                 return jsonError(400, result.code ?? 'invalid_auth', result.error ?? 'could not connect Codex')
@@ -231,7 +243,9 @@ export function createCodexCredentialSurface(
             return jsonError(405, 'method_not_allowed', `method '${req.method}' not allowed on /codex-auth`)
         }
       } catch (error) {
+        if (error instanceof ProjectCredentialValidationError) return jsonError(400, error.code, error.message)
         if (error instanceof CodexCustodyAdmissionError) return jsonError(409, error.code, error.message)
+        if (error instanceof CodexAccountWriterError) return jsonError(409, error.code, error.message)
         if (error instanceof CodexProjectOwnerError) return jsonError(409, error.code, error.message)
         throw error
       }

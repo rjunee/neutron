@@ -3,7 +3,7 @@ import { existsSync, lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSy
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { attachCodexOwner, readCodexOwnerBinding, type bootstrapCodexOwner, type CodexOwnerAttachment, type CodexOwnerBindingFacts, type CodexOwnerRetirement } from '@neutronai/runtime/adapters/codex-cli/persistent/project-control-bootstrap.ts'
-import { assertOwnerScope, helperIdentity, privatePath, readOwnerHelperDescriptor } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
+import { assertOwnerScope, ownerRoot, helperIdentity, privatePath, readOwnerHelperDescriptor } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-helper-protocol.ts'
 import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { createHerdrRpc } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-client.ts'
 import { createProjectWorkspaceHost, type ProjectWorkspaceLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspace-host.ts'
@@ -14,8 +14,9 @@ import { readAccountId, validateCodexSubscriptionAuth } from '@neutronai/trident
 import { nextOwnerDirectory, readCompletedOwnerRetirement, type CodexOwnerResume } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-retirement.ts'
 import { observeOwnerNativeStop, readCrashedOwner, recordCrashedOwner } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-crash-recovery.ts'
 import { acknowledgeAccountHandoff, readGeneralOwnerAuthority, stageAccountHandoff } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-account-handoff.ts'
+import { releaseRefusedOwnerLaunch } from '@neutronai/runtime/adapters/codex-cli/persistent/project-owner-admission-refusal.ts'
 
-export type OwnerLaunch = Parameters<typeof bootstrapCodexOwner>[0] & { projectId: string | null; generalAuthorityPath?: string;
+export type OwnerLaunch = Omit<Parameters<typeof bootstrapCodexOwner>[0], 'accountWriteLease'> & { projectId: string | null; generalAuthorityPath?: string;
   /** Optional only for adopting an existing pre-cutover owner. Fresh launches require it. */
   projectWorkspace?: ProjectWorkspaceLaunch
   /** Shared in-process placement owner; never serialized into the helper launch. */
@@ -78,7 +79,7 @@ export function codexOwnerCredentialIdentity(bytes: string): string {
 /** Host journal is written before launch. Uncertain prior launches refuse;
  * positively dead, sealed owners resume only in their reserved next generation. */
 export async function openDurableCodexOwner(options: OwnerLaunch): Promise<CodexOwnerAttachment> {
-  assertOwnerScope(options.codexHome, options.projectId)
+  assertOwnerScope(ownerRoot(options), options.projectId)
   if (options.projectWorkspace !== undefined) codexOwnerWorkspace(options.projectWorkspace, options.projectId)
   const general = options.projectId === null && options.generalAuthorityPath
     ? readGeneralOwnerAuthority(options.generalAuthorityPath) : undefined
@@ -87,7 +88,7 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
     throw new Error('General owner credential or directory changed; explicit reconciliation required')
   }
   const initialResume = general?.pending ? stageAccountHandoff(general.pending.locator) : undefined
-  const { stateDirectory, resume, predecessors } = locateDurableOwnerGeneration(options.codexHome, options.cwd, general?.rootDirectory, initialResume)
+  const { stateDirectory, resume, predecessors } = locateDurableOwnerGeneration(options.codexHome, options.cwd, general?.rootDirectory ?? ownerRoot(options), initialResume)
   if (general?.pending && stateDirectory !== general.rootDirectory) throw new Error('Unacknowledged account successor needs explicit reconciliation')
   if (resume) {
     mkdirSync(stateDirectory, { recursive: true, mode: 0o700 })
@@ -105,7 +106,9 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   const credentialPath = join(options.codexHome, 'auth.json')
   privatePath(credentialPath, 'file')
   const credential = codexOwnerCredentialIdentity(readFileSync(credentialPath, 'utf8'))
-  const scope = { projectId: options.projectId, cwd: options.cwd, codexHome: options.codexHome, credential }
+  const scope = { projectId: options.projectId, cwd: options.cwd, codexHome: options.codexHome, credential,
+    ...(options.ownerRootDirectory ? { ownerRootDirectory: options.ownerRootDirectory } : {}),
+    ...(options.projectGrantIdentity ? { projectGrantIdentity: options.projectGrantIdentity } : {}) }
   for (const directory of predecessors) {
     const path = join(directory, '.neutron-owner-launch.json')
     privatePath(path, 'file')
@@ -147,9 +150,13 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
     throw error
   }
   if (existsSync(launchPath)) {
-    privatePath(launchPath, 'file'); privatePath(authorityPath, 'file')
-    const previous = JSON.parse(readFileSync(launchPath, 'utf8'))
+    privatePath(launchPath, 'file')
+    const launchBytes = readFileSync(launchPath, 'utf8')
+    const previous = JSON.parse(launchBytes)
     if (!isDeepStrictEqual(previous.scope, scope)) throw new Error('Codex owner launch credential or project changed')
+    const refused = await releaseRefusedOwnerLaunch(launchPath, launchBytes, options.timeoutMs ?? 30_000)
+    if (refused) throw new CodexOwnerRecoveryUnavailable(refused.message)
+    privatePath(authorityPath, 'file')
     if (previous.projectWorkspace !== undefined) {
       const saved = codexOwnerWorkspace(previous.projectWorkspace, options.projectId)
       const current = codexOwnerWorkspace(options.projectWorkspace, options.projectId)
@@ -196,6 +203,8 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
     writeFileSync(panePath, JSON.stringify({ handle: child.paneHandle, identity: helperIdentity(child.pid) }), { flag: 'wx', mode: 0o600 })
     const deadline = Date.now() + (options.timeoutMs ?? 30_000)
     while (!existsSync(descriptorPath)) {
+      const refused = await releaseRefusedOwnerLaunch(launchPath, readFileSync(launchPath, 'utf8'), options.timeoutMs ?? 30_000)
+      if (refused) throw new CodexOwnerRecoveryUnavailable(refused.message)
       if (Date.now() >= deadline) throw new Error('Codex owner helper launch is uncertain; reconciliation required')
       await Bun.sleep(25)
     }
@@ -208,7 +217,9 @@ export async function openDurableCodexOwner(options: OwnerLaunch): Promise<Codex
   const pane = JSON.parse(readFileSync(panePath, 'utf8'))
   if (typeof pane.handle !== 'string' || !isDeepStrictEqual(pane.identity, descriptor.helper)) throw new Error('Codex helper pane identity changed')
   if (authority && !isDeepStrictEqual(authority, descriptor)) throw new Error('Codex owner helper authority changed')
-  if (descriptor.facts.cwd !== options.cwd || descriptor.facts.codexHome !== options.codexHome) throw new Error('Foreign Codex owner helper')
+  if (descriptor.facts.cwd !== options.cwd || descriptor.facts.codexHome !== options.codexHome
+    || ownerRoot(descriptor.facts) !== ownerRoot(options)
+    || descriptor.facts.projectGrantIdentity !== options.projectGrantIdentity) throw new Error('Foreign Codex owner helper')
   const inspected = await host.inspectHandle(pane.handle)
   if (inspected.kind === 'unavailable' && launchedPid === undefined) throw new CodexOwnerRecoveryUnavailable(inspected.reason)
   if (inspected.kind !== 'live' || inspected.pid !== descriptor.helper.pid) return recoverStoppedOwner(new Error('Codex helper pane cannot be attested'), descriptor)

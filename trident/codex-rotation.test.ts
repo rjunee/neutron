@@ -868,9 +868,11 @@ describe('the multi-seat credential service', () => {
   // MUTATION: consult rotation before the project-override branch.
   test('a per-project override bypasses rotation entirely', async () => {
     const svc = newService()
-    await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
-    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: 'pinned' })
+    expect((await svc.connectAccount(OWNER, subscriptionAuth())).ok).toBe(true)
+    expect((await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })).ok).toBe(true)
+    // Independent project custody requires its own account; an existing global
+    // account must instead use an explicit metadata reference grant.
+    expect((await svc.connect(OWNER, subscriptionAuth(undefined, 'acct-project'), { scope: 'project', project_id: 'pinned' })).ok).toBe(true)
     // Cool BOTH global seats: rotation would have to pick one of them, and an
     // exhausted pool would be visible here if the override consulted rotation.
     const rotation = new SqliteCodexRotationStore(db)

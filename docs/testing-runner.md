@@ -131,16 +131,18 @@ bun test --isolate app/__tests__/ --max-concurrency=4
 
 ## Hermeticity — the env a test run sees
 
-### Process-signalling fixtures
+### Linux process-table isolation
 
-The first preload, `tests/support/process-test-isolation-preload.ts`, places an
-invocation containing the lane-process, host-suite, Codex wrapper, or consuming
-Open build tests inside a private PID namespace before test modules load. It
+The first preload, `tests/support/process-test-isolation-preload.ts`, places every
+Linux Bun invocation started from the repository root inside an authenticated
+private PID and mount namespace before test modules load. This includes tests
+that indirectly inspect processes through credential-service calls. No filename
+registry or installed-host marker selects which invocations are protected. It
 replays the original Bun arguments, preserving filters, counts, timeouts and
 shared hooks. Direct fixture entry points also require the kernel boundary.
 Parent-only `/proc` mocks do not contain a fresh owner interpreter.
 
-This requires Linux, Python pidfds and `bubblewrap` with user/PID/mount namespace
+On Linux this requires Python pidfds and `bubblewrap` with user/PID/mount namespace
 permission. The launcher retains the invoking UID/GID, supplies private `/proc`
 and `/dev`, verifies typed namespace handles and the outer launcher handshake,
 and binds the launcher chain to parent death. An unavailable boundary fails
@@ -149,6 +151,9 @@ AppArmor user-namespace admission profile attached only to `/usr/bin/bwrap` on
 ephemeral GitHub-hosted Linux runners. Global kernel restrictions stay enabled.
 It then exercises a harmless command through the same authenticated boundary,
 as the invoking user, before tests. Local test entrypoints never provision policy.
+Non-Linux preload behavior is unchanged. An unreadable live process inside the
+test namespace still causes fail-closed census refusal; isolation excludes the
+invoking host's unrelated processes rather than weakening production admission.
 
 When `/etc/neutron/native-host-recovery` exists, the test boundary mounts a private
 empty filesystem over that directory so a test server does not inherit the live

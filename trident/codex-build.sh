@@ -1472,7 +1472,7 @@ else
   set -- "$@" --json --sandbox danger-full-access --cd "$WORKTREE"
 fi
 if <"$BRIEF_FILE" run_build_child \
-  codex exec "$@" -; then
+  python3 -B "${BASH_SOURCE[0]%/*}/../runtime/adapters/codex-cli/account-writer.py" -- codex exec "$@" -; then
   stop_stage_heartbeat
   stamp_stage codex-exec-end
   emit_trailer ok

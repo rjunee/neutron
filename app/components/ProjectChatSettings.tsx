@@ -17,6 +17,9 @@ export function ProjectChatSettings({ projectId, baseUrl, token, fetchImpl }: {
   const [busy, setBusy] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [auth, setAuth] = useState('');
+  const [accountId, setAccountId] = useState('');
+  const [credentialProject, setCredentialProject] = useState<string | null>(null);
+  const currentCredential = credentialProject === projectId ? credential : null;
   const mounted = useRef(false);
   const settingsSeq = useRef(0);
   const credentialSeq = useRef(0);
@@ -24,6 +27,8 @@ export function ProjectChatSettings({ projectId, baseUrl, token, fetchImpl }: {
     mounted.current = true;
     const seq = ++settingsSeq.current;
     const credSeq = ++credentialSeq.current;
+    setCredential(null); setCredentialProject(projectId); setCredentialError(null);
+    setAccountId(''); setAuth(''); setConnecting(false);
     void client.get(projectId).then(value => {
       if (mounted.current && seq === settingsSeq.current) { setSettings(value); setError(null); }
     }).catch((err: unknown) => {
@@ -51,15 +56,52 @@ export function ProjectChatSettings({ projectId, baseUrl, token, fetchImpl }: {
   async function connect() {
     if (connecting || !auth.trim()) return;
     setConnecting(true); setCredentialError(null);
+    setCredential(null);
     const seq = ++credentialSeq.current;
     try {
       const saved = await client.connectCredential(projectId, auth.trim());
       if (mounted.current && seq === credentialSeq.current) { setCredential(saved); setAuth(''); }
     } catch (err) {
-      if (mounted.current && seq === credentialSeq.current) setCredentialError(err instanceof Error ? err.message : 'Could not connect Codex');
+      if (mounted.current && seq === credentialSeq.current) {
+        setCredentialError(err instanceof Error ? err.message : 'Could not connect Codex');
+        try {
+          const latest = await client.credential(projectId);
+          if (mounted.current && seq === credentialSeq.current) setCredential(latest);
+        } catch { /* Keep failed reads unknown. */ }
+      }
     } finally { if (mounted.current && seq === credentialSeq.current) setConnecting(false); }
   }
-  const owner = credential?.owner_credential;
+  async function grant() {
+    const account = currentCredential?.available_accounts?.find(row => row.source_row_id === accountId);
+    if (connecting || !account) return;
+    setConnecting(true); setCredentialError(null); setCredential(null);
+    const seq = ++credentialSeq.current;
+    try {
+      const saved = await client.grantCredential(projectId, account);
+      if (mounted.current && seq === credentialSeq.current) { setCredential(saved); setAccountId(''); }
+    } catch (err) {
+      if (mounted.current && seq === credentialSeq.current) {
+        setCredentialError(err instanceof Error ? err.message : 'Could not connect the selected Codex account');
+        setAccountId('');
+        try {
+          const latest = await client.credential(projectId);
+          if (mounted.current && seq === credentialSeq.current) setCredential(latest);
+        } catch { /* Keep failed reads unknown. */ }
+      }
+    } finally { if (mounted.current && seq === credentialSeq.current) setConnecting(false); }
+  }
+  async function disconnect() {
+    if (connecting) return;
+    setConnecting(true); setCredentialError(null); setCredential(null); setAccountId('');
+    const seq = ++credentialSeq.current;
+    try {
+      const saved = await client.disconnectCredential(projectId);
+      if (mounted.current && seq === credentialSeq.current) setCredential(saved);
+    } catch (err) {
+      if (mounted.current && seq === credentialSeq.current) setCredentialError(err instanceof Error ? err.message : 'Could not remove project connection');
+    } finally { if (mounted.current && seq === credentialSeq.current) setConnecting(false); }
+  }
+  const owner = currentCredential?.owner_credential;
   return <View style={styles.section} testID="project-chat-settings">
     <Text style={styles.title}>Chat provider</Text>
     <Text style={styles.hint}>Choose this project’s chat harness. A configured API chat route takes precedence. Switching providers does not transfer the other provider’s conversation context.</Text>
@@ -73,14 +115,30 @@ export function ProjectChatSettings({ projectId, baseUrl, token, fetchImpl }: {
     {error ? <Text style={styles.error} accessibilityRole="alert">{error}</Text> : null}
     <Text style={styles.hint}>{owner?.detail ?? 'Project Codex credential status is unavailable.'}</Text>
     {owner ? <Text style={styles.hint}>Checked {new Date(owner.checked_at).toLocaleString()}</Text> : null}
-    <Text style={styles.hint}>Codex chat needs a subscription connected to this project. An account-wide review connection is insufficient. Run codex login and paste the resulting auth.json.</Text>
+    <Text style={styles.hint}>Codex chat needs a subscription connected to this project. Select a configured account, then connect it to grant access. Account-wide reviewer seats are not project owner grants.</Text>
+    {currentCredential?.available_accounts?.map(account => <Pressable key={account.source_row_id} accessibilityRole="radio"
+      accessibilityLabel={`Select Codex account ${account.label ?? account.account}`}
+      accessibilityState={{ checked: accountId === account.source_row_id, disabled: connecting }}
+      disabled={connecting} style={styles.choice} onPress={() => setAccountId(account.source_row_id)}>
+      <Text style={styles.text}>{accountId === account.source_row_id ? '● ' : '○ '}{account.label ?? account.account}</Text>
+    </Pressable>)}
+    <Pressable accessibilityRole="button" accessibilityLabel="Connect selected account to project"
+      disabled={connecting || !currentCredential?.available_accounts?.some(account => account.source_row_id === accountId)}
+      style={styles.choice} onPress={() => { void grant(); }}>
+      <Text style={styles.text}>Connect selected account to project</Text>
+    </Pressable>
+    {currentCredential?.override_present ? <Pressable accessibilityRole="button" accessibilityLabel="Remove project Codex connection"
+      disabled={connecting} style={styles.choice} onPress={() => { void disconnect(); }}>
+      <Text style={styles.text}>Remove project Codex connection</Text>
+    </Pressable> : null}
+    <Text style={styles.hint}>For an independent account, run codex login and paste the resulting auth.json. For an account already configured above, use selection.</Text>
     <TextInput accessibilityLabel="Project Codex auth.json" multiline autoCapitalize="none" autoCorrect={false}
       value={auth} onChangeText={setAuth} style={styles.input} placeholder="Paste project Codex auth.json" />
     <Pressable accessibilityRole="button" accessibilityLabel="Connect project Codex" disabled={connecting || !auth.trim()}
       style={styles.choice} onPress={() => { void connect(); }}>
       <Text style={styles.text}>{connecting ? 'Connecting…' : 'Connect project Codex'}</Text>
     </Pressable>
-    {credentialError ? <Text style={styles.error} accessibilityRole="alert">{credentialError}</Text> : null}
+    {credentialProject === projectId && credentialError ? <Text style={styles.error} accessibilityRole="alert">{credentialError}</Text> : null}
   </View>;
 }
 const styles = createThemedStyles({

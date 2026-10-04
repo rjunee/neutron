@@ -47,6 +47,7 @@
 # =============================================================================
 
 set -uo pipefail
+CODEX_ACCOUNT_WRITER="$(cd -- "${BASH_SOURCE[0]%/*}/../runtime/adapters/codex-cli" && pwd)/account-writer.py"
 
 BASE_REF="${1:-main}"
 REV_RANGE_OPERAND_PREDICATE="${NEUTRON_REV_RANGE_OPERAND_PREDICATE:-${BASH_SOURCE[0]%/*}/rev-range-operand.mjs}"
@@ -539,9 +540,9 @@ ${CHUNK}"
   else
     set -- --model "$REVIEW_MODEL"
     if [ -n "${NEUTRON_CODEX_THREAD_ID:-}" ]; then
-      CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | codex exec resume "${NEUTRON_CODEX_THREAD_ID}" "$@" - 2>>"$CODEX_STDERR_FILE")
+      CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | python3 -B "$CODEX_ACCOUNT_WRITER" -- codex exec resume "${NEUTRON_CODEX_THREAD_ID}" "$@" - 2>>"$CODEX_STDERR_FILE")
     else
-      CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | codex exec "$@" - 2>>"$CODEX_STDERR_FILE")
+      CHUNK_OUTPUT=$(printf '%s' "$PROMPT" | python3 -B "$CODEX_ACCOUNT_WRITER" -- codex exec "$@" - 2>>"$CODEX_STDERR_FILE")
     fi
     CALL_EXIT=$?
   fi

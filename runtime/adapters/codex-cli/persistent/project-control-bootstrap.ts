@@ -15,6 +15,7 @@ import { validateOwnerResume, type CodexOwnerResume, type CodexOwnerRetirementRe
 import { ownerNativeStopObservation } from './project-owner-helper-lifetime.ts'
 import { readAccountHandoff } from './project-owner-account-handoff.ts'
 import { attestCodexAccountViability } from './project-account-probe.ts'
+import type { CodexAccountWriteLease } from '../account-writer-lock.ts'
 
 type Rpc = Record<string, unknown>
 const object = (value: unknown): value is Rpc => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -31,6 +32,9 @@ export interface CodexOwnerBindingFacts {
   readonly sessionId: string
   readonly cwd: string
   readonly codexHome: string
+  /** Neutron scope state, separate from the canonical native account home. */
+  readonly ownerRootDirectory?: string
+  readonly projectGrantIdentity?: string
   readonly rolloutPath: string
   readonly paneHandle: string
   readonly bindingRevision: string
@@ -108,6 +112,9 @@ export async function bootstrapCodexOwner(options: {
   socketPath: string
   cwd: string
   codexHome: string
+  ownerRootDirectory?: string
+  projectGrantIdentity?: string
+  accountWriteLease?: CodexAccountWriteLease
   env: Readonly<Record<string, string>>
   configOverrides?: readonly string[]
   timeoutMs?: number
@@ -134,9 +141,10 @@ export async function bootstrapCodexOwner(options: {
   const home = lstatSync(options.codexHome)
   if ((home.mode & 0o077) !== 0 || home.uid !== process.getuid?.()) throw new Error('Private owned Codex namespace required')
   // The fixed namespace is claimed before any child or native request exists.
-  const stateDirectory = options.ownerStateDirectory ?? options.codexHome
+  const ownerRootDirectory = options.ownerRootDirectory ?? options.codexHome
+  const stateDirectory = options.ownerStateDirectory ?? ownerRootDirectory
   if (options.resume) validateOwnerResume(stateDirectory, options.resume, options.cwd, options.codexHome)
-  else if (stateDirectory !== options.codexHome) throw new Error('New generation requires verified owner resume evidence')
+  else if (stateDirectory !== ownerRootDirectory) throw new Error('New generation requires verified owner resume evidence')
   const journal = openProjectControlJournal({ ...options, socketPath: join(stateDirectory, '.neutron-owner-bootstrap'), threadId: 'fresh-owner-bootstrap' })
   let upstream: ProjectControlTransport | undefined
   let broker: ProjectControlBroker | undefined
@@ -252,6 +260,8 @@ export async function bootstrapCodexOwner(options: {
       broker = await createProjectControlBroker({ ...options, threadId: thread.id, upstream: transport })
       const facts: CodexOwnerBindingFacts = Object.freeze({ threadId: thread.id, sessionId: thread.sessionId,
         cwd: options.cwd, codexHome: options.codexHome, rolloutPath: thread.path,
+        ...(options.ownerRootDirectory ? { ownerRootDirectory: options.ownerRootDirectory } : {}),
+        ...(options.projectGrantIdentity ? { projectGrantIdentity: options.projectGrantIdentity } : {}),
         paneHandle: tui!.paneHandle ?? `owned-pty:${tui!.pid}`, bindingRevision: randomBytes(32).toString('hex'),
         generation: journal.generation, brokerGeneration: broker.state().generation, credentialFingerprint,
         ...(credentialIdentity ? { credentialIdentity } : {}),
