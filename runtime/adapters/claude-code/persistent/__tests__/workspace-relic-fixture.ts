@@ -22,6 +22,7 @@ export class RelicWorkspaceServer extends FakeHerdrWorkspaceServer {
   readonly births = new Map<string, { terminal_id: string; runtime_generation: string }>()
   readonly inputHolds = new Map<string, { token: unknown; epoch: number }>()
   beforeHeldRetirement?: () => void
+  beforeInputCheck?: () => void
   lostRetirementReply = false
   lostReleaseReply = false
   inputEpoch = 1
@@ -54,6 +55,7 @@ export class RelicWorkspaceServer extends FakeHerdrWorkspaceServer {
       && workspace?.tokens.neutron_project_owner === target.workspace_token_value
       && isDeepStrictEqual(birth, { terminal_id: target.terminal_id, runtime_generation: target.runtime_generation })
     const hold = this.inputHolds.get(id)
+    if (method === 'pane.check_owned_input') this.beforeInputCheck?.()
     if (method === 'pane.check_owned_input' && this.changedEpoch && hold) hold.epoch += 1
     if (method === 'pane.retire_held_owned') {
       const status = !pane ? 'gone' : matches && hold?.token === params.hold_token && hold?.epoch === params.input_epoch ? 'retired' : 'mismatch'

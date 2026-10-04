@@ -64,6 +64,11 @@ test.each(['birth', 'marker', 'reply', 'busy', 'epoch'] as const)('changed %s ca
     expect(f.server.inputHolds.size).toBe(0)
     expect(f.read().state).toBe('ready')
   }
+  if (fault === 'epoch') {
+    expect(f.server.callsTo('pane.release_owned_input')).toHaveLength(0)
+    expect(f.server.inputHolds.size).toBe(1)
+    expect(f.read().state).toBe('retiring')
+  }
 })
 
 test('lost retirement reply resumes without inventing another hold or losing ownership', async () => {
@@ -125,4 +130,20 @@ test('an already issued uncertain retirement cannot be relabelled as a releasabl
   expect(f.server.callsTo('pane.release_owned_input')).toHaveLength(0)
   expect(f.read().state).toBe('retiring')
   expect(f.server.inputHolds.size).toBe(1)
+})
+
+test('background work arriving at the final census releases the exact unissued hold and permits the next wake', async () => {
+  const f = await fixture()
+  f.server.beforeInputCheck = () => f.proc.add(55555, f.pane.shell_pid, 55555, 55555)
+  expect((await f.manager.retireEmptyWorkspace(f.server, scope, await f.manager.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+  expect(f.server.callsTo('pane.retire_held_owned')).toHaveLength(0)
+  const held = f.server.callsTo('pane.hold_owned_input')[0]!.params
+  const releases = f.server.callsTo('pane.release_owned_input')
+  expect(releases).toHaveLength(1)
+  expect(releases[0]!.params).toEqual({ ...held, input_epoch: 1 })
+  expect(f.server.inputHolds.size).toBe(0)
+  expect(f.read().state).toBe('ready')
+  expect(f.server.panes.has(f.pane.pane_id)).toBe(true)
+  const next = await f.manager.applyLayout(f.server, root, scope)
+  expect(f.server.panes.has(next.layout.root.pane_id)).toBe(true)
 })

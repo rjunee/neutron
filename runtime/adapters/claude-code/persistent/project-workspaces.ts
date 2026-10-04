@@ -616,7 +616,10 @@ export class ProjectWorkspaceManager {
           || checked.hold_token !== held.holdToken || checked.input_epoch !== held.inputEpoch || checked.status !== 'held') {
           throw new Error('relic input hold changed')
         }
-        if (!isDeepStrictEqual(inspectIdleRelicShell(info.shell_pid, this.relicProc), shell)) throw new Error('relic shell census changed')
+        if (!isDeepStrictEqual(inspectIdleRelicShell(info.shell_pid, this.relicProc), shell)) {
+          await releaseUnissued()
+          throw new Error('relic shell census changed')
+        }
         if (canRetire?.() !== true) {
           await releaseUnissued()
           throw new Error('relic scope is no longer idle')

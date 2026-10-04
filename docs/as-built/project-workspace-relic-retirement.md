@@ -20,6 +20,11 @@ durable intent and re-hold only the original target/token before re-proving idle
 at the newly acknowledged epoch. Already-issued uncertain retirement cannot
 take that release path. Focused restart/lost-release and actual next-wake
 controls cover these repairs.
+The final kernel census uses the same unissued-release path when background work
+arrives after the first census. Its regression verifies the exact release and
+successful next wake; the former missing-release mutant fails that assertion
+while the idle sibling passes. Uncertain input epochs and already-issued
+retirement keep their holds and reservations.
 
 The normative item records a separate protected current-shell operator authority
 for legacy cleanup. This public change does not implement that privileged
@@ -27,7 +32,7 @@ actuator or claim deployment cleanup. There are no raw-close fallbacks, lease
 deletions, registry repairs or transcript writes.
 
 Measured locally: 89 focused manager/empty-workspace/lifecycle tests passed;
-the subsequently extended new relic/census/lifecycle group passed all 30 tests.
+the subsequently extended new relic/census/lifecycle group passed all 31 tests.
 The three consuming `open/__tests__/project-build-e2e.test.ts` project/General
 placement fixtures passed (55 assertions; remaining cases filtered). Root and
 Trident type checks and changed-file lint passed. A restrictive mutant restoring
