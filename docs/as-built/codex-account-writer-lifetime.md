@@ -69,3 +69,36 @@ launches outside these entrypoints can bypass advisory locking. Deployment must
 inventory and route every actual writer before claiming account-wide exclusion.
 These synthetic results do not establish live migration or token freshness, and
 no live credential or refresh experiment was performed for this change.
+
+Hosted CI then exposed a test-world mismatch: the original filename selector
+isolated four physical suites, while the provisioned local host's marker caused
+every Bun invocation to be isolated. New indirect credential and native-transport
+consumers therefore inspected the hosted runner's process table but not the
+local host's. The failing hosted run reported admission unknown without the
+underlying Python exception; its exact historical proc failure is not proven.
+A controlled same-UID, non-dumpable synthetic process reproduced `PermissionError`
+13 at the executable-link census read. Ignoring that process would weaken the
+production guard, so production census, lease and namespace-launcher files stay
+byte-identical to the failing source.
+
+Every root-configured Linux Bun invocation now verifies or establishes the
+existing authenticated PID/mount/proc boundary before fixtures load
+(`tests/support/process-test-isolation-preload.ts:8`). The obsolete filename and
+host-marker selectors are removed, so future indirect consumers receive the
+same boundary automatically. Non-Linux preload behavior is unchanged; all Linux
+root test invocations now require the documented namespace prerequisites.
+
+The added kernel control keeps an unreadable outsider alive while a fresh
+namespace admits, then proves the same census finds a readable known native,
+refuses its matching account, admits a distinct account, refuses an unreadable
+insider and admits after cleanup. Renaming the synthetic Bun suite to an ordinary
+filename still refuses unavailable isolation before module load and reuses a
+genuine boundary. Removing the nested kernel boundary makes the outsider control
+fail; skipping unreadable processes makes the insider control fail. Both restored
+controls pass. Focused isolation, writer, transport, General credential, durable
+owner and bootstrap suites passed 43 tests with 198 assertions. The explicit
+consuming Open build E2E, `durable Open owner MCP reaches approved SDK peer,
+retains successor handles and refuses bounded turns`, passed with 37 assertions
+(576 other cases filtered out). Both TypeScript checks and the lint gate passed.
+This focused result does not replace the outstanding hosted CI result or claim
+the full suite was rerun after this test-boundary correction.

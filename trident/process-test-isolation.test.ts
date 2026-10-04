@@ -4,7 +4,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/pr
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { assertProcessTestIsolation, needsProcessTestIsolation, processTestLauncher } from './process-test-isolation.ts'
+import { assertProcessTestIsolation, processTestLauncher } from './process-test-isolation.ts'
 import { loadClaudeCapacityPin, nativeRelayRouteFingerprint } from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { prepareNativeRequestRelay } from '@neutronai/runtime/adapters/claude-code/persistent/native-request-relay.ts'
 
@@ -12,19 +12,6 @@ test('default native discovery sees no invoking host registration', () => {
   expect(loadClaudeCapacityPin()).toBeUndefined()
   expect(nativeRelayRouteFingerprint()).toBeUndefined()
   expect(prepareNativeRequestRelay({})).toBeUndefined()
-})
-
-test('physical suite selection contains the complete invocation and preserves filter arguments', () => {
-  for (const args of [[], ['trident'], ['host-suite'], ['trident/codex-build.test.ts'],
-    ['open/__tests__/project-build-e2e.test.ts'], ['/tmp/mutation/host-suite.test.ts'],
-    ['-t', '__no_matching_case__'], ['--unknown-option', 'pure.test.ts']]) {
-    expect(needsProcessTestIsolation(['bun', 'test', ...args], '/repo')).toBe(true)
-  }
-  for (const args of [['trident/process-test-isolation.test.ts'],
-    ['pure.test.ts', '-t', 'host-suite', '--timeout', '15000'],
-    ['pure.test.ts', '--test-name-pattern=host-suite', '--timeout=15000']]) {
-    expect(needsProcessTestIsolation(['bun', 'test', ...args], '/repo')).toBe(false)
-  }
 })
 
 test('the isolation preload precedes both existing environment scrubbers', () => {
@@ -119,7 +106,9 @@ for (const refuseCheck of [true, false]) test(refuseCheck
   ? 'unavailable isolation refuses before loading a synthetic suite and preserves the exact Bun CLI'
   : 'an honestly contained synthetic suite reuses its verified boundary without invoking the unavailable launcher', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'process-boundary-proof-'))
-  const fixture = join(dir, 'host-suite.test.ts'), loaded = join(dir, 'loaded'), received = join(dir, 'argv')
+  // This deliberately has no physical-suite filename. Renaming or adding an
+  // indirectly census-using suite must never evade the kernel boundary.
+  const fixture = join(dir, 'ordinary-fixture.test.ts'), loaded = join(dir, 'loaded'), received = join(dir, 'argv')
   try {
     // This synthetic suite has no process operations, even if the refusal breaks.
     await writeFile(fixture, `import { test, expect } from 'bun:test'; import { writeFileSync } from 'node:fs';

@@ -66,6 +66,14 @@ test('synthetic process census covers live, missing, changed, default-home and d
   expect(result.status).toBe(0)
 })
 
+test('private proc excludes unreadable outsiders but still refuses unknown insiders and finds known natives', () => {
+  const result = spawnSync('python3', ['-B', join(import.meta.dir, 'account-writer-boundary-test.py')], {
+    encoding: 'utf8', timeout: 25_000,
+  })
+  expect({ status: result.status, error: result.stderr }).toEqual({ status: 0, error: '' })
+  expect(result.stdout).toContain('outside refusal and isolated native positive/negative controls passed')
+}, 30_000)
+
 test('exec adapter exposes accountBusy before the synthetic native can start', async () => {
   const home = root(), lease = acquireCodexAccountWriteLease(home)
   try {
