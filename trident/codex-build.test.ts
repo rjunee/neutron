@@ -36,8 +36,8 @@ import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { assertProcessTestIsolation } from './process-test-isolation.ts'
-import { acquireCodexAccountWriteLease } from '../runtime/adapters/codex-cli/account-writer-lock.ts'
-import { holdCodexNativeLock } from '../tests/support/codex-native-lock-holder.ts'
+import { acquireCodexAccountWriteLease } from '@neutronai/runtime/adapters/codex-cli/account-writer-lock.ts'
+import { holdCodexNativeLock } from './test-support/codex-native-lock-holder.ts'
 
 assertProcessTestIsolation()
 

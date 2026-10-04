@@ -22,8 +22,8 @@ import { basename, delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
-import { acquireCodexAccountWriteLease } from '../runtime/adapters/codex-cli/account-writer-lock.ts'
-import { holdCodexNativeLock } from '../tests/support/codex-native-lock-holder.ts'
+import { acquireCodexAccountWriteLease } from '@neutronai/runtime/adapters/codex-cli/account-writer-lock.ts'
+import { holdCodexNativeLock } from './test-support/codex-native-lock-holder.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-review.sh')
