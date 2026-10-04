@@ -169,6 +169,11 @@ it must not swallow.
       The already-running recovery scheduler subsequently resumes through its
       existing gates without another gateway restart or synthetic chat.
       Later readiness and elapsed time never automatically clear the storm latch.
+      The owner-authenticated `POST /admin/respawn-session` also refuses a capped
+      row before any registry write, kill or replacement. After independently
+      signed rearm, its existing uncapped forced-resume behavior remains available.
+      Forced restart is not cancellation of an active turn: process death may
+      enqueue that turn's input for replay.
       Verify: `runtime/adapters/claude-code/persistent/__tests__/operator-cap-rearm.test.ts`
       and `open/__tests__/boot-live-agent-adoption.test.ts`, plus
       `open/__tests__/operator-cap-rearm-authorization.test.ts`, with accepting and
