@@ -50,6 +50,9 @@
  * Everything this does NOT cover is enumerated at the bottom of this file.
  */
 import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { buildTerminalBuildWakeObserver } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
+import { buildTerminalDeployWakeObserver } from '@neutronai/gateway/proactive/terminal-deploy-wake.ts'
 import { readNativeParentLaunchEvidence, recordNativeParentLaunchEvidence } from '@neutronai/runtime/adapters/claude-code/persistent/native-parent-launch-evidence.ts'
 import { prepareAdoptedNativeParentLaunch } from '@neutronai/runtime/adapters/claude-code/persistent/adopted-native-parent-launch.ts'
 import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
@@ -1033,7 +1036,7 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   repeatFirstFinding?: boolean; commentRounds?: readonly number[]
   unavailableSeatRounds?: readonly number[]; codexReview?: 'valid' | 'wrong-run' | 'usage-limit' | 'transport-error'
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
-  nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable' | 'restart' | 'repeated' | 'held-ack'
+  nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable' | 'adopted-relay' | 'adopted-relay-missing-scope' | 'restart' | 'repeated' | 'held-ack'
   nativeCapacity?: string
   nativeQueuedOrdinary?: boolean
   nativeWriterQueue?: boolean
@@ -1413,7 +1416,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   })
   if (options.nativeCapacity === 'native-success') capacity!.setNativeStatus('available')
   if (options.nativeCapacity === 'native-unknown') capacity!.setNativeStatus('unknown')
-  if (options.nativeContinuation === 'adopted' || options.nativeContinuation === 'adopted-unavailable') {
+  if (options.nativeContinuation?.startsWith('adopted')) {
+    const registeredAdoption = options.nativeContinuation.startsWith('adopted-relay')
     const argv = ['claude', '--session-id', registeredSession.sessionId, '--tools', registeredSession.toolSurface,
       '--dangerously-load-development-channels', 'server:e2e-channel']
     const observed = await prepareAdoptedNativeParentLaunch({ pid: process.pid, sessionId: registeredSession.sessionId,
@@ -1421,8 +1425,15 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       claudeBasename: 'claude', argv, inspect: async () => ({ kind: 'live', pid: process.pid, argv }) }, {
       readIdentity: () => readProcessIdentity(process.pid), readArgv: () => argv,
       observeExecutable: async () => ({ executable: { realPath: '/opt/claude', ...CLAUDE_CONTINUATION_PROFILE }, isCurrent: () => true }),
+      ...(registeredAdoption ? {
+        loadRelayPin: () => capacity!.pin,
+        // Original spawn environment is the observation seam; the producer
+        // must obtain a fresh signed registration over the fixture's Unix host.
+        readEnvironment: () => `ANTHROPIC_UNIX_SOCKET=${capacity!.pin.socketPath}\0ANTHROPIC_BASE_URL=${nativeCapacityClient.NATIVE_RELAY_BASE_URL}\0`
+          + (options.nativeContinuation === 'adopted-relay-missing-scope' ? '' : `ANTHROPIC_CUSTOM_HEADERS=x-neutron-native-scope: ${relay!.scopeToken}\0`),
+      } : { loadRelayPin: () => undefined }),
     })
-    expect(observed !== undefined).toBe(options.nativeContinuation === 'adopted')
+    expect(observed !== undefined).toBe(options.nativeContinuation === 'adopted' || options.nativeContinuation === 'adopted-relay')
     observed?.record(registeredSession)
   } else if (options.nativeContinuation) recordNativeParentLaunchEvidence(registeredSession, {
     version: 1, sessionId: options.nativeContinuation === 'foreign-launch' ? 'another-session' : registeredSession.sessionId,
@@ -1677,6 +1688,40 @@ test('host-terminated capped Chat resumes through current launch and signed cap 
   expect(f.world.dispatches.length).toBeGreaterThan(0)
   expect(argvs).toHaveLength(1)
   expect(server.panes.has(old.layout.root.pane_id)).toBe(true)
+}, 30_000)
+
+test.each(['build', 'deploy'] as const)('a project terminal %s wake preserves the native planner grants', async kind => {
+  const f = await fixture({ nativeContinuation: 'available' })
+  f.register()
+  await Promise.resolve()
+  const fingerprint = 'native-relay-v3:fixture-current-route'
+  f.session.authFingerprint = fingerprint
+  const route = spyOn(nativeCapacityClient, 'nativeRelayRouteFingerprint').mockReturnValue(fingerprint)
+  cleanups.push(() => route.mockRestore())
+  const before = f.session.toolSurface
+  let wakes = 0
+  const llm = { compose: async (spec: AgentSpec) => {
+    wakes++
+    expect(spec.metering_context?.conversationProjectId).toBe('e2e-project')
+    // Consume the actual producer's requested surface as the parent launch
+    // grant. Process replacement itself belongs to the runtime reuse tests.
+    f.session.toolSurface = spec.tools.map(tool => tool.name).join(',')
+    return 'Continued.'
+  } }
+  const common = { llm, projectChatScope: () => 'e2e-project', post: async () => true,
+    logger: { error: () => { throw new Error('Wake failed') } } }
+  if (kind === 'build') await buildTerminalBuildWakeObserver({ ...common,
+    wakeCompleted: () => false, claimWake: async () => true, boardItemIdForRun: async () => null,
+    arbitrate: async () => ({ kind: 'unavailable', reason: 'No arbitration needed for completed fixture' }),
+  })({ ...f.row, phase: 'done', chat_id: 'fixture-chat' })
+  else await buildTerminalDeployWakeObserver(common)({ topic_id: 'fixture-chat', ref: 'main',
+    sha: f.baseSha, kind: 'accepted', detail: 'Fixture deployment completed.' })
+  expect(wakes).toBe(1)
+  const outcome = await drive(f)
+  expect(outcome.kind, why(f, outcome)).toBe('merged')
+  expect(f.session.toolSurface).toBe(before)
+  expect(f.nativeInputs.length).toBeGreaterThan(0)
+  expect(f.admission.listLeases('liveChild')).toHaveLength(0)
 }, 30_000)
 
 test.each(['ready', 'cold-ready', 'auth', 'tools', 'planner', 'missing-launch', 'launch', 'session', 'generation', 'argv', 'relay', 'route-unavailable'] as const)(
@@ -7773,6 +7818,41 @@ test('a typed subscription quota-limited synthesis stops without quotaLimits enr
   expect(f.github.prs[0]!.state).toBe('OPEN')
   const originMain = await spawnCapture(['git', '-C', f.origin, 'rev-parse', 'refs/heads/main'], f.origin)
   expect(originMain.stdout).toBe(f.baseSha)
+}, 30_000)
+
+test.each(['adopted-relay', 'adopted-relay-missing-scope'] as const)('a registered adopted parent consumes original relay authority or refuses before planning: %s', async mode => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: mode })
+  f.register()
+  await Promise.resolve()
+  const fingerprint = 'native-relay-v3:fixture-current-route'
+  f.session.authFingerprint = fingerprint
+  const route = spyOn(nativeCapacityClient, 'nativeRelayRouteFingerprint').mockReturnValue(fingerprint)
+  const admit = spyOn(f.context.nativeChildAdmission, 'admit')
+  cleanups.push(() => { route.mockRestore(); admit.mockRestore() })
+  const registrations = f.capacity!.requests.filter(request => request.kind === 'claude-native-register')
+  const launch = readNativeParentLaunchEvidence(f.session)
+  if (mode === 'adopted-relay') {
+    expect(registrations).toHaveLength(2)
+    expect(registrations[1]!.scopeToken).toBe(registrations[0]!.scopeToken)
+    expect(launch?.relay?.registration.body).toMatchObject({ parentPid: process.pid, parentSessionId: f.session.sessionId })
+    expect(nativeCapacityClient.nativeRelayScopeCurrent(launch!.relay!)).toBe(true)
+  } else {
+    expect(registrations).toHaveLength(1)
+    expect(launch).toBeUndefined()
+  }
+  const outcome = await drive(f)
+  if (mode === 'adopted-relay') {
+    expect(outcome.kind, why(f, outcome)).toBe('merged')
+    expect(f.world.dispatches[0]!.role).toBe('plan')
+    expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(1)
+    expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(1)
+  } else {
+    expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'plan' })
+    expect(admit).not.toHaveBeenCalled()
+    expect(f.nativeInputs).toEqual([])
+    expect(f.github.prs).toEqual([])
+  }
+  expect(f.admission.listLeases('liveChild')).toHaveLength(0)
 }, 30_000)
 
 test.each(['fresh', 'queued', 'alias', 'restart'] as const)('native same-ID continuation consumes the retained synthesis and reaches the existing merge gates: %s', async parent => {

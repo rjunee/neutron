@@ -4,7 +4,7 @@ import { FIRE_PUBLISHED_REASON_MARKER, FIRE_SETTLE_TIMEOUT_ERROR, publishedFailu
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import { randomUUID } from 'node:crypto'
-import { LIVE_AGENT_TOOL_NAMES, ProjectAdmissionRefusedError } from '../../wiring/build-live-agent-turn.ts'
+import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS, ProjectAdmissionRefusedError } from '../../wiring/build-live-agent-turn.ts'
 import { openAdmission, type FixtureAdmission } from '../../wiring/__tests__/project-admission-fixture.ts'
 import {
   buildTerminalBuildWakeObserver,
@@ -44,6 +44,8 @@ describe('terminal build wake', () => {
     h.deps.projectChatScope = () => scope
     await buildTerminalBuildWakeObserver(h.deps)(run())
     expect(h.specs[0]?.metering_context).toEqual({ project_id: scope ?? 'general', conversationProjectId: scope })
+    expect(h.specs[0]!.tools.map(tool => tool.name)).toEqual(scope === null
+      ? [...LIVE_AGENT_TOOL_NAMES] : PROJECT_REPL_TOOL_DEFS.map(tool => tool.name))
   })
   const escalationRun = (kind = 'missing-dependency', over: Partial<TridentRun> = {}) => run({
     phase: 'failed', harvested_at: 123,
@@ -117,7 +119,7 @@ describe('terminal build wake', () => {
     expect(h.optsSeen).toEqual([{ timeout_ms: TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS }])
     expect(TERMINAL_BUILD_WAKE_TURN_TIMEOUT_MS).toBeGreaterThan(90_000)
     expect(h.specs[0]!.metering_context?.project_id).toBe('acme-scope')
-    expect(h.specs[0]!.tools.map((tool) => tool.name)).toEqual([...LIVE_AGENT_TOOL_NAMES])
+    expect(h.specs[0]!.tools).toBe(PROJECT_REPL_TOOL_DEFS)
     for (const fact of ['run-123', 'board-9', 'done', 'trident/wake', 'Repair terminal delivery']) expect(h.specs[0]!.prompt).toContain(fact)
   })
   test('failed reason is verbatim and loud', async () => {

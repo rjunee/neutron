@@ -2,6 +2,10 @@ import { expect, test } from 'bun:test'
 import { prepareAdoptedNativeParentLaunch, type AdoptedNativeLaunchDeps } from '../adopted-native-parent-launch.ts'
 import { readNativeParentLaunchEvidence } from '../native-parent-launch-evidence.ts'
 import type { HandleInspection } from '../pty-host.ts'
+import { randomBytes, generateKeyPairSync } from 'node:crypto'
+import { capacityFixture } from '../../../../workers/claude-capacity-client.test-support.ts'
+import { NATIVE_RELAY_BASE_URL } from '../../../../workers/claude-capacity-client.ts'
+import { readProcessIdentity } from '../process-identity.ts'
 
 function fixture() {
   const argv = ['claude', '--resume', 'session', '--tools', 'Agent,SendMessage',
@@ -12,6 +16,7 @@ function fixture() {
     channelName: 'channel', cwd: '/tmp', claudeBasename: 'claude', argv,
     inspect: async () => state.host }
   const deps: AdoptedNativeLaunchDeps = {
+    loadRelayPin: () => undefined,
     readIdentity: () => state.identity, readArgv: () => state.argv,
     observeExecutable: async (path, _cwd, env) => {
       expect(path).toBe('/proc/42/exe')
@@ -78,4 +83,87 @@ test('identity change inside image measurement refuses preparation', async () =>
     return result
   }
   expect(await prepareAdoptedNativeParentLaunch(f.input, f.deps)).toBeUndefined()
+})
+
+async function relayFixture() {
+  const host = await capacityFixture(), f = fixture()
+  const token = randomBytes(32).toString('base64url')
+  const state = { environment: `ANTHROPIC_UNIX_SOCKET=${host.pin.socketPath}\0ANTHROPIC_BASE_URL=${NATIVE_RELAY_BASE_URL}\0ANTHROPIC_CUSTOM_HEADERS=x-neutron-native-scope: ${token}\0` }
+  f.input.pid = process.pid
+  f.state.host = { kind: 'live', pid: process.pid, argv: f.input.argv }
+  f.deps.readIdentity = readProcessIdentity
+  f.deps.observeExecutable = async () => ({ executable: { realPath: '/opt/claude.exe', version: '2.1.285', sha256: 'measured' }, isCurrent: () => true })
+  f.deps.loadRelayPin = () => host.pin
+  f.deps.readEnvironment = () => state.environment
+  return { ...f, host, token, route: state }
+}
+
+test('adopted survivor recovers a signed relay for its original exact physical parent and token', async () => {
+  const f = await relayFixture(), session = {}
+  try {
+    const prepared = await prepareAdoptedNativeParentLaunch(f.input, f.deps)
+    expect(prepared).toBeDefined()
+    expect(readNativeParentLaunchEvidence(session)).toBeUndefined()
+    expect(f.host.requests).toHaveLength(1)
+    expect(f.host.requests[0]).toMatchObject({ kind: 'claude-native-register', scopeToken: f.token,
+      parentPid: process.pid, parentSessionId: 'session', parentStartTicks: readProcessIdentity(process.pid)!.start_ticks })
+    prepared!.record(session)
+    expect(readNativeParentLaunchEvidence(session)?.relay).toMatchObject({ scopeToken: f.token,
+      registration: { body: { kind: 'claude-native-registered', parentPid: process.pid, parentSessionId: 'session' } } })
+    expect(readNativeParentLaunchEvidence(session)?.relay?.registration.signature).toBeTruthy()
+  } finally { await f.host.close() }
+})
+
+test('missing, foreign, old-protocol, duplicate or unreadable original route cannot be promoted', async () => {
+  const changes = [
+    (f: Awaited<ReturnType<typeof relayFixture>>) => { f.route.environment = '' },
+    (f: Awaited<ReturnType<typeof relayFixture>>) => { f.route.environment = f.route.environment.replace(f.token, 'invalid') },
+    (f: Awaited<ReturnType<typeof relayFixture>>) => { f.route.environment = f.route.environment.replace(f.host.pin.socketPath, '/foreign.sock') },
+    (f: Awaited<ReturnType<typeof relayFixture>>) => { f.route.environment = f.route.environment.replace(NATIVE_RELAY_BASE_URL, 'http://127.0.0.1:1234') },
+    (f: Awaited<ReturnType<typeof relayFixture>>) => { f.route.environment += `ANTHROPIC_UNIX_SOCKET=${f.host.pin.socketPath}\0` },
+    (f: Awaited<ReturnType<typeof relayFixture>>) => { f.route.environment = f.route.environment.replace(f.token, `${f.token}\nx-neutron-native-scope: ${f.token}`) },
+    (f: Awaited<ReturnType<typeof relayFixture>>) => { f.deps.readEnvironment = () => { throw new Error('unreadable') } },
+    (f: Awaited<ReturnType<typeof relayFixture>>) => { f.deps.loadRelayPin = () => { throw new Error('invalid protected pin') } },
+  ]
+  for (const change of changes) {
+    const f = await relayFixture()
+    try {
+      change(f)
+      expect(await prepareAdoptedNativeParentLaunch(f.input, f.deps)).toBeUndefined()
+      expect(f.host.requests).toHaveLength(0)
+    } finally { await f.host.close() }
+  }
+})
+
+test('host signature and actual physical-parent identity are verified, not reconstructed from labels', async () => {
+  for (const failure of ['signature', 'parent'] as const) {
+    const f = await relayFixture()
+    try {
+      if (failure === 'signature') {
+        const publicKey = String(generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }))
+        f.deps.loadRelayPin = () => ({ ...f.host.pin, publicKey })
+      } else {
+        const identity = readProcessIdentity(process.pid)!
+        f.deps.readIdentity = () => ({ ...identity, start_ticks: identity.start_ticks + 1 })
+      }
+      expect(await prepareAdoptedNativeParentLaunch(f.input, f.deps)).toBeUndefined()
+      expect(f.host.requests).toHaveLength(1)
+    } finally { await f.host.close() }
+  }
+})
+
+test('route or protected pin changing before publication invalidates recovered authority', async () => {
+  for (const failure of ['environment', 'pin'] as const) {
+    const f = await relayFixture(), session = {}
+    let currentPin: typeof f.host.pin | undefined = f.host.pin
+    f.deps.loadRelayPin = () => currentPin
+    try {
+      const prepared = await prepareAdoptedNativeParentLaunch(f.input, f.deps)
+      expect(prepared).toBeDefined()
+      if (failure === 'environment') f.route.environment = f.route.environment.replace(f.token, randomBytes(32).toString('base64url'))
+      else currentPin = undefined
+      prepared!.record(session)
+      expect(readNativeParentLaunchEvidence(session)).toBeUndefined()
+    } finally { await f.host.close() }
+  }
 })

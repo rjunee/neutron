@@ -1,7 +1,7 @@
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
-import { LIVE_AGENT_TOOL_NAMES } from '../wiring/build-live-agent-turn.ts'
+import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '../wiring/build-live-agent-turn.ts'
 import type { WakeupLlm } from './work-wakeup.ts'
 
 export interface TerminalDeployOutcome {
@@ -48,14 +48,14 @@ export function buildTerminalDeployWakeObserver(
   return async (outcome) => {
     if (deps.llm === null) return
     try {
-      const tools: ToolDef[] = LIVE_AGENT_TOOL_NAMES.map((name) => ({
+      const conversationProjectId = deps.projectChatScope(outcome.topic_id)
+      const tools: ToolDef[] = conversationProjectId !== null ? PROJECT_REPL_TOOL_DEFS : LIVE_AGENT_TOOL_NAMES.map((name) => ({
         name,
         description: `Built-in Claude Code tool '${name}' (terminal-deploy wake surface)`,
         input_schema: { type: 'object' },
         output_schema: { type: 'object' },
         capability_required: 'fs:project_data',
       }))
-      const conversationProjectId = deps.projectChatScope(outcome.topic_id)
       const spec: AgentSpec = {
         prompt: buildTerminalDeployWakePrompt(outcome),
         tools,

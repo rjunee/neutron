@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 
 import { SupervisedLoop } from '@neutronai/loop'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
-import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
+import { PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
@@ -354,7 +354,7 @@ describe('Open terminal-build wake observer wiring', () => {
     expect(wakeDispatches).toHaveLength(1)
     expect(wakeDispatches[0]!.instance_id.startsWith('cc-agent-')).toBe(true)
     expect(wakeDispatches[0]!.tool_bridge).toBe(true)
-    expect(wakeDispatches[0]!.tool_names).toEqual([...LIVE_AGENT_TOOL_NAMES])
+    expect(wakeDispatches[0]!.tool_names).toEqual(PROJECT_REPL_TOOL_DEFS.map(tool => tool.name))
 
     sock.close()
     await sleep(50)
@@ -396,7 +396,7 @@ describe('Open terminal-build wake observer wiring', () => {
       expect(wakeDispatches[0]!.instance_id).toBe('cc-agent-owner')
       expect(wakeDispatches[0]!.project_id).toBe('acme')
       expect(wakeDispatches[0]!.tool_bridge).toBe(true)
-      expect(wakeDispatches[0]!.tool_names).toEqual([...LIVE_AGENT_TOOL_NAMES])
+      expect(wakeDispatches[0]!.tool_names).toEqual(PROJECT_REPL_TOOL_DEFS.map(tool => tool.name))
     } finally {
       releaseWake?.()
       for (const cleanup of composition.realmode_cleanups ?? []) await cleanup()
