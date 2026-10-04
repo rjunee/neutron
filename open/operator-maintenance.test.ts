@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { assertMaintenanceAsleep, assertNoMaintenanceReplay, readMaintenanceRow,
@@ -20,6 +21,14 @@ test('strict pending replay observation preserves target and unknown work; absen
   const dir = mkdtempSync(join(tmpdir(), 'operator-replay-')), path = join(dir, 'queue')
   try {
     expect(() => assertNoMaintenanceReplay(path, 'key', 'sid')).not.toThrow()
+    const dangling = join(dir, 'dangling'), fifo = join(dir, 'fifo')
+    symlinkSync(join(dir, 'missing-target'), dangling)
+    execFileSync('mkfifo', [fifo])
+    expect(() => assertNoMaintenanceReplay(dangling, 'key', 'sid')).toThrow('unreadable')
+    expect(() => assertNoMaintenanceReplay(fifo, 'key', 'sid')).toThrow('unreadable')
+    expect(() => readMaintenanceRow({ registryPath: fifo } as MaintenanceRequest)).toThrow('bounded regular file')
+    writeFileSync(path, '[]')
+    expect(() => assertNoMaintenanceReplay(path, 'key', 'sid')).not.toThrow()
     for (const data of ['{', '{}', '[{}]', JSON.stringify([{ sessionKey: 'other', sessionId: 'other', cwd: '/', droppedInbound: 4 }])]) {
       writeFileSync(path, data)
       expect(() => assertNoMaintenanceReplay(path, 'key', 'sid')).toThrow()
@@ -37,9 +46,10 @@ test('strict pending replay observation preserves target and unknown work; absen
 test('release proof requires exact canonical sleep and original PLUS replacement process exits', () => {
   const dir = mkdtempSync(join(tmpdir(), 'operator-asleep-'))
   const request: MaintenanceRequest = { version: 1, operationId: crypto.randomUUID(), dbPath: join(dir, 'db'),
-    deployedMigrations: dir, registryPath: join(dir, 'registry'), pendingRespawnsPath: join(dir, 'pending'),
+    registryPath: join(dir, 'registry'), pendingRespawnsPath: join(dir, 'pending'),
     scope: { ownerHandle: 'owner', projectId: null }, sessionKey: 'key', sessionId: 'sid', childGeneration: 'old',
-    childPid: 123, gatewayPid: 456, deployment: { codeRoot: dir, entrypoint: join(dir, 'open/server.ts'), revision: 'a'.repeat(40), port: 1234, ownerHandle: 'owner' } }
+    childPid: 123, gatewayPid: 456, artifact: { commit: 'a'.repeat(40), contentSha256: 'b'.repeat(64) },
+    deployment: { codeRoot: dir, entrypoint: join(dir, 'open/server.ts'), revision: 'a'.repeat(40), port: 1234, ownerHandle: 'owner' } }
   const row = { sessionKey: 'key', sessionId: 'sid', cwd: dir, channelName: `neutron-${'a'.repeat(32)}`,
     has_session: true, conversationProjectId: null, child_generation: 'new', asleep_at: Date.now() }
   const owners = [{ generation: 'old', process: { pid: 123, identity: { start_ticks: 1, boot_id: 'boot' } } },

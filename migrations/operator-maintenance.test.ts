@@ -1,66 +1,86 @@
 import { expect, spyOn, test } from 'bun:test'
 import * as childProcess from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import * as fs from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ProjectAdmissionStore } from '@neutronai/gateway/project-admission-store.ts'
 import { applyMigrations, migrateOwnerMarkerPath } from './runner.ts'
-import { installOperatorMaintenanceGuard } from './operator-maintenance.ts'
+import { installOperatorMaintenanceGuard, operatorMaintenanceArtifact } from './operator-maintenance.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const sql = readFileSync(join(here, '0167_operator_maintenance_holds.sql'), 'utf8')
 
-test('fixed additive installer preserves multiline owner and existing rows; idempotence, corruption and rollback are fail closed', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'operator-migration-')), path = join(dir, 'db')
-  const db = ProjectDb.open(path)
-  applyMigrations(db.raw())
-  // Build a PRE-upgrade fixture, not a live repair: the ordinary runner created
-  // the real marker and all predecessor schema/ledger before these fixture edits.
-  await db.exec('DROP TRIGGER project_operator_maintenance_fence_guard; DROP TRIGGER project_operator_maintenance_delete_guard; DROP TABLE project_operator_maintenance_holds')
-  await db.run("DELETE FROM _migrations WHERE name = 'operator_maintenance_holds'", [])
-  await db.run("INSERT INTO project_admission_fences (scope_key, phase) VALUES (?, 'open')", [JSON.stringify(['fixture-owner', null])])
-  const marker = readFileSync(migrateOwnerMarkerPath(path), 'utf8')
-  const before = db.all('SELECT * FROM _migrations ORDER BY name')
-  const application = db.all('SELECT * FROM project_admission_fences')
+test('fixed operator bootstrap preserves the entire old ledger, remains old-boot compatible, then normal migration records genuine provenance', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'operator-bootstrap-')), path = join(dir, 'db'), oldTree = join(dir, 'old-migrations')
+  mkdirSync(oldTree)
+  for (const file of readdirSync(here)) if (/^\d{4}_.*\.sql$/.test(file) && file !== '0167_operator_maintenance_holds.sql') copyFileSync(join(here, file), join(oldTree, file))
+  copyFileSync(join(here, 'repairs.json'), join(oldTree, 'repairs.json'))
+  const db = ProjectDb.open(path), store = new ProjectAdmissionStore(db)
+  // The runner/provenance/index implementation and every pre-167 SQL file are
+  // unchanged from the old build. This full old file set exercises its real guards.
+  applyMigrations(db.raw(), oldTree)
+  const scope = { ownerHandle: 'fixture-owner', projectId: null }, other = { ...scope, projectId: 'other' }
+  await store.register(scope); await store.register(other)
+  const marker = readFileSync(migrateOwnerMarkerPath(path), 'utf8'), before = db.all('SELECT * FROM _migrations ORDER BY name')
   const uid = spyOn(process, 'geteuid').mockReturnValue(0)
+  let protectedArtifact = true
+  const originalStat = fs.lstatSync
+  const protection = spyOn(fs, 'lstatSync').mockImplementation(((path: fs.PathLike) => {
+    const info = originalStat(path)
+    return Object.assign(info, { uid: protectedArtifact ? 0 : 1000, mode: info.mode & ~0o022 })
+  }) as typeof fs.lstatSync)
   const git = spyOn(childProcess, 'execFileSync').mockImplementation(((_file: string, args?: unknown) => {
-    const command = (args as string[])[2]
-    if (command === 'rev-parse') return 'a'.repeat(40) + '\n'
-    if (command === 'show') return sql
-    if (command === 'status') return ''
-    throw new Error('Unexpected artifact query')
+    switch ((args as string[])[2]) {
+      case 'rev-parse': return 'a'.repeat(40) + '\n'
+      case 'show': return sql
+      case 'status': return ''
+      case 'ls-files': return 'migrations/0167_operator_maintenance_holds.sql\0open/operator-maintenance.ts\0'
+      default: throw new Error('Unexpected artifact query')
+    }
   }) as typeof childProcess.execFileSync)
   try {
+    const source = operatorMaintenanceArtifact(), operationId = crypto.randomUUID()
+    const acquire = (tx: ProjectDb) => store.holdOperatorMaintenanceInTransaction(tx, scope, operationId).then(Boolean)
     expect(marker.split('\n').length).toBeGreaterThan(2)
     uid.mockReturnValue(1000)
-    await expect(installOperatorMaintenanceGuard(db, here)).rejects.toThrow('requires root')
+    await expect(installOperatorMaintenanceGuard(db, here, source, acquire)).rejects.toThrow('requires root')
     uid.mockReturnValue(0)
-    await expect(installOperatorMaintenanceGuard(db, dir)).rejects.toThrow('owner mismatch')
-    expect(db.all('SELECT * FROM _migrations ORDER BY name')).toEqual(before)
-    // A failed ledger write cannot leave the table/guards installed.
-    await db.exec(`CREATE TRIGGER test_operator_ledger_failure BEFORE INSERT ON _migrations
-      WHEN NEW.name = 'operator_maintenance_holds' BEGIN SELECT RAISE(ABORT, 'fixture ledger failure'); END`)
-    await expect(installOperatorMaintenanceGuard(db, here)).rejects.toThrow('fixture ledger failure')
+    protectedArtifact = false
+    expect(() => operatorMaintenanceArtifact()).toThrow('unprotected')
+    protectedArtifact = true
+    await expect(installOperatorMaintenanceGuard(db, dir, source, acquire)).rejects.toThrow('owner mismatch')
+    await expect(installOperatorMaintenanceGuard(db, here, { ...source, contentSha256: 'b'.repeat(64) }, acquire)).rejects.toThrow('changed after audit')
+    await expect(installOperatorMaintenanceGuard(db, here, { ...source, commit: 'b'.repeat(40) }, acquire)).rejects.toThrow('changed after audit')
+    await expect(installOperatorMaintenanceGuard(db, here, source, async () => false)).rejects.toThrow('already fenced')
     expect(db.get("SELECT 1 FROM sqlite_master WHERE name = 'project_operator_maintenance_holds'")).toBeNull()
-    await db.exec('DROP TRIGGER test_operator_ledger_failure')
+    expect(store.inspect(scope)?.phase).toBe('open')
     const competitor = ProjectDb.open(path)
     competitor.raw().exec('BEGIN IMMEDIATE')
-    const installing = installOperatorMaintenanceGuard(db, here)
-    try {
-      await Bun.sleep(20)
-      expect(competitor.get("SELECT 1 FROM sqlite_master WHERE name = 'project_operator_maintenance_holds'")).toBeNull()
-    } finally { competitor.raw().exec('COMMIT'); competitor.close() }
+    const installing = installOperatorMaintenanceGuard(db, here, source, acquire)
+    try { await Bun.sleep(20); expect(competitor.get("SELECT 1 FROM sqlite_master WHERE name = 'project_operator_maintenance_holds'")).toBeNull() }
+    finally { competitor.raw().exec('COMMIT'); competitor.close() }
     await installing
+    expect(store.operatorMaintenanceFor(scope, operationId)).not.toBeNull()
+    expect(store.inspect(other)?.phase).toBe('open')
+    expect(db.all('SELECT * FROM _migrations ORDER BY name')).toEqual(before)
     expect(readFileSync(migrateOwnerMarkerPath(path), 'utf8')).toBe(marker)
+    expect(applyMigrations(db.raw(), oldTree).applied).toEqual([])
+    expect(db.all('SELECT * FROM _migrations ORDER BY name')).toEqual(before)
+    expect(store.operatorMaintenanceFor(scope, operationId)).not.toBeNull()
+    await installOperatorMaintenanceGuard(db, here, source, tx => store.holdOperatorMaintenanceInTransaction(tx, other, crypto.randomUUID()).then(Boolean))
+    expect(db.all('SELECT * FROM _migrations ORDER BY name')).toEqual(before)
+    expect(applyMigrations(db.raw()).applied).toEqual([167])
+    // The old unknown-ledger refusal remains intact after a genuine NEW-build
+    // migration. Compatibility comes from not writing that row during bootstrap.
+    expect(() => applyMigrations(db.raw(), oldTree)).toThrow()
     expect(db.all("SELECT * FROM _migrations WHERE name <> 'operator_maintenance_holds' ORDER BY name")).toEqual(before)
-    expect(db.all('SELECT * FROM project_admission_fences')).toEqual(application)
+    expect(store.operatorMaintenanceFor(scope, operationId)).not.toBeNull()
     const installed = db.all('SELECT * FROM _migrations ORDER BY name')
-    await installOperatorMaintenanceGuard(db, here)
-    expect(db.all('SELECT * FROM _migrations ORDER BY name')).toEqual(installed)
     await db.exec('DROP TRIGGER project_operator_maintenance_fence_guard')
-    await expect(installOperatorMaintenanceGuard(db, here)).rejects.toThrow('schema differs')
+    await expect(installOperatorMaintenanceGuard(db, here, source, acquire)).rejects.toThrow('schema differs')
     expect(db.all('SELECT * FROM _migrations ORDER BY name')).toEqual(installed)
-    expect(readFileSync(migrateOwnerMarkerPath(path), 'utf8')).toBe(marker)
-  } finally { uid.mockRestore(); git.mockRestore(); db.close(); rmSync(dir, { recursive: true, force: true }) }
+  } finally { uid.mockRestore(); git.mockRestore(); protection.mockRestore(); db.close(); rmSync(dir, { recursive: true, force: true }) }
 })

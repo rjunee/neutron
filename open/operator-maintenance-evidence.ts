@@ -23,6 +23,26 @@ export function observeMaintenanceProcess(pid: number): MaintenanceProcess {
   return { pid, identity }
 }
 
+/** Positive absence for a transcript, never an inferred historical PID exit.
+ * Any SID-bearing argv (including an unfamiliar launcher) refuses. A denied or
+ * malformed process read is unknown; only a concurrently disappeared PID skips.
+ * Seeing this scanner's own argv is the positive control for an empty result. */
+export function assertNoMaintenanceTranscriptOwner(sessionId: string): void {
+  if (!sessionId) throw new Error('Transcript census is unknown')
+  let sawSelf = false
+  for (const name of readdirSync('/proc')) {
+    if (!/^[1-9][0-9]*$/.test(name)) continue
+    let argv: string
+    try { argv = readFileSync(`/proc/${name}/cmdline`, 'utf8') } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+      throw new Error('Transcript census is unknown')
+    }
+    if (Number(name) === process.pid && argv.length > 0) sawSelf = true
+    if (argv.includes(sessionId)) throw new Error('Transcript still has a possible process owner')
+  }
+  if (!sawSelf) throw new Error('Transcript census is unknown')
+}
+
 /** Unreadable is not dead. A recycled PID is not the recorded process. */
 export function maintenanceProcessGone(process: MaintenanceProcess): boolean {
   try {
@@ -40,7 +60,7 @@ function git(root: string, args: string[]): string {
 
 /** A sampled process must have started AFTER every tracked served-tree file.
  * Whole-tree identity alone cannot prove that a live process loaded those bytes. */
-export function verifyMaintenanceDeploymentFiles(target: MaintenanceDeployment, current: MaintenanceProcess): void {
+function verifyMaintenanceGatewayFiles(target: MaintenanceDeployment, current: MaintenanceProcess): void {
   if (!/^[a-f0-9]{40}$/.test(target.revision) || !isAbsolute(target.codeRoot)
     || realpathSync(target.codeRoot) !== target.codeRoot || target.entrypoint !== join(target.codeRoot, 'open/server.ts')
     || !Number.isSafeInteger(target.port) || target.port < 1 || target.port > 65535) throw new Error('Invalid deployment identity')
@@ -64,6 +84,21 @@ export function verifyMaintenanceDeploymentFiles(target: MaintenanceDeployment, 
     assertRootProtectedPath(info.isSymbolicLink() ? realpathSync(path) : path, 'file')
     if (info.mtimeMs >= started || info.ctimeMs >= started) throw new Error('Gateway predates deployed source')
   }
+}
+
+/** Independently derive the canonical migration owner from the actual protected
+ * old gateway image. The bootstrap artifact can be elsewhere, but cannot claim
+ * to be this database's normal migration owner. */
+export function maintenanceOwnerDirectory(target: MaintenanceDeployment, current: MaintenanceProcess): string {
+  verifyMaintenanceGatewayFiles({ ...target, revision: git(target.codeRoot, ['rev-parse', 'HEAD']) }, current)
+  const owner = join(target.codeRoot, 'migrations')
+  if (realpathSync(owner) !== owner) throw new Error('Migration owner mismatch')
+  assertRootProtectedPath(join(owner, 'runner.ts'), 'file')
+  return owner
+}
+
+export function verifyMaintenanceDeploymentFiles(target: MaintenanceDeployment, current: MaintenanceProcess): void {
+  verifyMaintenanceGatewayFiles(target, current)
   const route = readFileSync(join(target.codeRoot, 'runtime/workers/claude-capacity-client.ts'), 'utf8')
   const launcher = readFileSync(join(target.codeRoot, 'runtime/adapters/claude-code/persistent/native-request-relay.ts'), 'utf8')
   if (!route.includes('native-relay-v3:') || !route.includes('http://127.0.0.1:0')

@@ -222,16 +222,24 @@ export class ProjectAdmissionStore {
    * fence commit together. Unknown/unregistered or already-held scopes refuse;
    * this never provisions a scope or consumes a work lease. */
   async holdOperatorMaintenance(scope: ProjectAdmissionScope, operationId: string): Promise<OperatorMaintenanceHold | null> {
+    return this.db.transaction(tx => this.holdOperatorMaintenanceInTransaction(tx, scope, operationId));
+  }
+
+  /** The fixed additive operator bootstrap must commit its guard schema and
+   * this hold together. Ordinary callers use the transaction-owning wrapper. */
+  async holdOperatorMaintenanceInTransaction(tx: ProjectDb, scope: ProjectAdmissionScope, operationId: string): Promise<OperatorMaintenanceHold | null> {
+    if (tx !== this.db) throw new Error('Maintenance transaction belongs to another database');
+    tx.assertInTransaction();
     if (!/^[a-f0-9-]{36}$/.test(operationId)) throw new Error('Invalid maintenance operation');
-    return this.db.transaction(async tx => {
-      const fence = await this.beginMaintenanceLocked(tx, scope);
-      if (!fence) return null;
-      const createdAt = Date.now();
-      tx.runSync(`INSERT INTO project_operator_maintenance_holds
-        (operation_id, scope_key, generation, maintenance_token, created_at) VALUES (?, ?, ?, ?, ?)`,
-      [operationId, scopeKey(scope), fence.generation, fence.token, createdAt]);
-      return { ...fence, operationId, createdAt };
-    });
+    await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [scopeKey(scope)]);
+    if (this.hasPreparedHostTermination(scope)) return null;
+    const fence = await this.beginMaintenanceLocked(tx, scope);
+    if (!fence) return null;
+    const createdAt = Date.now();
+    tx.runSync(`INSERT INTO project_operator_maintenance_holds
+      (operation_id, scope_key, generation, maintenance_token, created_at) VALUES (?, ?, ?, ?, ?)`,
+    [operationId, scopeKey(scope), fence.generation, fence.token, createdAt]);
+    return { ...fence, operationId, createdAt };
   }
 
   operatorMaintenanceCurrent(hold: OperatorMaintenanceHold): boolean {

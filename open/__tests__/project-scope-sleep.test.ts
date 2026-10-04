@@ -15,9 +15,13 @@ import { createHash } from 'node:crypto'
 import { recoverStartupRepl } from '@neutronai/runtime/adapters/claude-code/persistent/startup-recovery.ts'
 import { capacityFixture } from '@neutronai/runtime/workers/claude-capacity-client.test-support.ts'
 import * as processIdentity from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
+import * as maintenanceEvidence from '../operator-maintenance-evidence.ts'
+import * as maintenanceAuthority from '../native-host-recovery-authority.ts'
+import * as maintenanceBootstrap from '@neutronai/migrations/operator-maintenance.ts'
+import { runOperatorMaintenance, type MaintenanceRequest } from '../operator-maintenance.ts'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { ProjectAdmissionStore } from '@neutronai/gateway/project-admission-store.ts'
@@ -381,6 +385,19 @@ test('operator held maintenance: settled idle force preserves replay and timer s
     expect(first.child.hasExited()).toBe(false)
     setNativeChildLiveness(OWNER_USER_ID, () => false)
     const before = getRecord(r.registryPath, key)!
+    // The protected operator audit already captured the original before force.
+    // Only root/OS/artifact observations are synthetic below; record-owner,
+    // audit reading/appending, asleep/replay guards and exact release are real.
+    const fixtureRoot = dirname(r.db.path), auditPath = join(fixtureRoot, 'operator-audit.jsonl')
+    const artifact = { commit: 'a'.repeat(40), contentSha256: 'b'.repeat(64) }
+    const request: MaintenanceRequest = { version: 1, operationId: hold.operationId, dbPath: r.db.path,
+      registryPath: r.registryPath, pendingRespawnsPath: join(fixtureRoot, 'pending-respawns.json'), scope: hold.scope,
+      sessionKey: key, sessionId: first.sessionId, childGeneration: before.child_generation!, childPid: first.child.pid,
+      gatewayPid: process.pid, artifact,
+      deployment: { codeRoot: fixtureRoot, entrypoint: join(fixtureRoot, 'open/server.ts'), revision: artifact.commit, port: 1234, ownerHandle: hold.scope.ownerHandle } }
+    writeFileSync(auditPath, `${JSON.stringify({ stage: 'prepared', request, gateway: { pid: process.pid, identity },
+      owners: [{ generation: before.child_generation, process: { pid: first.child.pid, identity } }],
+      bootstrap: artifact, ownerDirectory: join(fixtureRoot, 'migrations') })}\n`, { mode: 0o600 })
     expect(before.capped_at).toBeUndefined()
     expect((await force())?.status).toBe(202)
     await until(() => r.peer.children.length === 2 && getRecord(r.registryPath, key)?.child_generation !== before.child_generation)
@@ -395,6 +412,31 @@ test('operator held maintenance: settled idle force preserves replay and timer s
     expect(replacement.child.hasExited()).toBe(true)
     expect(getRecord(r.registryPath, key)?.sessionId).toBe(first.sessionId)
     expect(replacement.prompts).toEqual([])
+    const uid = spyOn(process, 'geteuid').mockReturnValue(0)
+    const protection = spyOn(maintenanceAuthority, 'assertRootProtectedPath').mockImplementation(() => {})
+    const schema = spyOn(maintenanceBootstrap, 'assertOperatorMaintenanceSchema').mockImplementation(db => {
+      if (db.all("SELECT name FROM sqlite_master WHERE name IN ('project_operator_maintenance_holds', 'project_operator_maintenance_fence_guard', 'project_operator_maintenance_delete_guard')").length !== 3) throw new Error('fixture schema unavailable')
+    })
+    const gone = spyOn(maintenanceEvidence, 'maintenanceProcessGone').mockImplementation(p =>
+      r.peer.children.some(({ child }) => child.pid === p.pid && child.hasExited()))
+    let census: 'idle' | 'live' | 'unknown' = 'live'
+    const transcript = spyOn(maintenanceEvidence, 'assertNoMaintenanceTranscriptOwner').mockImplementation(() => {
+      if (census !== 'idle') throw new Error(census === 'live' ? 'Transcript still has a possible process owner' : 'Transcript census is unknown')
+    })
+    const deployed = spyOn(maintenanceEvidence, 'verifyMaintenanceDeployment').mockResolvedValue({ pid: process.pid, identity })
+    const socket = spyOn(maintenanceEvidence, 'maintenanceSocketOwned').mockReturnValue(true)
+    try {
+      const generation = getRecord(r.registryPath, key)!.child_generation!
+      // Deliberately run AFTER the timer erased replacement PID/handle. The
+      // audit records a completed-sleep census, NOT an invented historical PID.
+      await expect(runOperatorMaintenance(['record-owner', auditPath, generation])).rejects.toThrow('possible process owner')
+      census = 'unknown'
+      await expect(runOperatorMaintenance(['record-owner', auditPath, generation])).rejects.toThrow('census is unknown')
+      census = 'idle'
+      await runOperatorMaintenance(['record-owner', auditPath, generation])
+      const observed = JSON.parse(readFileSync(auditPath, 'utf8').trim().split('\n').at(-1)!)
+      expect(observed).toMatchObject({ kind: 'sleep', observation: { generation } })
+      expect(observed.observation.process).toBeUndefined()
     let delivered = 0
     const owed = () => r.admission.withLease('p-one', 'conversation', 'acting-turn', 'pending-decision', async () => {
       const ok = await turn(r, 'p-one')
@@ -407,15 +449,19 @@ test('operator held maintenance: settled idle force preserves replay and timer s
     historicalLaunch = false
     r.restart()
     expect((await owed()).status).toBe('fenced')
-    expect(await operator.releaseOperatorMaintenance(hold, () => false)).toBe(false)
-    expect(await operator.releaseOperatorMaintenance(hold, () => getRecord(r.registryPath, key)?.asleep_at !== undefined
-      && r.peer.children.every(({ child }) => child.hasExited()))).toBe(true)
+    census = 'live'
+    await expect(runOperatorMaintenance(['release', auditPath, String(process.pid)])).rejects.toThrow('possible process owner')
+    expect(operator.operatorMaintenanceCurrent(hold)).toBe(true)
+    census = 'idle'
+    await runOperatorMaintenance(['release', auditPath, String(process.pid)])
+    expect(operator.operatorMaintenanceCurrent(hold)).toBe(false)
     r.peer.holdReplies(); releaseReply()
     expect(await owed()).toMatchObject({ status: 'admitted', value: true })
     expect(delivered).toBe(1)
     expect(getRecord(r.registryPath, key)?.reuse?.auth_fingerprint).toBe(routeFingerprint(relay.pin))
     expect(r.peer.children[2]!.sessionId).toBe(first.sessionId)
     expect(launched).toEqual(['https://api.anthropic.com', 'https://api.anthropic.com', 'http://127.0.0.1:0'])
+    } finally { for (const mock of [uid, protection, schema, gone, transcript, deployed, socket]) mock.mockRestore() }
   } finally {
     releaseReply?.(); setNativeChildLiveness(OWNER_USER_ID, undefined)
     lookup.mockRestore(); operatorDb.close(); await relay.close()

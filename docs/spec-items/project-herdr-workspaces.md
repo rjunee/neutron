@@ -101,18 +101,41 @@ The maintained local entrypoint is `open/operator-maintenance.ts`: `hold`
 consumes an explicitly selected root-protected request file and creates a new
 0600 root-protected audit; `record-owner` captures an exact replacement generation
 and kernel process identity after all previously recorded owners have exited;
-`release` consumes that audit and the current gateway PID. It neither invokes
-respawn nor changes a registry row. The hold installer applies only migration
-0167 from its clean committed artifact, preserving the existing migration owner
-marker and every earlier ledger row. It refuses unsupported ledger formats and
-unrecorded or altered maintenance schema. A failed pre-hold attempt retains its
+`release` consumes that audit and the current gateway PID. If the replacement
+already slept before its live PID could be recorded, `record-owner` instead
+records a distinct completed-sleep observation: exact generation, sleep timestamp
+and channel, **not** a historical PID or exit attestation. The same held operation,
+old gateway identity, drained leases and absent/valid target-empty replay are
+required. All previously observed original processes must be gone; a strict fresh
+whole-process census must establish no possible transcript owner. Unknown reads
+refuse; seeing the census process is its positive control. The asleep identity is
+reread around the census, and the census repeats during release.
+
+The actuator neither invokes respawn nor changes a registry row. Its fixed
+additive compatibility bootstrap executes only the reviewed 0167 SQL, committing
+the exact schema and hold together. A protected, fsynced **prepared operator
+audit**, written first, binds the operation, canonical DB, observed old gateway
+and its migration owner, and independently selected reviewed artifact commit/SQL
+hash. A separate postcommit observation records successful application. The old
+gateway's actual protected code tree determines the existing owner marker;
+the separately protected bootstrap artifact never claims to be that owner.
+**Every canonical `_migrations` row stays unchanged.** This is an operational DDL
+audit, not a canonical migration receipt. Old-code restart remains valid; the
+ordinary new runner later really executes the idempotent migration 0167 and
+records its normal provenance. None of the ordinary runner's six pre-write
+guards, owner binding, repair acknowledgements or marker bytes changes.
+Unsupported ledger formats and partial/altered maintenance schema refuse.
+Recovery after an audit-append failure requires the exact durable operation hold
+and exact schema, never a prepared record alone. A failed pre-hold attempt retains its
 audit; retry uses a new explicit operation only after establishing that no hold
 was acquired. There is no automatic expiry or generic unlock command.
 
 Release requires the exact held operation/fence, no remaining admission leases,
 strictly absent or valid target-empty pending replay, a canonical asleep row for
-the last observed native generation, and physical disappearance of every recorded
-native process. The replacement gateway must run the exact tracked `open/server.ts`
+the recorded native generation or completed-sleep observation, and physical
+disappearance of every previously recorded native process. Replay and registry
+reads refuse symlinks, nonregular files and changed/unreadable bounded files.
+The replacement gateway must run the exact tracked `open/server.ts`
 inside the clean protected target tree, start after its tracked source files,
 own the health listener, return the expected instance identity, and retain its
 kernel identity through the final check. Static checkout or health evidence alone

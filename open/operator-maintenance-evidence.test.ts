@@ -3,7 +3,7 @@ import * as fs from 'node:fs'
 import * as childProcess from 'node:child_process'
 import * as authority from './native-host-recovery-authority.ts'
 import * as processIdentity from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
-import { verifyMaintenanceDeployment, type MaintenanceDeployment } from './operator-maintenance-evidence.ts'
+import { assertNoMaintenanceTranscriptOwner, maintenanceOwnerDirectory, verifyMaintenanceDeployment, type MaintenanceDeployment } from './operator-maintenance-evidence.ts'
 
 test('served release proof binds tree, process start, entrypoint, listener and health in both directions', async () => {
   const target: MaintenanceDeployment = { codeRoot: '/protected/tree', entrypoint: '/protected/tree/open/server.ts', revision: 'a'.repeat(40), port: 8080, ownerHandle: 'owner' }
@@ -37,6 +37,7 @@ test('served release proof binds tree, process start, entrypoint, listener and h
   }) as typeof fs.readFileSync)
   const health = spyOn(globalThis, 'fetch').mockImplementation((async () => Response.json({ status: 'ok', project_slug: healthOwner })) as unknown as typeof fetch)
   try {
+    expect(maintenanceOwnerDirectory(target, { pid: 20, identity: current })).toBe('/protected/tree/migrations')
     expect(await verifyMaintenanceDeployment(target, 20, prior)).toEqual({ pid: 20, identity: current })
     argvEntry = '/protected/old/open/server.ts'
     await expect(verifyMaintenanceDeployment({ ...target, entrypoint: argvEntry }, 20, prior)).rejects.toThrow()
@@ -51,4 +52,24 @@ test('served release proof binds tree, process start, entrypoint, listener and h
   } finally {
     for (const mock of [protection, proc, git, stat, real, links, dirs, files, health]) mock.mockRestore()
   }
+})
+
+test('completed-sleep census sees any possible transcript owner and treats unreadable or missing positive control as unknown', () => {
+  const sid = 'fixture-transcript', self = String(process.pid), other = String(process.pid + 100)
+  let listing = [self, other], foreignArgv = 'other-process', unreadable = false
+  const dirs = spyOn(fs, 'readdirSync').mockImplementation(() => listing as never)
+  const files = spyOn(fs, 'readFileSync').mockImplementation(((path: fs.PathOrFileDescriptor) => {
+    if (String(path) === `/proc/${self}/cmdline`) return 'bun\0fixture\0'
+    if (unreadable) throw Object.assign(new Error('fixture denied'), { code: 'EACCES' })
+    return foreignArgv
+  }) as typeof fs.readFileSync)
+  try {
+    expect(() => assertNoMaintenanceTranscriptOwner(sid)).not.toThrow()
+    foreignArgv = `unknown-wrapper\0${sid}\0`
+    expect(() => assertNoMaintenanceTranscriptOwner(sid)).toThrow('possible process owner')
+    foreignArgv = 'other-process'; unreadable = true
+    expect(() => assertNoMaintenanceTranscriptOwner(sid)).toThrow('unknown')
+    unreadable = false; listing = [other]
+    expect(() => assertNoMaintenanceTranscriptOwner(sid)).toThrow('unknown')
+  } finally { dirs.mockRestore(); files.mockRestore() }
 })

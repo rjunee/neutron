@@ -65,6 +65,11 @@ test('hold acquisition and release are atomic, scoped, and do not steal another 
   try {
     expect(await store.holdOperatorMaintenance(scope, crypto.randomUUID())).toBeNull()
     await store.register(scope)
+    await db.run(`INSERT INTO native_host_terminations (operation_id, scope_key, lease_token, preparation)
+      VALUES ('fixture-host-operation', ?, 'fixture-child-lease', 'fixture-preparation')`, [JSON.stringify(['owner', null])])
+    expect(await store.holdOperatorMaintenance(scope, crypto.randomUUID())).toBeNull()
+    expect(store.inspect(scope)?.phase).toBe('open')
+    await db.run("DELETE FROM native_host_terminations WHERE operation_id = 'fixture-host-operation'", [])
     const ordinary = (await store.beginMaintenance(scope))!
     expect(await store.holdOperatorMaintenance(scope, crypto.randomUUID())).toBeNull()
     expect(await store.abandon(ordinary)).toBe(true)
