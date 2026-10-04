@@ -45,6 +45,16 @@ rotation retain their existing scope.
 Harvesting refreshed token bytes preserves the existing grant expiry; refresh does
 not extend a finite project grant.
 
+An authenticated project selection may reference an existing configured account
+by source credential row ID and stable account digest, with a versioned grant
+and optional finite expiry (Decisions Log 2026-10-04). Selection stores metadata
+only; the native account home remains authoritative. Project ownership markers,
+durable owner journals, work records and control sockets remain project-scoped.
+Removing/recreating either source row or project grant invalidates the old binding.
+Independent project subscriptions retain their own account home. Existing owners
+whose persisted scope predates grant identity require explicit reconciliation;
+the upgrade never fabricates a grant identity for their old launch record.
+
 The project Codex status includes `owner_credential`: configuration (`true`, `false`,
 or `null` when inspection could not conclude), observation time and explanation. This
 is a local credential check, not a claim of live owner/build/restart acceptance (#978).
@@ -85,6 +95,26 @@ is a local credential check, not a claim of live owner/build/restart acceptance 
   build admissions, without spawning a replacement owner on refusal.
   Verify: `open/__tests__/codex-owner-binding.test.ts`,
   `open/__tests__/open-trident-prod-boot-wiring.test.ts`.
+- [ ] Selecting a configured account writes no credential bytes and creates no
+  additional auth file. Two explicitly granted projects share canonical account
+  refreshes while retaining separate full-project markers, sockets and journals.
+  Revocation, replacement, source recreation, foreign owner and finite expiry
+  refuse; same-account refresh succeeds without extending the grant.
+  Verify: `trident/codex-project-grant.test.ts`,
+  `gateway/http/codex-credential-surface.test.ts`,
+  `open/__tests__/codex-owner-binding.test.ts`,
+  `open/__tests__/codex-durable-owner.test.ts`.
+- [ ] One canonical account admits one native refresh writer at a time, including
+  project/General owners, probes, exec, reviewer/build and standalone session
+  consumers. The lock survives gateway/helper death while native work remains;
+  competing admission and auth-file mutations refuse visibly as account busy.
+  Distinct-account native consumers remain available. Shared-file synthetic
+  fixtures alone do not satisfy this consuming acceptance.
+  A conclusively pre-native account refusal is retryable after account release,
+  without fabricating retirement or leaving a phantom durable owner. Unknown
+  launches, foreign refusal receipts and any native journal remain fenced.
+  Verify: `runtime/adapters/codex-cli/persistent/project-owner-admission-refusal.test.ts`,
+  `open/__tests__/codex-durable-owner.test.ts`.
 - [ ] A Codex project orchestrates an actual build through completion on Codex.
   Depends on [the project REPL orchestration change](the-orchestrator-owns-the-build-loop.md)
   (#545). Substrate selection alone does not replace the native Workflow launcher.

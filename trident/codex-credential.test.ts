@@ -45,10 +45,10 @@ let db: ProjectDb
 let store: ProjectCredentialStore
 let codexHome: string
 
-function subscriptionAuth(): string {
+function subscriptionAuth(account = 'a'): string {
   return JSON.stringify({
     OPENAI_API_KEY: null,
-    tokens: { id_token: 'id', access_token: 'acc', refresh_token: 'ref', account_id: 'a' },
+    tokens: { id_token: 'id', access_token: 'acc', refresh_token: 'ref', account_id: account },
     last_refresh: '2026-06-30T00:00:00.000Z',
   })
 }
@@ -154,7 +154,7 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
 
   test('connect({scope:project}) stores an override + materializes under the project home', async () => {
     const svc = newService()
-    const res = await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    const res = await svc.connect(OWNER, subscriptionAuth('project-account'), { scope: 'project', project_id: PID })
     expect(res.ok).toBe(true)
     expect(res.scope).toBe('project')
     // Override auth.json lands in the nested project home, NOT the global home.
@@ -170,7 +170,7 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
     await svc.connect(OWNER, subscriptionAuth())
     expect(svc.status(OWNER, { project_id: PID }).scope).toBe('global')
     // Add an override → the project query now resolves the override.
-    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    await svc.connect(OWNER, subscriptionAuth('project-account'), { scope: 'project', project_id: PID })
     expect(svc.status(OWNER, { project_id: PID }).scope).toBe('project')
     // A DIFFERENT project (no override) still resolves the global default.
     expect(svc.status(OWNER, { project_id: 'other' }).scope).toBe('global')
@@ -187,14 +187,14 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
     expect(svc.resolveActiveCodexHome(OWNER, PID)).toBe(codexHome)
     expect(svc.resolveActiveCodexHome(OWNER)).toBe(codexHome)
     // Override → the project home for THAT project (others still global).
-    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    await svc.connect(OWNER, subscriptionAuth('project-account'), { scope: 'project', project_id: PID })
     expect(svc.resolveActiveCodexHome(OWNER, PID)).toBe(projectHome())
     expect(svc.resolveActiveCodexHome(OWNER, 'other')).toBe(codexHome)
   })
 
   test('resolveActiveCodexHome self-heals a wiped override auth.json', async () => {
     const svc = newService()
-    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    await svc.connect(OWNER, subscriptionAuth('project-account'), { scope: 'project', project_id: PID })
     rmSync(codexAuthPath(projectHome()))
     expect(readMaterializedAuth(projectHome())).toBeNull()
     // A fresh service re-materializes the override from the store on resolve.
@@ -206,7 +206,7 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
   test('disconnect override leaves the global default intact', async () => {
     const svc = newService()
     await svc.connect(OWNER, subscriptionAuth())
-    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    await svc.connect(OWNER, subscriptionAuth('project-account'), { scope: 'project', project_id: PID })
     const { ok } = await svc.disconnect(OWNER, { scope: 'project', project_id: PID })
     expect(ok).toBe(true)
     expect(existsSync(codexAuthPath(projectHome()))).toBe(false)
@@ -230,7 +230,7 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
     // Pre-fix this returned null and the build died with CODEX_HOME unset.
     expect(resolve({ project_slug: 'a-project-that-is-not-the-owner' })).toBe(codexHome)
     // An override for THAT project wins; other projects still resolve global.
-    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    await svc.connect(OWNER, subscriptionAuth('project-account'), { scope: 'project', project_id: PID })
     expect(resolve({ project_slug: PID })).toBe(projectHome())
     expect(resolve({ project_slug: 'other' })).toBe(codexHome)
   })
@@ -251,7 +251,7 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
   test('ensureMaterialized ignores a project override (global-only self-heal)', async () => {
     const svc = newService()
     // Only a project override exists — no global default.
-    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    await svc.connect(OWNER, subscriptionAuth('project-account'), { scope: 'project', project_id: PID })
     expect(existsSync(codexAuthPath(codexHome))).toBe(false)
     // ensureMaterialized must NOT pull the override into the global home.
     expect(newService().ensureMaterialized(OWNER)).toBe(false)
@@ -264,7 +264,7 @@ describe('CodexCredentialService — GLOBAL default + per-project OVERRIDE', () 
     expect(svc.status(OWNER, { project_id: PID }).override_present).toBe(false)
     expect(svc.status(OWNER).override_present).toBeUndefined()
     // A live override → present + scope project.
-    await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: PID })
+    await svc.connect(OWNER, subscriptionAuth('project-account'), { scope: 'project', project_id: PID })
     const live = svc.status(OWNER, { project_id: PID })
     expect(live.override_present).toBe(true)
     expect(live.scope).toBe('project')
@@ -572,10 +572,11 @@ describe('harvest account identity', () => {
       await svc.connectAccount(OWNER, subscriptionAuth())
       await svc.connectAccount(OWNER, JSON.stringify(other), { slot: 'work' })
       const project = slot === 'project' ? 'alpha' : ''
-      if (project) await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: project })
+      if (project) await svc.connect(OWNER, subscriptionAuth('project-account'), { scope: 'project', project_id: project })
       const service = slot === 'work' ? 'codex-acct-work' : CODEX_CREDENTIAL_SERVICE
       const home = project ? codexProjectHome(codexHome, project) : svc.slotHome(slot)
       const original = JSON.parse(slot === 'work' ? JSON.stringify(other) : subscriptionAuth())
+      if (project) original.tokens.account_id = 'project-account'
       const refreshed = JSON.parse(JSON.stringify(original))
       refreshed.tokens.access_token = 'new-synthetic-access'
       refreshed.last_refresh = '2026-09-24T00:00:00.000Z'
@@ -613,7 +614,7 @@ describe('harvest account identity', () => {
 describe('project directory ownership', () => {
   test('native owner never resolves a global seat; exact project connection is the positive control', async () => {
     const svc = newService()
-    await svc.connect(OWNER, subscriptionAuth())
+    await svc.connect(OWNER, subscriptionAuth('global-account'))
     const fallback = spyOn(store, 'resolve')
     expect(() => svc.resolveProjectOwnerCredential(OWNER, 'alpha')).toThrow('Connect a Codex subscription to this project')
     expect(fallback).not.toHaveBeenCalled()
@@ -658,7 +659,7 @@ describe('project directory ownership', () => {
   test('native owner refuses expired project rows and revoked credentials without fallback', async () => {
     const svc = new CodexCredentialService({ store, codexHome, rotation: new SqliteCodexRotationStore(db),
       probe: async () => ({ kind: 'revoked', httpStatus: 401 }) })
-    await svc.connect(OWNER, subscriptionAuth())
+    await svc.connect(OWNER, subscriptionAuth('global-account'))
     await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: 'alpha' })
     expect(svc.resolveProjectOwnerCredential(OWNER, 'alpha').codexHome).toBe(codexProjectHome(codexHome, 'alpha'))
     await svc.refreshSeatLiveness(OWNER, { scope: 'project', project_id: 'alpha' })

@@ -58,6 +58,11 @@ export function assertOwnerScope(codexHome: string, projectId: string | null): v
   }
   throw new Error('General owner cannot use a project credential home')
 }
+
+/** Credentials name an account; Neutron state names one conversation scope. */
+export function ownerRoot(value: { codexHome: string; ownerRootDirectory?: string }): string {
+  return value.ownerRootDirectory ?? value.codexHome
+}
 export function socketIdentity(path: string): string {
   privatePath(path, 'socket')
   const info = lstatSync(path)

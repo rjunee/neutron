@@ -19,6 +19,7 @@ import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { codexAuthPath, codexProjectHome } from '@neutronai/trident/codex-auth.ts'
 import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import { acquireCodexAccountWriteLease } from '@neutronai/runtime/adapters/codex-cli/account-writer-lock.ts'
 import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-store.ts'
 import { createCodexCredentialSurface, type CodexCredentialSurface } from './codex-credential-surface.ts'
 
@@ -77,6 +78,20 @@ afterEach(() => {
 })
 
 describe('codex-auth HTTP surface — GLOBAL (primary)', () => {
+  test('a busy native account returns visible 409 without disconnecting or replacing auth', async () => {
+    expect((await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth() })))?.status).toBe(201)
+    const before = readFileSync(codexAuthPath(codexHome), 'utf8')
+    const lease = acquireCodexAccountWriteLease(codexHome)
+    try {
+      for (const request of [req('POST', GLOBAL, { auth: subscriptionAuth() }), req('DELETE', GLOBAL)]) {
+        const response = await surface.handler(request)
+        expect(response?.status).toBe(409)
+        expect(await response!.json()).toMatchObject({ code: 'accountBusy' })
+      }
+      expect(readFileSync(codexAuthPath(codexHome), 'utf8')).toBe(before)
+    } finally { lease.close() }
+    expect((await surface.handler(req('DELETE', GLOBAL)))?.status).toBe(200)
+  })
   test('maintenance returns 409 for writers and probing status, while stored metadata stays readable', async () => {
     const crypto = new SecretsStore({ data_dir: tmp, db })
     const store = new ProjectCredentialStore(db, { crypto })
@@ -135,7 +150,7 @@ describe('codex-auth HTTP surface — GLOBAL (primary)', () => {
     await surface.handler(req('POST', GLOBAL, { auth }))
     const inherited = await (await surface.handler(req('GET', PROJECT)))!.json()
     expect(inherited).toMatchObject({ status: 'connected', scope: 'global', owner_credential: { configured: false, checked_at: expect.any(String) } })
-    await surface.handler(req('POST', PROJECT, { auth }))
+    expect((await surface.handler(req('POST', PROJECT, (inherited as { available_accounts: unknown[] }).available_accounts[0])))?.status).toBe(201)
     const connected = await (await surface.handler(req('GET', PROJECT)))!.json()
     expect(connected).toMatchObject({ status: 'connected', scope: 'project', owner_credential: { configured: true } })
     expect(JSON.stringify(connected)).not.toContain('fixture-account')
@@ -143,6 +158,26 @@ describe('codex-auth HTTP surface — GLOBAL (primary)', () => {
     const other = await (await surface.handler(req('GET', '/api/app/projects/p2/codex-auth')))!.json()
     expect(other).toMatchObject({ owner_credential: { configured: false } })
   })
+  test('project reference grant requires authenticated exact selection and never copies or deletes the account auth', async () => {
+    const auth = JSON.stringify({ tokens: { access_token: 'reference-access', refresh_token: 'reference-refresh', account_id: 'reference-account' } })
+    await surface.handler(req('POST', GLOBAL, { auth }))
+    const status = await (await surface.handler(req('GET', PROJECT)))!.json() as { available_accounts: Array<{ source_row_id: string; account_identity: string }> }
+    const selected = status.available_accounts[0]!
+    const before = readFileSync(codexAuthPath(codexHome), 'utf8')
+    expect((await surface.handler(req('POST', PROJECT, selected, false)))?.status).toBe(401)
+    expect((await surface.handler(req('POST', PROJECT, { ...selected, source_row_id: 'foreign-row' })))?.status).toBe(409)
+    expect((await surface.handler(req('POST', PROJECT, { ...selected, account_identity: '0'.repeat(64) })))?.status).toBe(409)
+    expect((await surface.handler(req('POST', PROJECT, { ...selected, auth })))?.status).toBe(400)
+    expect((await surface.handler(req('POST', PROJECT, { auth })))?.status).toBe(400)
+    const response = await surface.handler(req('POST', PROJECT, selected))
+    expect(response?.status).toBe(201)
+    expect(await response?.json()).toMatchObject({ scope: 'project', grant: { version: 1, source_row_id: selected.source_row_id } })
+    expect(existsSync(codexAuthPath(codexProjectHome(codexHome, 'p1')))).toBe(false)
+    expect(readFileSync(codexAuthPath(codexHome), 'utf8')).toBe(before)
+    expect((await surface.handler(req('DELETE', PROJECT)))?.status).toBe(200)
+    expect(readFileSync(codexAuthPath(codexHome), 'utf8')).toBe(before)
+  })
+
   test('disclaims non-owned paths with null', async () => {
     expect(await surface.handler(req('GET', '/api/app/projects/p1/credentials'))).toBeNull()
     expect(await surface.handler(req('GET', '/api/other'))).toBeNull()

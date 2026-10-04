@@ -39,3 +39,11 @@ boot assertion (`trident/codex-project-owner.ts:21`,
 `trident/codex-credential.ts:386`). Missing or damaged markers require the same
 explicit identity investigation. This is protection against accidental identity
 aliasing, not against an actor who can rewrite the credential directory itself.
+
+Explicit configured-account references (Decisions Log 2026-10-04) keep this
+marker in the project's Neutron state directory. Their native `CODEX_HOME`
+points to the canonical account home, which contains no project marker. Do not
+copy or symlink its auth file into project state. A reference grant cannot replace
+an existing project auth file; that case requires explicit custody reconciliation.
+An existing durable owner launch without the current grant identity also refuses
+attachment until reconciled rather than silently inheriting a newly created grant.

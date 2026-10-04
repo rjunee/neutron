@@ -2,7 +2,7 @@ import { lstatSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import type { CodexOwnerBindingFacts } from './project-control-bootstrap.ts'
-import { helperIdentity, type HelperIdentity } from './project-owner-helper-protocol.ts'
+import { helperIdentity, ownerRoot, type HelperIdentity } from './project-owner-helper-protocol.ts'
 
 /** A reused PID is not the recorded process; unreadable procfs is not death. */
 export function assertOwnerProcessDead(identity: HelperIdentity): void {
@@ -24,5 +24,5 @@ export function assertOwnerProcessDead(identity: HelperIdentity): void {
 
 export function nextOwnerDirectory(facts: CodexOwnerBindingFacts): string {
   if (!/^[a-f0-9]{64}$/.test(facts.bindingRevision)) throw new Error('Invalid retired owner revision')
-  return join(facts.codexHome, '.neutron-owner-generations', facts.bindingRevision)
+  return join(ownerRoot(facts), '.neutron-owner-generations', facts.bindingRevision)
 }
