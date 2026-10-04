@@ -5,6 +5,7 @@ export type AdmissionReason = 'conversation' | 'queuedDispatch' | 'build' | 'app
 export type MaintenancePhase = 'draining' | 'quiesced' | 'replacing' | 'attesting';
 export interface AdmissionLease { scope: ProjectAdmissionScope; generation: number; token: string }
 export interface MaintenanceFence extends AdmissionLease { phase: MaintenancePhase }
+export interface OperatorMaintenanceHold extends MaintenanceFence { operationId: string; createdAt: number }
 /** One durable lease row, its scope decoded. `workRef` is the producer's work id. */
 export interface AdmissionLeaseRow extends AdmissionLease { reason: AdmissionReason; producer: string; workRef: string }
 export interface NativeHostTerminationRow { operationId: string; scope: ProjectAdmissionScope; preparation: string; termination: string | null }
@@ -201,16 +202,69 @@ export class ProjectAdmissionStore {
   }
 
   async beginMaintenance(scope: ProjectAdmissionScope): Promise<MaintenanceFence | null> {
+    return this.db.transaction(tx => this.beginMaintenanceLocked(tx, scope));
+  }
+
+  private async beginMaintenanceLocked(tx: ProjectDb, scope: ProjectAdmissionScope): Promise<MaintenanceFence | null> {
+    tx.assertInTransaction();
     const key = scopeKey(scope);
-    return this.db.transaction(async tx => {
-      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
-      const token = crypto.randomUUID();
-      const changed = tx.runSync(`UPDATE project_admission_fences SET generation = generation + 1,
+    await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+    const token = crypto.randomUUID();
+    const changed = tx.runSync(`UPDATE project_admission_fences SET generation = generation + 1,
         phase = 'draining', maintenance_token = ? WHERE scope_key = ? AND phase = 'open'
         AND generation < 9007199254740991`, [token, key]).changes;
-      if (changed !== 1) return null;
-      const row = tx.get<FenceRow>('SELECT generation FROM project_admission_fences WHERE scope_key = ?', [key])!;
-      return { scope: { ...scope }, generation: row.generation, token, phase: 'draining' as const };
+    if (changed !== 1) return null;
+    const row = tx.get<FenceRow>('SELECT generation FROM project_admission_fences WHERE scope_key = ?', [key])!;
+    return { scope: { ...scope }, generation: row.generation, token, phase: 'draining' as const };
+  }
+
+  /** Privileged deployment actuator only. The hold and the ordinary draining
+   * fence commit together. Unknown/unregistered or already-held scopes refuse;
+   * this never provisions a scope or consumes a work lease. */
+  async holdOperatorMaintenance(scope: ProjectAdmissionScope, operationId: string): Promise<OperatorMaintenanceHold | null> {
+    if (!/^[a-f0-9-]{36}$/.test(operationId)) throw new Error('Invalid maintenance operation');
+    return this.db.transaction(async tx => {
+      const fence = await this.beginMaintenanceLocked(tx, scope);
+      if (!fence) return null;
+      const createdAt = Date.now();
+      tx.runSync(`INSERT INTO project_operator_maintenance_holds
+        (operation_id, scope_key, generation, maintenance_token, created_at) VALUES (?, ?, ?, ?, ?)`,
+      [operationId, scopeKey(scope), fence.generation, fence.token, createdAt]);
+      return { ...fence, operationId, createdAt };
+    });
+  }
+
+  operatorMaintenanceCurrent(hold: OperatorMaintenanceHold): boolean {
+    return hold.phase === 'draining' && Boolean(this.db.get(`SELECT 1 FROM project_operator_maintenance_holds h
+      JOIN project_admission_fences f ON f.scope_key = h.scope_key
+      WHERE h.operation_id = ? AND h.scope_key = ? AND h.generation = ? AND h.maintenance_token = ?
+        AND f.generation = h.generation AND f.maintenance_token = h.maintenance_token AND f.phase = 'draining'`,
+    [hold.operationId, scopeKey(hold.scope), hold.generation, hold.token]));
+  }
+
+  operatorMaintenanceFor(scope: ProjectAdmissionScope, operationId: string): OperatorMaintenanceHold | null {
+    const row = this.db.get<{ generation: number; maintenance_token: string; created_at: number }>(
+      'SELECT generation, maintenance_token, created_at FROM project_operator_maintenance_holds WHERE scope_key = ? AND operation_id = ?',
+      [scopeKey(scope), operationId]);
+    if (!row) return null;
+    const hold: OperatorMaintenanceHold = { scope: { ...scope }, operationId, generation: row.generation,
+      token: row.maintenance_token, createdAt: row.created_at, phase: 'draining' };
+    return this.operatorMaintenanceCurrent(hold) ? hold : null;
+  }
+
+  /** Caller must independently establish deployed identity and canonical sleep.
+   * Proof is rechecked inside the writer lock; failure leaves the hold intact.
+   * No lease, cap, dispatch or completion row is ever changed here. */
+  async releaseOperatorMaintenance(hold: OperatorMaintenanceHold, verified: () => boolean): Promise<boolean> {
+    return this.db.transaction(async tx => {
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [scopeKey(hold.scope)]);
+      if (!this.operatorMaintenanceCurrent(hold) || this.inspect(hold.scope)?.leases !== 0
+        || this.hasPreparedHostTermination(hold.scope) || !verified()) return false;
+      const removed = tx.runSync(`DELETE FROM project_operator_maintenance_holds
+        WHERE operation_id = ? AND scope_key = ? AND generation = ? AND maintenance_token = ?`,
+      [hold.operationId, scopeKey(hold.scope), hold.generation, hold.token]).changes;
+      if (removed !== 1 || !this.abandonLocked(tx, hold)) throw new Error('Maintenance release did not commit');
+      return true;
     });
   }
 
@@ -247,12 +301,17 @@ export class ProjectAdmissionStore {
    * attesting generation is refused: once replacement began, only attestation
    * of the actual replacement may reopen admission. */
   async abandon(fence: MaintenanceFence): Promise<boolean> {
+    return this.db.transaction(tx => this.abandonLocked(tx, fence));
+  }
+
+  private abandonLocked(tx: ProjectDb, fence: MaintenanceFence): boolean {
+    tx.assertInTransaction();
     if (fence.phase !== 'draining' && fence.phase !== 'quiesced') return false;
     const key = scopeKey(fence.scope);
-    return this.db.transaction(tx => tx.runSync(`UPDATE project_admission_fences
+    return tx.runSync(`UPDATE project_admission_fences
       SET phase = 'open', maintenance_token = NULL WHERE scope_key = ? AND generation = ?
       AND maintenance_token = ? AND phase = ? AND phase IN ('draining', 'quiesced')`,
-    [key, fence.generation, fence.token, fence.phase]).changes === 1);
+    [key, fence.generation, fence.token, fence.phase]).changes === 1;
   }
 
   /** Release every unreserved lease of ONE piece of work — by scope, reason and work

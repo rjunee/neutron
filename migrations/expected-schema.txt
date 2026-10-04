@@ -1390,6 +1390,15 @@ CREATE TABLE project_members (
     FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
 ) STRICT
 
+[table] project_operator_maintenance_holds (tbl=project_operator_maintenance_holds)
+CREATE TABLE project_operator_maintenance_holds (
+  operation_id TEXT PRIMARY KEY,
+  scope_key TEXT NOT NULL UNIQUE REFERENCES project_admission_fences(scope_key),
+  generation INTEGER NOT NULL,
+  maintenance_token TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+)
+
 [table] projects (tbl=projects)
 CREATE TABLE "projects" (
     id                   TEXT PRIMARY KEY NOT NULL,
@@ -1891,6 +1900,28 @@ BEFORE UPDATE OF execution_strategy ON code_trident_runs
 WHEN OLD.execution_strategy IS NOT NULL AND NEW.execution_strategy IS NOT OLD.execution_strategy
 BEGIN
     SELECT RAISE(ABORT, 'execution strategy is immutable');
+END
+
+[trigger] project_operator_maintenance_delete_guard (tbl=project_admission_fences)
+CREATE TRIGGER project_operator_maintenance_delete_guard
+BEFORE DELETE ON project_admission_fences
+WHEN EXISTS (SELECT 1 FROM project_operator_maintenance_holds h WHERE h.scope_key = OLD.scope_key)
+BEGIN
+  SELECT RAISE(IGNORE);
+END
+
+[trigger] project_operator_maintenance_fence_guard (tbl=project_admission_fences)
+CREATE TRIGGER project_operator_maintenance_fence_guard
+BEFORE UPDATE ON project_admission_fences
+WHEN EXISTS (
+  SELECT 1 FROM project_operator_maintenance_holds h
+  WHERE h.scope_key = OLD.scope_key AND h.generation = OLD.generation
+    AND h.maintenance_token = OLD.maintenance_token
+)
+AND (NEW.scope_key IS NOT OLD.scope_key OR NEW.generation IS NOT OLD.generation
+  OR NEW.phase IS NOT OLD.phase OR NEW.maintenance_token IS NOT OLD.maintenance_token)
+BEGIN
+  SELECT RAISE(IGNORE);
 END
 
 [trigger] rail_message_insert (tbl=app_chat_messages)

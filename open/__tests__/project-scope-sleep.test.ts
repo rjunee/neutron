@@ -20,6 +20,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
+import { ProjectAdmissionStore } from '@neutronai/gateway/project-admission-store.ts'
+import { runProjectLivenessCensus } from '@neutronai/gateway/project-liveness-census.ts'
+import { resumeProjectMaintenance } from '@neutronai/gateway/project-generation-replacement.ts'
+import { createAdminRespawnSurface } from '@neutronai/gateway/http/admin-respawn-surface.ts'
 import { boot } from '@neutronai/gateway/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { newCredentialPool, reportFailure, type CredentialPool } from '@neutronai/runtime/credential-pool.ts'
@@ -31,7 +35,7 @@ import { deriveReplSupervisionPaths } from '@neutronai/runtime/adapters/claude-c
 import { herdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
 import { createPersistentReplSubstrate, poolKeyFor, retirePersistentRepl, shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/pool.ts'
 import { committedDispatches, retiringSessionKeys } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
-import { registerSupervisedSubstrate } from '@neutronai/runtime/adapters/claude-code/persistent/supervision.ts'
+import { registerSupervisedSubstrate, respawnSupervisedSession } from '@neutronai/runtime/adapters/claude-code/persistent/supervision.ts'
 import { disownPane, getRecord, patchRecord } from '@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/persistent/types.ts'
 import { setNativeChildLiveness } from '@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts'
@@ -149,7 +153,7 @@ interface Rig {
   codexStarts: Array<string | undefined>
 }
 
-async function rig(overrides: Partial<ProjectScopeLifecycleDeps> = {}, options: { codex?: boolean } = {}): Promise<Rig> {
+async function rig(overrides: Partial<ProjectScopeLifecycleDeps> = {}, options: { codex?: boolean; participating?: boolean } = {}): Promise<Rig> {
   setNativeChildLiveness(OWNER_USER_ID, undefined)
   const root = tempDir('project-scope-sleep-')
   mkdirSync(join(root, 'cwd'))
@@ -193,6 +197,10 @@ async function rig(overrides: Partial<ProjectScopeLifecycleDeps> = {}, options: 
       ...(opts.projectPlacement === undefined ? {} : { projectPlacement: opts.projectPlacement }),
       ptyHost: opts.ptyHost === undefined ? peer.host : placedHost,
       replRegistryPath: registryPath,
+      ...(options.participating ? {
+        admissionGeneration: () => admission.generationFor(opts.conversationProjectId),
+        pendingRespawnsPath: join(root, 'pending-respawns.json'),
+      } : {}),
       skipTrustSeed: true, idleQuietMs: 0, sinkPort,
       // The session's JSONL transcript lands on disk (as `claude` writes it).
       jsonlExistsProbe: sessionId => {
@@ -307,6 +315,111 @@ test('capable server atomically retires empty scope workspace and wake preserves
   expect(livePane(r)!.workspace_id).not.toBe(workspace)
   expect(r.peer.children[1]!.sessionId).toBe(first.sessionId)
   expect(readFileSync(join(r.transcripts, `${first.sessionId}.jsonl`), 'utf8')).toBe(transcript)
+})
+
+test('operator held maintenance: settled idle force preserves replay and timer sleeps before genuine v3 wake', async () => {
+  const relay = await capacityFixture()
+  let r!: Rig
+  const r0 = await rig({ idleMs: 1000, liveness: () => ({
+    census: scope => runProjectLivenessCensus({ admission: r.admission,
+      probes: { ...buildProjectLivenessProbes({ admission: r.admission, turnInFlight: () => false }),
+        // Only the process boundary is synthetic. Session/poison/lease evidence
+        // is the real pool and admission; there are no descendant fixture tasks.
+        descendants: async () => ({ verdict: 'idle', reasons: [] }),
+      },
+    }, scope),
+  }) }, { participating: true })
+  r = r0
+  const operatorDb = ProjectDb.open(r.db.path), operator = new ProjectAdmissionStore(operatorDb)
+  const readIdentity = processIdentity.readProcessIdentity, identity = readIdentity(process.pid)!
+  const lookup = spyOn(processIdentity, 'readProcessIdentity').mockImplementation(pid =>
+    r.peer.children.some(({ child }) => child.pid === pid && !child.hasExited()) ? identity : readIdentity(pid))
+  const old = `native-relay-v2:${createHash('sha256').update(JSON.stringify([
+    relay.pin.hostId, relay.pin.instanceId, relay.pin.socketPath, relay.pin.publicKey,
+  ])).digest('hex')}`
+  pinLookup.mockReturnValue(relay.pin); routeLookup.mockReturnValue(old)
+  let historicalLaunch = true
+  const launched: Array<string | undefined> = []
+  const spawn = r.peer.host.spawn.bind(r.peer.host)
+  r.peer.host.spawn = async (argv, options) => {
+    if (historicalLaunch) options.env = { ...options.env, ANTHROPIC_BASE_URL: 'https://api.anthropic.com' }
+    launched.push(options.env?.ANTHROPIC_BASE_URL)
+    return { ...await spawn(argv, options), readScreen: async () => 'API Error\n❯' }
+  }
+  let releaseReply!: () => void
+  const replyGate = new Promise<void>(resolve => { releaseReply = resolve })
+  try {
+    // Capture the conversation through an actual successful admitted dispatch.
+    expect(await r.admission.withLease('p-one', 'conversation', 'chat', 'initial', async () => turn(r, 'p-one')))
+      .toMatchObject({ status: 'admitted', value: true })
+    const first = r.peer.children[0]!, key = keyOf(r, first.sessionId)!
+    await until(() => getRecord(r.registryPath, key)?.has_session === true)
+    r.peer.holdReplies(() => replyGate)
+    let handle!: SessionHandle
+    const actor = r.admission.withLease('p-one', 'conversation', 'acting-turn', 'pending-decision', async () => {
+      handle = r.wired.liveAgentSubstrate!.start(specFor('p-one'))
+      return collect(handle)
+    })
+    await until(() => first.prompts.length === 2)
+    const hold = (await operator.holdOperatorMaintenance(r.admission.scopeFor('p-one'), crypto.randomUUID()))!
+    expect(await operator.releaseOperatorMaintenance(hold, () => true)).toBe(false)
+    expect(await resumeProjectMaintenance({ admission: r.admission, ports: {} as never }, 'p-one')).toMatchObject({ status: 'held' })
+    // This is the caller's real timeout/cancel, not a lease deletion or completion.
+    await handle.cancel()
+    await actor
+    await until(() => [...committedDispatches.values()].every(count => count === 0))
+    expect(r.admission.inspect('p-one')?.leases).toBe(0)
+    expect((await r.lifecycle.awake('p-one')).status).toBe('awake') // poison really blocks old sleep
+    const surface = createAdminRespawnSurface({ gatewayToken: 'operator',
+      respawn: sessionKey => respawnSupervisedSession(r.registryPath, sessionKey) })
+    const force = (token = 'operator') => surface.handler(new Request('http://fixture/admin/respawn-session', {
+      method: 'POST', headers: { 'X-Gateway-Token': token }, body: JSON.stringify({ session: key }),
+    }))
+    expect((await force('foreign'))?.status).toBe(403)
+    setNativeChildLiveness(OWNER_USER_ID, () => true)
+    expect((await force())?.status).toBe(500)
+    expect(first.child.hasExited()).toBe(false)
+    setNativeChildLiveness(OWNER_USER_ID, () => false)
+    const before = getRecord(r.registryPath, key)!
+    expect(before.capped_at).toBeUndefined()
+    expect((await force())?.status).toBe(202)
+    await until(() => r.peer.children.length === 2 && getRecord(r.registryPath, key)?.child_generation !== before.child_generation)
+    expect(first.child.hasExited()).toBe(true)
+    const replacement = r.peer.children[1]!
+    expect(replacement.sessionId).toBe(first.sessionId)
+    expect(replacement.prompts).toEqual([])
+    expect(getRecord(r.registryPath, key)?.reuse?.auth_fingerprint).toBe(old)
+    expect(r.admission.inspect('p-one')?.phase).toBe('draining')
+    // The timer belongs to the genuinely settled dispatch, not to a new sleep call.
+    await until(() => getRecord(r.registryPath, key)?.asleep_at !== undefined)
+    expect(replacement.child.hasExited()).toBe(true)
+    expect(getRecord(r.registryPath, key)?.sessionId).toBe(first.sessionId)
+    expect(replacement.prompts).toEqual([])
+    let delivered = 0
+    const owed = () => r.admission.withLease('p-one', 'conversation', 'acting-turn', 'pending-decision', async () => {
+      const ok = await turn(r, 'p-one')
+      if (ok) delivered++
+      return ok
+    })
+    expect((await owed()).status).toBe('fenced')
+    expect(delivered).toBe(0)
+    routeLookup.mockImplementation(() => routeFingerprint(relay.pin))
+    historicalLaunch = false
+    r.restart()
+    expect((await owed()).status).toBe('fenced')
+    expect(await operator.releaseOperatorMaintenance(hold, () => false)).toBe(false)
+    expect(await operator.releaseOperatorMaintenance(hold, () => getRecord(r.registryPath, key)?.asleep_at !== undefined
+      && r.peer.children.every(({ child }) => child.hasExited()))).toBe(true)
+    r.peer.holdReplies(); releaseReply()
+    expect(await owed()).toMatchObject({ status: 'admitted', value: true })
+    expect(delivered).toBe(1)
+    expect(getRecord(r.registryPath, key)?.reuse?.auth_fingerprint).toBe(routeFingerprint(relay.pin))
+    expect(r.peer.children[2]!.sessionId).toBe(first.sessionId)
+    expect(launched).toEqual(['https://api.anthropic.com', 'https://api.anthropic.com', 'http://127.0.0.1:0'])
+  } finally {
+    releaseReply?.(); setNativeChildLiveness(OWNER_USER_ID, undefined)
+    lookup.mockRestore(); operatorDb.close(); await relay.close()
+  }
 })
 
 test('canonical sleep preserves an old native protocol row; admitted wake genuinely captures the new protocol', async () => {

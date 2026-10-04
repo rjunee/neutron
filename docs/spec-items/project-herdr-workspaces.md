@@ -77,6 +77,50 @@ clears their ownership claims under lock, and closes the empty workspace. A new
 message or due project work wakes it. Unknown liveness does not license closure.
 Gateway restart preserves active work and is not a sleep event.
 
+Operator deployment maintenance may hold one explicitly registered scope's
+ordinary draining fence without restarting its gateway. An operation-bound
+durable hold prevents even an older gateway's recurring recovery from reopening
+that fence. Acquisition is atomic; existing work releases normally; there is no
+expiry, fabricated completion, lease deletion or cap release. Only the privileged
+local actuator owns hold release, after independently verifying the deployed
+target, canonical asleep transcript and disappearance of the recorded native
+process. A mismatch or unreadable observation preserves the hold. This does not
+replace sleep's own ownership, native-child, foreground or idle checks.
+
+For a settled, independently observed idle and uncapped native parent, the
+existing operator respawn may replace an abandoned/poisoned process before the
+existing idle timer sleeps its replacement. Active turns, pending inbound replay,
+unknown native work and changed ownership refuse this maintenance procedure.
+The procedure never uses force to cancel active work or release a cap. Verify the
+held old-recovery, real turn-finalization, idle-respawn, canonical-sleep and genuine
+post-release wake sequence in `open/__tests__/project-scope-sleep.test.ts`, and the
+cross-connection hold/release controls in `gateway/operator-maintenance-hold.test.ts`.
+
+Invoke only from a wholly root-owned, protected, clean committed artifact.
+The maintained local entrypoint is `open/operator-maintenance.ts`: `hold`
+consumes an explicitly selected root-protected request file and creates a new
+0600 root-protected audit; `record-owner` captures an exact replacement generation
+and kernel process identity after all previously recorded owners have exited;
+`release` consumes that audit and the current gateway PID. It neither invokes
+respawn nor changes a registry row. The hold installer applies only migration
+0167 from its clean committed artifact, preserving the existing migration owner
+marker and every earlier ledger row. It refuses unsupported ledger formats and
+unrecorded or altered maintenance schema. A failed pre-hold attempt retains its
+audit; retry uses a new explicit operation only after establishing that no hold
+was acquired. There is no automatic expiry or generic unlock command.
+
+Release requires the exact held operation/fence, no remaining admission leases,
+strictly absent or valid target-empty pending replay, a canonical asleep row for
+the last observed native generation, and physical disappearance of every recorded
+native process. The replacement gateway must run the exact tracked `open/server.ts`
+inside the clean protected target tree, start after its tracked source files,
+own the health listener, return the expected instance identity, and retain its
+kernel identity through the final check. Static checkout or health evidence alone
+does not authorize release. Refusals emit only controlled reason codes, never
+tokens, raw exceptions, replay payloads or private paths. Verify these directions
+in `open/operator-maintenance.test.ts`, `open/operator-maintenance-evidence.test.ts`
+and `migrations/operator-maintenance.test.ts`.
+
 ## Acceptance
 
 - [ ] Explicit project placement creates separate workspaces for two projects
