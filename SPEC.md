@@ -342,6 +342,17 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-10-04 — Explicit current-shell authority for legacy workspace cleanup.
+
+Owner-directed unused-pane cleanup preserves creation-bound automatic retirement.
+Legacy shells with no recorded creation birth may be retired only by a distinct
+protected operator request and audit establishing their current physical identity
+and idle held scope. This does not infer historical ownership or give ordinary
+runtime code replacement authority. The operator uses the existing guarded input
+hold/retirement primitive, never raw close or lease/journal repair. Detailed
+contract and paired refusal controls belong to
+`docs/spec-items/project-herdr-workspaces.md`.
+
 ### 2026-10-04 — Explicit Codex project grants reference configured accounts.
 
 A project can explicitly select an already configured subscription through its
