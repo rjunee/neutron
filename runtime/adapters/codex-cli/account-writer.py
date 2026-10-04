@@ -4,7 +4,6 @@
 Exit 73 means busy; 74 means admission unknown. No credential bytes are read.
 The permanent lock inode and inherited open-file description outlive all parents.
 """
-import errno
 import fcntl
 import json
 import os
@@ -26,7 +25,8 @@ def canonical_home(value):
     if not home.is_absolute():
         raise ValueError('Account home must be absolute')
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if str(home.resolve()) != str(home) or home.stat().st_uid != os.getuid():
+    home = home.resolve()
+    if home.stat().st_uid != os.getuid():
         raise ValueError('Account home must be owned and canonical')
     return home
 
@@ -57,7 +57,7 @@ def census(home, proc=Path('/proc')):
     """Unwrapped native consumers are competitors too; failed reads are unknown.
 
     Only executable Codex processes count, not a shell carrying CODEX_HOME.
-    Unset CODEX_HOME uses the process's HOME. Remote clients do not own auth.
+    Unset CODEX_HOME uses the process's HOME.
     """
     entries = list(proc.iterdir())
     if not any(p.name == str(os.getpid()) for p in entries):
@@ -78,9 +78,9 @@ def census(home, proc=Path('/proc')):
                 continue
             environment = dict(v.split('=', 1) for v in (path / 'environ').read_bytes().decode().split('\0') if '=' in v)
             after = process_identity(path)
-            if before != after:
+            if before[1] != after[1]:
                 raise ValueError('Process census changed')
-            if '--remote' in argv or any(v.startswith('--remote=') for v in argv):
+            if after[0] in ('Z', 'X'):
                 continue
             value = environment.get('CODEX_HOME') or str(Path(environment['HOME']) / '.codex')
             candidate = Path(value)
@@ -91,6 +91,12 @@ def census(home, proc=Path('/proc')):
         except FileNotFoundError:
             # A vanished PID is the only unreadable process proven gone.
             if path.exists():
+                try:
+                    if process_identity(path)[0] in ('Z', 'X'):
+                        continue
+                except FileNotFoundError:
+                    if not path.exists():
+                        continue
                 raise ValueError('Process census is incomplete')
 
 
@@ -129,6 +135,11 @@ def main(argv):
     if argv[0] == '--census':
         home = canonical_home(argv[1])
         census(home)
+        return
+    if argv[0] == '--resolve':
+        env = dict(os.environ)
+        native = native_command(argv[1], env)
+        print(json.dumps(native))
         return
     inherited = None
     home_value = os.environ.get('CODEX_HOME') or str(Path(os.environ['HOME']) / '.codex')

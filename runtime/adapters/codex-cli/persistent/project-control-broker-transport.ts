@@ -1,8 +1,9 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { isAbsolute } from 'node:path'
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { nativeBunEnvironment } from './native-bun-cache.ts'
+import { acquireCodexAccountWriteLease, codexAccountWriterLauncher, CodexAccountWriterError, type CodexAccountWriteLease } from '../account-writer-lock.ts'
 
 export interface ProjectControlTransport {
   send(message: Record<string, unknown>): void
@@ -25,13 +26,23 @@ export function createProjectControlStdioTransport(options: {
   codexHome: string
   env: Readonly<Record<string, string>>
   configOverrides?: readonly string[]
+  accountWriteLease?: CodexAccountWriteLease
 }): ProjectControlTransport {
   if (!isAbsolute(options.cwd) || !isAbsolute(options.codexHome)) throw new Error('Explicit project paths required')
   const env = nativeBunEnvironment(options.env)
-  const child = spawn(options.binary, ['app-server', '--listen', 'stdio://',
-    ...(options.configOverrides ?? []).flatMap(value => ['-c', value])], {
-    cwd: options.cwd, env: { ...env, CODEX_HOME: options.codexHome }, stdio: ['pipe', 'pipe', 'pipe'],
-  })
+  const lease = options.accountWriteLease ?? acquireCodexAccountWriteLease(options.codexHome)
+  if (lease.canonicalHome !== realpathSync(options.codexHome)) {
+    throw new CodexAccountWriterError('accountAdmissionUnknown', 'Account writer lease belongs to a different home')
+  }
+  const child = (() => {
+    try {
+      return spawn('python3', ['-B', codexAccountWriterLauncher, '--home', options.codexHome,
+        '--inherited-lock-fd', '3', '--', options.binary, 'app-server', '--listen', 'stdio://',
+        ...(options.configOverrides ?? []).flatMap(value => ['-c', value])], {
+        cwd: options.cwd, env: { ...env, CODEX_HOME: options.codexHome }, stdio: ['pipe', 'pipe', 'pipe', lease.fd],
+      }) as ChildProcessWithoutNullStreams
+    } finally { lease.close() }
+  })()
   let receive: ((value: unknown) => void) | undefined
   let disconnect: ((error: Error) => void) | undefined
   let failure: Error | undefined
