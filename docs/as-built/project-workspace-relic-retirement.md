@@ -1,6 +1,6 @@
 ## 2026-10-04 — Preserve and safely retire dead Chat workspace remnants
 
-Refs #1432, #1342. Dead native-owner relinquishment retained only pane/tab
+Refs #1342. Dead native-owner relinquishment retained only pane/tab
 handles, and relic-only scopes appeared absent to lifecycle cleanup. Chat
 creation now preserves the server-returned terminal/runtime birth receipt; the
 journal carries it through relinquishment and exposes a distinct relic state.
@@ -23,8 +23,20 @@ controls cover these repairs.
 The final kernel census uses the same unissued-release path when background work
 arrives after the first census. Its regression verifies the exact release and
 successful next wake; the former missing-release mutant fails that assertion
-while the idle sibling passes. Uncertain input epochs and already-issued
+while the idle sibling passes. Uncorrelated input-epoch acknowledgments and already-issued
 retirement keep their holds and reservations.
+An exact held acknowledgment with a new epoch is known changed input, not an
+uncorrelated reply: before any retirement is issued it durably releases at the
+acknowledged epoch and permits the next wake. Lost-release and repeat-retry
+controls distinguish this from mismatched acknowledgments and issued uncertainty.
+The shared kernel census also verifies an unchanged unfiltered root procfs mount;
+nonzero/unknown `hidepid`, ambiguous roots and PID overmounts refuse, including
+for a privileged observer. Same-UID observer/subject controls alone did not prove
+that cross-UID background members were visible.
+The restrictive old-epoch mutant fails both exact-release recovery controls;
+accepting a mismatched epoch status fails the retained-hold control. Removing
+the proc visibility guard fails filtered-mount cases while unfiltered siblings
+pass. Restored source passes the full focused group.
 
 The normative item records a separate protected current-shell operator authority
 for legacy cleanup. This public change does not implement that privileged
@@ -32,7 +44,7 @@ actuator or claim deployment cleanup. There are no raw-close fallbacks, lease
 deletions, registry repairs or transcript writes.
 
 Measured locally: 89 focused manager/empty-workspace/lifecycle tests passed;
-the subsequently extended new relic/census/lifecycle group passed all 31 tests.
+the subsequently extended new relic/census/lifecycle group passed all 44 tests.
 The three consuming `open/__tests__/project-build-e2e.test.ts` project/General
 placement fixtures passed (55 assertions; remaining cases filtered). Root and
 Trident type checks and changed-file lint passed. A restrictive mutant restoring

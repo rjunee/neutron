@@ -578,8 +578,9 @@ export class ProjectWorkspaceManager {
         const reply = object(await client.call('pane.hold_owned_input', { target, hold_token: held.holdToken }))
         if (reply.type !== 'pane_owned_input' || !isDeepStrictEqual(reply.target, target)
           || reply.hold_token !== held.holdToken || reply.status !== 'held'
-          || !Number.isSafeInteger(reply.input_epoch) || (reply.input_epoch as number) < 0
-          || held.inputEpoch !== undefined && held.inputEpoch !== reply.input_epoch && held.releasing !== true) throw new Error('relic input hold unconfirmed')
+          || !Number.isSafeInteger(reply.input_epoch) || (reply.input_epoch as number) < 0) throw new Error('relic input hold unconfirmed')
+        const changedHeldEpoch = held.inputEpoch !== undefined && held.inputEpoch !== reply.input_epoch && held.releasing !== true
+        if (changedHeldEpoch && held.issued) throw new Error('issued relic input hold changed')
         // An acknowledged re-hold may observe input after an uncertain release,
         // but only before any retire RPC was issued. Re-prove idle from scratch.
         if (held.releasing && held.issued) throw new Error('relic release phase is invalid')
@@ -590,13 +591,19 @@ export class ProjectWorkspaceManager {
           if (held.issued) throw new Error('previous relic retirement remains unconfirmed')
           held = { ...held, releasing: true }
           save({ ...record, retirement: { ...record.retirement!, relic: held } })
-          const released = object(await client.call('pane.release_owned_input', params))
+          const released = object(await client.call('pane.release_owned_input', {
+            target, hold_token: held.holdToken, input_epoch: held.inputEpoch!,
+          }))
           if (released.type !== 'pane_owned_input' || !isDeepStrictEqual(released.target, target)
             || released.hold_token !== held.holdToken || released.input_epoch !== held.inputEpoch || released.status !== 'released') {
             throw new Error('relic input release unconfirmed')
           }
           const { retirement: _reservation, ...retained } = record
           save({ ...retained, state: 'ready', revision: randomUUID() })
+        }
+        if (changedHeldEpoch) {
+          await releaseUnissued()
+          throw new Error('relic input epoch changed before retirement')
         }
         // The hold blocks new terminal input. Foreground identity alone is never
         // the lifetime authority: the host checks the original birth again below.
@@ -613,8 +620,15 @@ export class ProjectWorkspaceManager {
         }
         const checked = object(await client.call('pane.check_owned_input', params))
         if (checked.type !== 'pane_owned_input' || !isDeepStrictEqual(checked.target, target)
-          || checked.hold_token !== held.holdToken || checked.input_epoch !== held.inputEpoch || checked.status !== 'held') {
+          || checked.hold_token !== held.holdToken || checked.status !== 'held'
+          || !Number.isSafeInteger(checked.input_epoch) || (checked.input_epoch as number) < 0) {
           throw new Error('relic input hold changed')
+        }
+        if (checked.input_epoch !== held.inputEpoch) {
+          if (held.issued) throw new Error('issued relic input epoch changed')
+          held = { ...held, inputEpoch: checked.input_epoch as number }
+          await releaseUnissued()
+          throw new Error('relic input epoch changed before retirement')
         }
         if (!isDeepStrictEqual(inspectIdleRelicShell(info.shell_pid, this.relicProc), shell)) {
           await releaseUnissued()

@@ -91,6 +91,10 @@ hold and restores readiness under compare-and-swap. Release intent is durable:
 an uncertain release can re-hold the same original target/token, accept the
 newly acknowledged epoch and re-prove idle from scratch. An already issued
 uncertain retirement never acquires this release/re-arm authority.
+An exactly correlated held acknowledgment with a different valid epoch is known
+changed input. Before retirement is issued, release uses that acknowledged
+epoch with durable intent; it is not stranded as an unknown old-epoch operation.
+Wrong targets/tokens/statuses and already-issued uncertainty cannot take this path.
 
 An apparently idle shell foreground is insufficient. While input is held, a
 strict local kernel census must identify the same shell PID/start/boot, UID,
@@ -99,6 +103,9 @@ other direct child, session member or terminal member. Unreadable or changed
 evidence refuses retirement. Recheck the held input epoch, kernel identity and
 scope admission immediately before the guarded mutation. Foreign splits remain;
 only the existing atomic empty-workspace operation can remove their container.
+The census verifies an unchanged unfiltered root procfs mount: nonzero/unknown
+`hidepid`, ambiguous/bound subtree roots and PID overmounts refuse. Seeing the
+same-UID shell and observer does not alone prove cross-UID process visibility.
 
 Legacy shells whose journals lack the creation receipt require a distinct,
 explicit privileged **current-shell retirement authority**, never automatic

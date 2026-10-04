@@ -50,12 +50,12 @@ test('legacy birth is never inferred from the current pane, but a positively abs
   expect(await restarted.retireEmptyWorkspace(f.server, scope, await restarted.inspectChat(f.server, scope), () => true)).toEqual({ status: 'retired' })
 })
 
-test.each(['birth', 'marker', 'reply', 'busy', 'epoch'] as const)('changed %s cannot retire a relic', async fault => {
+test.each(['birth', 'marker', 'reply', 'busy', 'uncertain-epoch'] as const)('changed %s cannot retire a relic', async fault => {
   const f = await fixture()
   if (fault === 'birth') f.server.beforeHeldRetirement = () => f.server.births.set(f.pane.pane_id, { terminal_id: 'foreign', runtime_generation: 'foreign' })
   if (fault === 'marker') f.server.workspaces.get(f.pane.workspace_id)!.tokens.neutron_project_owner = 'foreign'
   if (fault === 'reply') f.server.alteredHoldReply = true
-  if (fault === 'epoch') f.server.changedEpoch = true
+  if (fault === 'uncertain-epoch') f.server.uncertainEpoch = true
   if (fault === 'busy') f.pane.argv = ['working-command']
   const observed = await f.manager.inspectChat(f.server, scope)
   expect((await f.manager.retireEmptyWorkspace(f.server, scope, observed, () => true)).status).not.toBe('retired')
@@ -64,9 +64,60 @@ test.each(['birth', 'marker', 'reply', 'busy', 'epoch'] as const)('changed %s ca
     expect(f.server.inputHolds.size).toBe(0)
     expect(f.read().state).toBe('ready')
   }
-  if (fault === 'epoch') {
+  if (fault === 'uncertain-epoch') {
     expect(f.server.callsTo('pane.release_owned_input')).toHaveLength(0)
     expect(f.server.inputHolds.size).toBe(1)
+    expect(f.read().state).toBe('retiring')
+  }
+})
+
+test.each([false, true])('known held new epoch releases at its acknowledged value and permits next wake (lost release %s)', async lost => {
+  const f = await fixture()
+  f.server.changedEpoch = true; f.server.lostReleaseReply = lost
+  expect((await f.manager.retireEmptyWorkspace(f.server, scope, await f.manager.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+  expect(f.server.callsTo('pane.retire_held_owned')).toHaveLength(0)
+  expect(f.server.callsTo('pane.release_owned_input')).toHaveLength(1)
+  expect(f.server.callsTo('pane.release_owned_input')[0]!.params.input_epoch).toBe(2)
+  expect(f.server.inputHolds.size).toBe(0)
+  if (lost) {
+    expect(f.read().retirement.relic).toMatchObject({ releasing: true, inputEpoch: 2 })
+    // Retry after further input still refuses known changed input, releases the
+    // newly acknowledged epoch and leaves a genuine next wake usable.
+    f.server.inputEpoch = 3
+    const restarted = new ProjectWorkspaceManager(f.path, f.proc)
+    expect((await restarted.retireEmptyWorkspace(f.server, scope, await restarted.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+    expect(f.server.callsTo('pane.release_owned_input')[1]!.params.input_epoch).toBe(4)
+  }
+  expect(f.read().state).toBe('ready')
+  expect(f.server.inputHolds.size).toBe(0)
+  const next = await f.manager.applyLayout(f.server, root, scope)
+  expect(f.server.panes.has(next.layout.root.pane_id)).toBe(true)
+})
+
+test('a retry with a newly correlated held epoch can release before any retirement, unlike its earlier mismatched reply', async () => {
+  const f = await fixture(); f.server.uncertainEpoch = true
+  expect((await f.manager.retireEmptyWorkspace(f.server, scope, await f.manager.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+  expect(f.server.callsTo('pane.release_owned_input')).toHaveLength(0)
+  f.server.uncertainEpoch = false
+  const restarted = new ProjectWorkspaceManager(f.path, f.proc)
+  expect((await restarted.retireEmptyWorkspace(f.server, scope, await restarted.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+  expect(f.server.callsTo('pane.release_owned_input')[0]!.params.input_epoch).toBe(2)
+  expect(f.read().state).toBe('ready')
+  expect(f.server.inputHolds.size).toBe(0)
+  const next = await restarted.applyLayout(f.server, root, scope)
+  expect(f.server.panes.has(next.layout.root.pane_id)).toBe(true)
+})
+
+test('new epochs after an already-issued uncertain retirement never authorize release on check or repeated re-hold', async () => {
+  const f = await fixture()
+  f.server.beforeHeldRetirement = () => { throw new Error('retirement response unknown') }
+  expect((await f.manager.retireEmptyWorkspace(f.server, scope, await f.manager.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+  delete f.server.beforeHeldRetirement; f.server.changedEpoch = true
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const restarted = new ProjectWorkspaceManager(f.path, f.proc)
+    expect((await restarted.retireEmptyWorkspace(f.server, scope, await restarted.inspectChat(f.server, scope), () => true)).status).toBe('unknown')
+    expect(f.server.callsTo('pane.release_owned_input')).toHaveLength(0)
+    expect(f.read().retirement.relic).toMatchObject({ issued: true, inputEpoch: 1 })
     expect(f.read().state).toBe('retiring')
   }
 })

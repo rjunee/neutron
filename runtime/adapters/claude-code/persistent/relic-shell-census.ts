@@ -15,6 +15,24 @@ export interface RelicShellIdentity { pid: number; startTicks: string; bootId: s
 export function inspectIdleRelicShell(pid: number, proc: RelicProcReader = kernel, expectedUid = process.getuid?.()): RelicShellIdentity | undefined {
   try {
     if (!Number.isSafeInteger(pid) || pid <= 0) return undefined
+    const procMount = () => {
+      const raw = proc.read('/proc/self/mountinfo')
+      if (raw.length > 4 * 1024 * 1024) throw new Error('mount observation too large')
+      const mounts = raw.trim().split('\n').map(line => line.split(' '))
+      const roots = mounts.filter(fields => fields[4] === '/proc')
+      if (roots.length !== 1) throw new Error('proc mount ambiguous')
+      const root = roots[0]!, separator = root.indexOf('-')
+      if (root[3] !== '/' || separator < 6 || root[separator + 1] !== 'proc'
+        || !root[5] || !root[separator + 3]) throw new Error('unverified proc mount')
+      const options = [...root[5].split(','), ...root[separator + 3]!.split(',')]
+      if (options.some(option => option === 'hidepid' || option.startsWith('hidepid=') && option !== 'hidepid=0')) {
+        throw new Error('filtered proc visibility')
+      }
+      // A bind/overlay of one PID could hide a member despite an unfiltered root.
+      if (mounts.some(fields => /^\/proc\/[0-9]+(?:\/|$)/.test(fields[4] ?? ''))) throw new Error('overmounted process evidence')
+      return root.join(' ')
+    }
+    const mountedProc = procMount()
     const parse = (id: number) => {
       const raw = proc.read(`/proc/${id}/stat`), close = raw.lastIndexOf(')')
       if (raw.length > 8192 || close < 0 || raw.slice(0, raw.indexOf(' ')) !== String(id)) throw new Error('invalid process stat')
@@ -44,7 +62,7 @@ export function inspectIdleRelicShell(pid: number, proc: RelicProcReader = kerne
     }
     const after = parse(pid)
     if (JSON.stringify(before) !== JSON.stringify(after) || proc.uid(`/proc/${pid}`) !== uid
-      || proc.read('/proc/sys/kernel/random/boot_id').trim() !== bootId) return undefined
+      || proc.read('/proc/sys/kernel/random/boot_id').trim() !== bootId || procMount() !== mountedProc) return undefined
     return { pid, startTicks: before.startTicks, bootId, session: before.session, tty: before.tty, uid }
   } catch { return undefined }
 }

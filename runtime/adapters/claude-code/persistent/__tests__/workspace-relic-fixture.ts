@@ -9,6 +9,7 @@ export class RelicProcFixture implements RelicProcReader {
   list(_path: string): string[] { return [...this.rows.keys()].map(String) }
   uid(_path: string): number { return process.getuid!() }
   read(path: string): string {
+    if (path === '/proc/self/mountinfo') return '123 1 0:1 / /proc rw - proc proc rw'
     if (path === '/proc/sys/kernel/random/boot_id') return '11111111-2222-3333-4444-555555555555'
     const id = Number(path.split('/')[2]), row = this.rows.get(id)
     if (!row) throw Object.assign(new Error('gone'), { code: 'ENOENT' })
@@ -28,6 +29,7 @@ export class RelicWorkspaceServer extends FakeHerdrWorkspaceServer {
   inputEpoch = 1
   alteredHoldReply = false
   changedEpoch = false
+  uncertainEpoch = false
   birthReceipts = true
 
   override async call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -56,7 +58,7 @@ export class RelicWorkspaceServer extends FakeHerdrWorkspaceServer {
       && isDeepStrictEqual(birth, { terminal_id: target.terminal_id, runtime_generation: target.runtime_generation })
     const hold = this.inputHolds.get(id)
     if (method === 'pane.check_owned_input') this.beforeInputCheck?.()
-    if (method === 'pane.check_owned_input' && this.changedEpoch && hold) hold.epoch += 1
+    if (method === 'pane.check_owned_input' && (this.changedEpoch || this.uncertainEpoch) && hold) hold.epoch += 1
     if (method === 'pane.retire_held_owned') {
       const status = !pane ? 'gone' : matches && hold?.token === params.hold_token && hold?.epoch === params.input_epoch ? 'retired' : 'mismatch'
       if (status === 'retired') { this.panes.delete(id); this.inputHolds.delete(id) }
@@ -65,7 +67,9 @@ export class RelicWorkspaceServer extends FakeHerdrWorkspaceServer {
     }
     let status = 'mismatch'
     if (matches) {
-      if (method === 'pane.hold_owned_input' && (!hold || hold.token === params.hold_token)) {
+      if (method === 'pane.check_owned_input' && this.changedEpoch && hold?.token === params.hold_token) {
+        status = 'held'
+      } else if (method === 'pane.hold_owned_input' && (!hold || hold.token === params.hold_token)) {
         this.inputHolds.set(id, hold ?? { token: params.hold_token, epoch: this.inputEpoch }); status = 'held'
       } else if (hold?.token === params.hold_token && hold?.epoch === params.input_epoch) {
         status = method === 'pane.release_owned_input' ? 'released' : 'held'
