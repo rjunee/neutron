@@ -112,7 +112,7 @@ release maintenance, rewrite the ownership journal or registry, clear leases,
 or raw-close a pane/workspace. Ordinary reconciliation subsequently observes
 confirmed absence and retires the empty owned workspace. This is the deliberate
 operator-only legacy authority in the 2026-10-04 Decisions Log, not a runtime
-fallback or a new privilege for tenant code.
+fallback or a new privilege for ordinary instance code.
 
 Operator deployment maintenance may hold one explicitly registered scope's
 ordinary draining fence without restarting its gateway. An operation-bound
