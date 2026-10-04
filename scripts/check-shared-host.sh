@@ -114,6 +114,13 @@ run_shared_host_checks() (
     exit 2
   fi
   echo 'shared-host-check: admitted; jobs=4 chunk-size=100; runner-default concurrency'
+  # Reuse the CI lint gate before paying for every typecheck and the full suite.
+  # A preflight failure cannot establish a full-suite receipt.
+  bash scripts/ci/lint.sh || {
+    gate_status=$?
+    echo 'shared-host-check: lint preflight failed; typechecks and full suite not started; no receipt.' >&2
+    exit "$gate_status"
+  }
   bash scripts/ci/typecheck-all.sh || gate_status=$?
   if [ "$gate_status" -eq 0 ]; then bash scripts/run-tests.sh || gate_status=$?; fi
   identity_after="$(NEUTRON_LOG_LEVEL=error bun --config=/dev/null --no-env-file scripts/shared-host-suite-identity.ts "$check_root")" || identity_after=''

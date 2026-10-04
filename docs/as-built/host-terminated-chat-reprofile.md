@@ -102,3 +102,12 @@ discovery guard and six admission-generation cases; restoring it restored the
 pass. The protected outer registration's before/after digest stayed identical.
 Root and Trident TypeScript checks passed on this test-only batch. A new canonical
 full gate remains required; none of these focused results claims deployment.
+
+That follow-up run passed all 51 typechecks and entered the suite, but CI caught
+two relative cross-workspace imports in the new boundary test. The owned run was
+gracefully stopped with exit 143 before correcting those imports; its partial
+logs are retained and are not a full-suite pass. Both imports now use the runtime
+package name. The complete local CI lint script and exact root and Trident
+typechecks passed after the correction. The same delivery also adds the
+[shared-host lint preflight](shared-host-lint-preflight.md), so this deterministic
+failure is checked before expensive validation on future runs.
