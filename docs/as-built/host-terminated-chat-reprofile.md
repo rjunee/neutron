@@ -41,3 +41,20 @@ refusing every reconciliation broke the consuming successful build case. All
 mutations were restored before final validation. Full repository gate and live
 operator/deployment acceptance are separate evidence, not established by these
 focused checks.
+
+Review controls additionally passed five real-store release cases (success,
+transient failure, lost acknowledgement, persistent failure and replacement
+epoch). The consuming case now hashes actual `saveRegistry` output, refuses a
+project deletion between request and commit, and injects a transient fence
+release failure after both ownership records changed. It retries only the exact
+fence and still completes the build (26 assertions). Removing the locked project
+existence check made this case fail; the predicate was restored. Cleanup now
+shuts down the synthetic child before removing its pool mapping.
+
+The initial shared-host gate passed all 51 TypeScript configurations. Its test
+run encountered surrounding credential-routing fixture failures, including an
+interactive credential-cooldown case independently reproduced on the unchanged
+base revision. That run was stopped for the approved review-fix window, with
+its logs retained; it is not a completed full-suite pass. The changed Open and
+runtime typechecks passed again after the review fixes. CI and live deployment
+remain separate gates.

@@ -629,6 +629,11 @@ history; it is neither closed nor adopted and is never relabelled a placeholder.
 A registry commit followed by an interrupted journal save remains placement-
 blocked; retry requires the same authenticated historical identity. A historical
 marker alone grants no permission. Other projects and worker holds are unchanged.
+Project existence is rechecked at the ownership commit. Releasing the request's
+maintenance fence may retry a transient failure once, only while its exact
+generation, token and phase remain current; a lost acknowledgement is accepted
+only when that same generation is already open. Persistent failure leaves the
+durable fence held, and a replacement maintenance epoch is never released.
 
 The next ordinary authorized owner turn uses the existing launch path, resumes
 the same native session, and records its genuinely launched current credential,
@@ -640,6 +645,7 @@ native work or manufactures workflow completion.
 
 Verify both acceptance and refusal in
 `open/wiring/__tests__/host-terminated-chat-proof.test.ts`,
+`open/wiring/__tests__/reconcile-host-terminated-chat.test.ts`,
 `runtime/adapters/claude-code/persistent/__tests__/host-terminated-chat.test.ts`,
 `gateway/http/__tests__/admin-respawn-surface.test.ts` and the consuming restoration
 case in `open/__tests__/project-build-e2e.test.ts`. Include same-boot signed proof,

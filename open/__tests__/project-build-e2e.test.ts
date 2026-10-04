@@ -1554,7 +1554,7 @@ test('host-terminated capped Chat resumes through current launch and signed cap 
   const pair = generateKeyPairSync('ed25519')
   const signed = <T,>(body: T) => ({ body, signature: sign(null, Buffer.from(JSON.stringify(body)), pair.privateKey).toString('base64') })
   const hash = (raw: string) => createHash('sha256').update(raw).digest('hex')
-  const registry = JSON.stringify({ [key]: captured })
+  const registry = await readFile(runtime.replRegistryPath, 'utf8')
   const bundle = JSON.stringify({ policy: 'retained-quota-local-repl-v1', identity: { hostId: 'host', instanceId: 'instance', bootId: 'old-boot',
     sessionId: captured.sessionId, childGeneration: captured.child_generation, nativePid: captured.pid, gatewayPid: captured.adoption_claim_pid },
     registry: { path: '/not-opened', sha256: hash(registry) } })
@@ -1574,19 +1574,39 @@ test('host-terminated capped Chat resumes through current launch and signed cap 
   const pin = spyOn(nativeCapacityClient, 'loadClaudeCapacityPin').mockReturnValue(undefined)
   const route = spyOn(nativeCapacityClient, 'nativeRelayRouteFingerprint').mockReturnValue(undefined)
   setReplToolBridge(bridge)
-  cleanups.push(async () => { pool.delete(key); supervisedBySessionKey.delete(key); await shutdownAllPersistentRepls(); clearReplToolBridgeIf(bridge); pin.mockRestore(); route.mockRestore() })
+  cleanups.push(async () => { await shutdownAllPersistentRepls(); pool.delete(key); supervisedBySessionKey.delete(key); clearReplToolBridgeIf(bridge); pin.mockRestore(); route.mockRestore() })
+  let projectPresent = true, deleteBeforeCommit = false
   const reconcile = () => reconcileTerminatedProjectChat({ operationId: 'recovery', projectId: 'e2e-project', bundle, registry }, {
-    admission: f.admission, projectIds: () => ['e2e-project'], authority, kernelBoot: () => 'new-boot',
-    reconcile: (record, authorized) => reconcileHostTerminatedChat(runtime, record, {
-      relinquish: (pane, commit) => manager.relinquishDeadChat(server, placement, pane, commit),
-    }, authorized, () => []),
+    admission: f.admission, projectIds: () => projectPresent ? ['e2e-project'] : [], authority, kernelBoot: () => 'new-boot',
+    reconcile: (record, authorized) => {
+      if (deleteBeforeCommit) projectPresent = false
+      return reconcileHostTerminatedChat(runtime, record, {
+        relinquish: (pane, commit) => manager.relinquishDeadChat(server, placement, pane, commit),
+      }, authorized, () => [])
+    },
   })
   const held = await store.admit(scope, 'conversation', 'fixture', 'active-chat')
   expect((await reconcile()).status).toBe('refused')
   expect(getRecord(runtime.replRegistryPath, key)).toEqual(captured)
   if (held.status !== 'admitted') throw new Error('fixture hold failed')
   await store.release(held.lease)
-  expect(await reconcile()).toEqual({ status: 'reconciled' })
+  deleteBeforeCommit = true
+  expect((await reconcile()).status).toBe('refused')
+  expect(getRecord(runtime.replRegistryPath, key)).toEqual(captured)
+  expect(f.admission.inspect('e2e-project')?.phase).toBe('open')
+  projectPresent = true; deleteBeforeCommit = false
+  const abandon = store.abandon.bind(store)
+  let reopenAttempts = 0
+  const release = spyOn(store, 'abandon').mockImplementation(async fence => {
+    if (++reopenAttempts === 1) {
+      expect(getRecord(runtime.replRegistryPath, key)!.pane_handle).toBeUndefined()
+      expect((Object.values(JSON.parse(await readFile(join(f.dir, 'workspaces.json'), 'utf8')))[0] as { chat?: unknown }).chat).toBeUndefined()
+      return false
+    }
+    return abandon(fence)
+  })
+  try { expect(await reconcile()).toEqual({ status: 'reconciled' }) } finally { release.mockRestore() }
+  expect(reopenAttempts).toBe(2)
   expect(f.admission.inspect('e2e-project')?.phase).toBe('open')
   expect(getRecord(runtime.replRegistryPath, key)!.reuse).toEqual(captured.reuse)
   const substrate = createPersistentReplSubstrate(runtime)
