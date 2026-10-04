@@ -52,11 +52,13 @@ const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v ===
 const hash = (value: string) => createHash('sha256').update(value).digest('hex')
 const MAX_AGE_MS = 30_000
 
-/** Stable across account rotation; a changed host route still invalidates warm reuse. */
+export const NATIVE_RELAY_BASE_URL = 'http://127.0.0.1:0'
+
+/** Stable across account rotation; host route AND local wire protocol bind warm reuse. */
 export function nativeRelayRouteFingerprint(pin: ClaudeCapacityPin | undefined = loadClaudeCapacityPin()): string | undefined {
   if (!pin) return undefined
   if (!validPin(pin)) throw new NativeRelayUnavailable('Native quota relay pin is invalid')
-  return `native-relay-v2:${hash(JSON.stringify([pin.hostId, pin.instanceId, pin.socketPath, pin.publicKey]))}`
+  return `native-relay-v3:${hash(JSON.stringify([pin.hostId, pin.instanceId, pin.socketPath, pin.publicKey, NATIVE_RELAY_BASE_URL]))}`
 }
 
 function protectedDirectory(path: string): void {

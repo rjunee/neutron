@@ -11,6 +11,8 @@
  */
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
+import { createHash } from 'node:crypto'
+import { recoverStartupRepl } from '@neutronai/runtime/adapters/claude-code/persistent/startup-recovery.ts'
 import { capacityFixture } from '@neutronai/runtime/workers/claude-capacity-client.test-support.ts'
 import * as processIdentity from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -305,6 +307,52 @@ test('capable server atomically retires empty scope workspace and wake preserves
   expect(livePane(r)!.workspace_id).not.toBe(workspace)
   expect(r.peer.children[1]!.sessionId).toBe(first.sessionId)
   expect(readFileSync(join(r.transcripts, `${first.sessionId}.jsonl`), 'utf8')).toBe(transcript)
+})
+
+test('canonical sleep preserves an old native protocol row; admitted wake genuinely captures the new protocol', async () => {
+  const relay = await capacityFixture()
+  const readIdentity = processIdentity.readProcessIdentity
+  const identity = readIdentity(process.pid)!
+  const r = await rig()
+  const lookup = spyOn(processIdentity, 'readProcessIdentity').mockImplementation(pid =>
+    r.peer.children.some(({ child }) => child.pid === pid && !child.hasExited()) ? identity : readIdentity(pid))
+  const old = `native-relay-v2:${createHash('sha256').update(JSON.stringify([
+    relay.pin.hostId, relay.pin.instanceId, relay.pin.socketPath, relay.pin.publicKey,
+  ])).digest('hex')}`
+  const launched: Array<Record<string, string | undefined>> = []
+  const spawn = r.peer.host.spawn.bind(r.peer.host)
+  r.peer.host.spawn = async (argv, options) => {
+    // Reproduce the historical launcher only at the synthetic process boundary.
+    if (launched.length === 0) options.env = { ...options.env, ANTHROPIC_BASE_URL: 'https://api.anthropic.com' }
+    launched.push({ ...options.env })
+    return spawn(argv, options)
+  }
+  pinLookup.mockReturnValue(relay.pin); routeLookup.mockReturnValue(old)
+  try {
+    expect(await turn(r, 'p-one')).toBe(true)
+    const first = r.peer.children[0]!, key = keyOf(r, first.sessionId)!
+    await until(() => getRecord(r.registryPath, key)?.has_session === true)
+    const before = getRecord(r.registryPath, key)!
+    expect(before.reuse?.auth_fingerprint).toBe(old)
+    expect((await r.lifecycle.sleep('p-one')).status).toBe('retired')
+    const asleep = getRecord(r.registryPath, key)!
+    expect(asleep.sessionId).toBe(first.sessionId)
+    expect(asleep.reuse?.auth_fingerprint).toBe(old)
+    expect(first.child.hasExited()).toBe(true)
+    routeLookup.mockImplementation(() => routeFingerprint(relay.pin))
+    r.restart()
+    expect(await recoverStartupRepl({ substrate_instance_id: 'fixture', cwd: before.cwd, conversationProjectId: 'p-one',
+      replRegistryPath: r.registryPath }, key, [])).toEqual({ status: 'skipped' })
+    expect(r.peer.children).toHaveLength(1)
+    expect(await turn(r, 'p-one')).toBe(true)
+    const current = getRecord(r.registryPath, key)!
+    expect(current.sessionId).toBe(first.sessionId)
+    expect(current.child_generation).not.toBe(before.child_generation)
+    expect(current.reuse?.auth_fingerprint).toBe(routeFingerprint(relay.pin))
+    expect(current.reuse?.auth_fingerprint).not.toBe(old)
+    expect(launched.map(env => env.ANTHROPIC_BASE_URL)).toEqual(['https://api.anthropic.com', 'http://127.0.0.1:0'])
+    expect(r.peer.children.filter(child => !child.child.hasExited())).toHaveLength(1)
+  } finally { lookup.mockRestore(); await relay.close() }
 })
 
 for (const previous of ['asleep', 'dead', 'asleep-nocred', 'dead-foreign'] as const) test(`registered Chat resumes its ${previous} original native session despite every local identity being parked`, async () => {

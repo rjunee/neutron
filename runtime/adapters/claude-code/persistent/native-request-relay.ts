@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { loadClaudeCapacityPin, NativeRelayUnavailable, registerClaudeNativeRelay,
+import { loadClaudeCapacityPin, NATIVE_RELAY_BASE_URL, NativeRelayUnavailable, registerClaudeNativeRelay,
   type ClaudeCapacityPin, type NativeRelayScope } from '../../../workers/claude-capacity-client.ts'
 import { readProcessIdentity } from './process-identity.ts'
 
@@ -22,7 +22,10 @@ export function prepareNativeRequestRelay(env: Record<string, string | undefined
   const headers = (env.ANTHROPIC_CUSTOM_HEADERS ?? '').split('\n').filter(line => line.trim()
     && !/^(?:x-neutron-native-scope|authorization|x-api-key)\s*:/i.test(line.trim()))
   routed.ANTHROPIC_UNIX_SOCKET = pin.socketPath
-  routed.ANTHROPIC_BASE_URL = 'https://api.anthropic.com'
+  // The registered local socket speaks HTTP, not TLS. Port zero makes a CLI
+  // that ignores its Unix transport fail locally rather than send scope/auth
+  // headers to a network endpoint. The host alone owns verified provider TLS.
+  routed.ANTHROPIC_BASE_URL = NATIVE_RELAY_BASE_URL
   routed.CLAUDE_CODE_OAUTH_TOKEN = 'ssh-placeholder'
   routed.ANTHROPIC_CUSTOM_HEADERS = [...headers, `x-neutron-native-scope: ${scopeToken}`].join('\n')
   return { env: routed, async register(session) {
