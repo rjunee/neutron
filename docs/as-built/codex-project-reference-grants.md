@@ -69,6 +69,13 @@ The sole failure was the stdio native-retirement test at transport creation;
 its original custom error detail was not retained, so no cause is assigned.
 The bounded guard/transport/bootstrap rerun passed all 18 tests (81 assertions).
 That rerun does not turn the failed consolidated receipt into a passing gate.
+The first canonical whole-host run then executed all 1,785 assigned files with
+an unchanged input identity and failed one of 19 lanes. Its only test failure
+was an older rotation fixture pasting the same account into global and project
+custody, ignoring the duplicate refusal. That fixture now connects a distinct
+project account and asserts every setup connection succeeded, retaining its
+original project-home and cooled-global-seat discrimination. The failed receipt
+remains failed; corrected-head whole-suite validation is still required.
 
 The paired web/phone selection UI is recorded in
 `codex-existing-account-project-selection.md`. Synthetic service/API checks cover
