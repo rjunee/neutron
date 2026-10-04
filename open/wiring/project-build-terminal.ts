@@ -126,7 +126,7 @@ export function createConversationTerminal(input: {
   return isProjectChatInspector(host)
     ? { host, placementFor, inspectChat: scope => host.inspectChat(placementFor(scope)),
       ...(host.retireEmptyWorkspace === undefined ? {} : {
-        retireEmptyWorkspace: (scope, expected) => host.retireEmptyWorkspace!(placementFor(scope), expected),
+        retireEmptyWorkspace: (scope, expected, canRetire) => host.retireEmptyWorkspace!(placementFor(scope), expected, canRetire),
       }) }
     : { host, placementFor }
 }

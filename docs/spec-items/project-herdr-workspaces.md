@@ -77,6 +77,38 @@ clears their ownership claims under lock, and closes the empty workspace. A new
 message or due project work wakes it. Unknown liveness does not license closure.
 Gateway restart preserves active work and is not a sleep event.
 
+Chat creation preserves the server-returned terminal/runtime birth receipt with
+the tab/pane identity. Authenticated dead-owner relinquishment retains that exact
+receipt and exposes the remaining shell as a cleanup obligation, not an absent
+scope. Automatic cleanup requires the original receipt, current placement and
+marker, idle scope evidence, and the advertised owned-pane input-hold and
+retirement capabilities. It durably reserves the hold token and input epoch,
+checks exact acknowledgements and journal compare-and-swap, and retires only
+through `pane.retire_held_owned`. Lost replies retain the reservation for exact
+retry; no raw close, lease deletion or inferred historical receipt is permitted.
+
+An apparently idle shell foreground is insufficient. While input is held, a
+strict local kernel census must identify the same shell PID/start/boot, UID,
+session and terminal, positively enumerate both shell and observer, and find no
+other direct child, session member or terminal member. Unreadable or changed
+evidence refuses retirement. Recheck the held input epoch, kernel identity and
+scope admission immediately before the guarded mutation. Foreign splits remain;
+only the existing atomic empty-workspace operation can remove their container.
+
+Legacy shells whose journals lack the creation receipt require a distinct,
+explicit privileged **current-shell retirement authority**, never automatic
+backfill from a live pane. A protected operator request and durable audit bind
+the scope, held maintenance operation, server identity, current pane birth and
+exact kernel shell identity. The operator independently verifies canonical
+asleep state, no leases or unresolved work, departed recorded native owners and
+the same held kernel census, then uses the same guarded pane operation. The
+receipt records present authority, not invented historical ownership. It cannot
+release maintenance, rewrite the ownership journal or registry, clear leases,
+or raw-close a pane/workspace. Ordinary reconciliation subsequently observes
+confirmed absence and retires the empty owned workspace. This is the deliberate
+operator-only legacy authority in the 2026-10-04 Decisions Log, not a runtime
+fallback or a new privilege for tenant code.
+
 Operator deployment maintenance may hold one explicitly registered scope's
 ordinary draining fence without restarting its gateway. An operation-bound
 durable hold prevents even an older gateway's recurring recovery from reopening
@@ -145,6 +177,15 @@ in `open/operator-maintenance.test.ts`, `open/operator-maintenance-evidence.test
 and `migrations/operator-maintenance.test.ts`.
 
 ## Acceptance
+
+- [ ] Creation-authorized dead Chat remnants remain discoverable after restart;
+      guarded cleanup accepts an idle owned shell and refuses changed birth,
+      marker, epoch, background work, missing receipt and late admission. Lost
+      replies preserve exact retry; foreign splits survive. Verify
+      `workspace-relic-retirement.test.ts`, `project-relic-cleanup.test.ts` and
+      consuming `open/__tests__/project-build-e2e.test.ts` placement fixtures.
+      Legacy deployment cleanup additionally requires the separate protected
+      current-authority actuator proof; local fixtures do not claim live closure.
 
 - [ ] Explicit project placement creates separate workspaces for two projects
       and General, even when their display names and cwd match; it never falls

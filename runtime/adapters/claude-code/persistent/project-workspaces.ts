@@ -1,9 +1,11 @@
 import { randomUUID, createHash } from 'node:crypto'
 import { closeSync, constants, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeFileSync, lstatSync } from 'node:fs'
 import { dirname } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
 import { HerdrError, verifyHerdrProtocol, type HerdrRpc } from './herdr-client.ts'
-import { HERDR_PROTOCOL_VERSION, type HerdrLayoutApply, type HerdrLayoutPaneNode, type HerdrProjectLayoutParams } from './herdr-protocol.ts'
+import { HERDR_PROTOCOL_VERSION, type HerdrLayoutApply, type HerdrLayoutPaneNode, type HerdrProjectLayoutParams, type HerdrPaneRetirementIdentity } from './herdr-protocol.ts'
 import { withFlockSync } from './registry-lock.ts'
+import { inspectIdleRelicShell, type RelicProcReader } from './relic-shell-census.ts'
 
 /** Null is General; the literal project id "general" is a different scope. */
 export interface ProjectPanePlacement {
@@ -17,19 +19,20 @@ export interface ProjectPanePlacement {
   operationId?: string
 }
 
-interface ChatSlot { tab: string; pane: string; placeholderArgv?: string[] }
+interface ChatSlot { tab: string; pane: string; placeholderArgv?: string[]; retirementIdentity?: HerdrPaneRetirementIdentity | undefined }
 
 /**
  * A READ-ONLY sample of a scope's Chat slot (#1226 sleep). `live`: an owned,
  * placed real Chat pane is running. `gone`: the slot's pane is positively gone
  * (`pane_not_found`) — the next Chat placement already treats that as an empty slot.
- * `placeholder`: the verified inert asleep placeholder. `none`: this manager has no
- * record for the scope. `refused`: anything unverified or foreign (a changed
+ * `placeholder`: the verified inert asleep placeholder. `relics`: no current Chat,
+ * but recorded dead-owner panes remain to reconcile. `none`: no active claim.
+ * `refused`: anything unverified or foreign (a changed
  * workspace token, a moved pane, a modified placeholder, a pending/invalid record,
  * any other error). Refused never licenses a close.
  */
 export type ChatInspection =
-  | { status: 'live' | 'gone' | 'placeholder' | 'none'; workspace?: string; pane?: string; revision?: string }
+  | { status: 'live' | 'gone' | 'placeholder' | 'none' | 'relics'; workspace?: string; pane?: string; revision?: string }
   | { status: 'refused'; reason: string }
 export type WorkspaceRetirement = { status: 'retired' | 'unsupported' } | { status: 'refused' | 'unknown'; reason: string }
 interface WorkerOperation {
@@ -49,7 +52,8 @@ interface WorkspaceRecord {
   /** Old shell panes retained after authenticated death of their native owner. */
   relinquishedChats?: ChatSlot[]
   workers?: Record<string, WorkerOperation>
-  retirement?: { operationId: string; revision: string }
+  retirement?: { operationId: string; revision: string;
+    relic?: { pane: string; holdToken: string; inputEpoch?: number; issued?: boolean } }
 }
 
 const TOKEN = 'neutron_project_owner'
@@ -60,6 +64,12 @@ const PANE_CLOSE_POLL_MS = 25
 
 function nonempty(value: unknown): value is string {
   return typeof value === 'string' && value.trim() !== '' && !/[\x00-\x1f\x7f]/.test(value)
+}
+
+function creationIdentity(applied: HerdrLayoutApply): HerdrPaneRetirementIdentity | undefined {
+  const identity = applied.layout.root.retirement_identity
+  return identity && nonempty(identity.terminal_id) && nonempty(identity.runtime_generation)
+    ? { terminal_id: identity.terminal_id, runtime_generation: identity.runtime_generation } : undefined
 }
 
 function scopeOf(placement: ProjectPanePlacement): [string, string | null] {
@@ -159,7 +169,7 @@ export class ProjectWorkspaceManager {
   private readonly journal: WorkspaceJournal
   private readonly operations = new Map<string, Promise<unknown>>()
 
-  constructor(journalPath: string) { this.journal = new WorkspaceJournal(journalPath) }
+  constructor(journalPath: string, private readonly relicProc?: RelicProcReader) { this.journal = new WorkspaceJournal(journalPath) }
 
   async applyLayout(client: HerdrRpc, root: HerdrLayoutPaneNode, placement: ProjectPanePlacement): Promise<HerdrLayoutApply> {
     root = structuredClone(root)
@@ -271,6 +281,7 @@ export class ProjectWorkspaceManager {
         }), workspace)
         record = this.reserve(key, record, { ...record, chat: {
           tab: placeholder.layout.tab_id, pane: placeholder.layout.root.pane_id, placeholderArgv: argv,
+          retirementIdentity: creationIdentity(placeholder),
         } })
         if (initialPane) {
           await this.closeOwnedPane(client, initialPane, record)
@@ -347,7 +358,8 @@ export class ProjectWorkspaceManager {
       if (initialPane) await this.closeOwnedPane(client, initialPane, record)
       this.reserve(key, record, {
         ...record, state: 'ready',
-        ...(placement.role === 'chat' ? { chat: { tab: applied.layout.tab_id, pane: applied.layout.root.pane_id } } : {}),
+        ...(placement.role === 'chat' ? { chat: { tab: applied.layout.tab_id, pane: applied.layout.root.pane_id,
+          retirementIdentity: creationIdentity(applied) } } : {}),
       })
     } catch (error) {
       // The host has not received this pane yet and cannot discharge its normal
@@ -415,22 +427,26 @@ export class ProjectWorkspaceManager {
 
   /** Never substitute workspace.close or a sampled empty pane list for this RPC.
    * Reservation survives uncertain replies and excludes other processes' placement. */
-  async retireEmptyWorkspace(client: HerdrRpc, placement: ProjectPanePlacement, expected: ChatInspection): Promise<WorkspaceRetirement> {
+  async retireEmptyWorkspace(client: HerdrRpc, placement: ProjectPanePlacement, expected: ChatInspection, canRetire?: () => boolean): Promise<WorkspaceRetirement> {
     let scope: [string, string | null]
     try { scope = scopeOf(placement) } catch (error) { return { status: 'refused', reason: String(error) } }
     const key = createHash('sha256').update(JSON.stringify(scope)).digest('hex')
     const prior = this.operations.get(key) ?? Promise.resolve()
     const operation = prior.catch(() => undefined).then(async (): Promise<WorkspaceRetirement> => {
       try {
-        if ((expected.status !== 'live' && expected.status !== 'gone') || !nonempty(expected.revision)
+        if (!['live', 'gone', 'relics'].includes(expected.status) || !('revision' in expected) || !nonempty(expected.revision)
           || !nonempty(expected.workspace) || !nonempty(expected.pane)) return { status: 'refused', reason: 'missing original Chat observation' }
         const pong = object(await client.call('ping', {}))
         if (pong.type !== 'pong' || pong.protocol !== HERDR_PROTOCOL_VERSION
           || object(pong.capabilities ?? {}).owned_empty_workspace_retirement !== true) return { status: 'unsupported' }
-        const record = this.journal.update(rows => {
+        const hasRelics = this.journal.read(rows => !!rows[key]?.relinquishedChats?.length)
+        if (hasRelics && (object(pong.capabilities ?? {}).owned_pane_input_hold !== true
+          || object(pong.capabilities ?? {}).owned_pane_retirement !== true)) return { status: 'unsupported' }
+        if (hasRelics && canRetire?.() !== true) return { status: 'refused', reason: 'relic scope is not admitted idle' }
+        let record = this.journal.update(rows => {
           const current = rows[key]
           if (!current || current.version !== 1 || JSON.stringify(current.scope) !== JSON.stringify(scope)
-            || current.workspace !== expected.workspace || current.chat?.pane !== expected.pane
+            || current.workspace !== expected.workspace || (current.chat?.pane ?? current.relinquishedChats?.[0]?.pane) !== expected.pane
             || !nonempty(current.token) || !['ready', 'retiring'].includes(current.state)
             || (current.retirement?.revision ?? current.revision) !== expected.revision) {
             throw new Error('workspace retirement observation changed')
@@ -443,6 +459,12 @@ export class ProjectWorkspaceManager {
           rows[key] = next
           return structuredClone(next)
         })
+        // A vanished current Chat can leave older, authenticated dead-owner shells.
+        // Their original creation receipts are the only automatic close authority.
+        // Legacy entries remain visible until separately authorized operator cleanup.
+        if (record.relinquishedChats?.length) {
+          record = await this.retireRelinquishedChats(client, key, record, canRetire)
+        }
         const target = { workspace_id: record.workspace!, workspace_token_key: TOKEN,
           workspace_token_value: record.token, operation_id: record.retirement!.operationId }
         const reply = object(await client.call('workspace.retire_empty_owned', target))
@@ -485,9 +507,10 @@ export class ProjectWorkspaceManager {
         || !nonempty(record.token) || !nonempty(record.revision)) {
         return { status: 'refused', reason: 'workspace ownership is invalid' }
       }
-      if (record.state === 'retired' || record.state === 'ready' && !record.chat && record.relinquishedChats?.length) return { status: 'none' }
-      if (!['ready', 'retiring'].includes(record.state) || !nonempty(record.workspace) || !record.chat
-        || !nonempty(record.chat.tab) || !nonempty(record.chat.pane)) {
+      if (record.state === 'retired') return { status: 'none' }
+      const slot = record.chat ?? record.relinquishedChats?.[0]
+      if (!['ready', 'retiring'].includes(record.state) || !nonempty(record.workspace) || !slot
+        || !nonempty(slot.tab) || !nonempty(slot.pane)) {
         return { status: 'refused', reason: 'workspace ownership is invalid or pending' }
       }
       const workspace = record.workspace
@@ -495,18 +518,109 @@ export class ProjectWorkspaceManager {
       let found: Record<string, unknown>
       try { found = object(object(await client.call('workspace.get', { workspace_id: workspace })).workspace) }
       catch (error) {
-        if (error instanceof HerdrError && error.code === 'workspace_not_found') return { status: 'gone', workspace, pane: record.chat.pane, revision }
+        if (error instanceof HerdrError && error.code === 'workspace_not_found') return { status: 'gone', workspace, pane: slot.pane, revision }
         throw error
       }
       if (found.workspace_id !== workspace || object(found.tokens)[TOKEN] !== record.token) {
         return { status: 'refused', reason: 'live workspace ownership mismatch' }
       }
+      if (!record.chat) return { status: 'relics', workspace, pane: slot.pane, revision }
       const live = await this.verifyChat(client, workspace, record.chat)
       if (!live) return { status: 'gone', workspace, pane: record.chat.pane, revision }
       return { status: record.chat.placeholderArgv ? 'placeholder' : 'live', workspace, pane: record.chat.pane, revision }
     } catch (error) {
       return { status: 'refused', reason: error instanceof Error ? error.message : String(error) }
     }
+  }
+
+  private async retireRelinquishedChats(client: HerdrRpc, key: string, initial: WorkspaceRecord, canRetire?: () => boolean): Promise<WorkspaceRecord> {
+    let record = initial
+    const save = (next: WorkspaceRecord) => {
+      this.journal.update(rows => {
+        if (JSON.stringify(rows[key]) !== JSON.stringify(record)) throw new Error('relic retirement journal changed')
+        rows[key] = next
+      })
+      record = next
+    }
+    for (const chat of initial.relinquishedChats ?? []) {
+      const workspace = record.workspace!
+      // Revalidate the marker before accepting absence, including restart retries.
+      let found: Record<string, unknown>
+      try { found = object(object(await client.call('workspace.get', { workspace_id: workspace })).workspace) }
+      catch (error) {
+        if (error instanceof HerdrError && error.code === 'workspace_not_found') return record
+        throw error
+      }
+      if (found.workspace_id !== workspace || object(found.tokens)[TOKEN] !== record.token) throw new Error('relic workspace ownership mismatch')
+      try {
+        const pane = object(object(await client.call('pane.get', { pane_id: chat.pane })).pane)
+        if (pane.pane_id !== chat.pane || pane.workspace_id !== workspace || pane.tab_id !== chat.tab) throw new Error('relic placement changed')
+      } catch (error) {
+        if (error instanceof HerdrError && error.code === 'pane_not_found') continue
+        throw error
+      }
+      const identity = chat.retirementIdentity
+      if (!identity || !nonempty(identity.terminal_id) || !nonempty(identity.runtime_generation)) {
+        // No hold/mutation was issued for this legacy pane. Any earlier relic in
+        // this loop is positively gone; retain the obligation without blocking wake.
+        const { retirement: _reservation, ...retained } = record
+        save({ ...retained, state: 'ready', revision: randomUUID() })
+        throw new Error('legacy relic requires independently authorized operator retirement')
+      }
+      const target = { pane_id: chat.pane, tab_id: chat.tab, workspace_id: workspace,
+        terminal_id: identity.terminal_id, runtime_generation: identity.runtime_generation,
+        workspace_token_key: TOKEN, workspace_token_value: record.token }
+      if (record.retirement!.relic?.pane !== chat.pane) {
+        save({ ...record, retirement: { ...record.retirement!, relic: { pane: chat.pane, holdToken: randomUUID() } } })
+      }
+      let held = record.retirement!.relic!
+      {
+        const reply = object(await client.call('pane.hold_owned_input', { target, hold_token: held.holdToken }))
+        if (reply.type !== 'pane_owned_input' || !isDeepStrictEqual(reply.target, target)
+          || reply.hold_token !== held.holdToken || reply.status !== 'held'
+          || !Number.isSafeInteger(reply.input_epoch) || (reply.input_epoch as number) < 0
+          || held.inputEpoch !== undefined && held.inputEpoch !== reply.input_epoch) throw new Error('relic input hold unconfirmed')
+        held = { ...held, inputEpoch: reply.input_epoch as number }
+        save({ ...record, retirement: { ...record.retirement!, relic: held } })
+        const params = { target, hold_token: held.holdToken, input_epoch: held.inputEpoch! }
+        // The hold blocks new terminal input. Foreground identity alone is never
+        // the lifetime authority: the host checks the original birth again below.
+        const info = object(object(await client.call('pane.process_info', { pane_id: chat.pane })).process_info)
+        const processes = info.foreground_processes
+        const foreground = Array.isArray(processes) && processes.length === 1 ? object(processes[0]) : undefined
+        const argv = foreground?.argv
+        const shell = typeof info.shell_pid === 'number' ? inspectIdleRelicShell(info.shell_pid, this.relicProc) : undefined
+        if (info.pane_id !== chat.pane || typeof info.shell_pid !== 'number' || foreground?.pid !== info.shell_pid
+          || !Array.isArray(argv) || argv.length !== 1 || typeof argv[0] !== 'string'
+          || !/^(?:.*\/)?-?(?:bash|sh|zsh|fish|dash)$/.test(argv[0]) || shell === undefined || canRetire?.() !== true) {
+          const released = object(await client.call('pane.release_owned_input', params))
+          if (released.type !== 'pane_owned_input' || !isDeepStrictEqual(released.target, target)
+            || released.hold_token !== held.holdToken || released.input_epoch !== held.inputEpoch || released.status !== 'released') {
+            throw new Error('relic input release unconfirmed')
+          }
+          const { retirement: _reservation, ...retained } = record
+          save({ ...retained, state: 'ready', revision: randomUUID() })
+          throw new Error('relic is not an idle shell')
+        }
+        const checked = object(await client.call('pane.check_owned_input', params))
+        if (checked.type !== 'pane_owned_input' || !isDeepStrictEqual(checked.target, target)
+          || checked.hold_token !== held.holdToken || checked.input_epoch !== held.inputEpoch || checked.status !== 'held') {
+          throw new Error('relic input hold changed')
+        }
+        if (!isDeepStrictEqual(inspectIdleRelicShell(info.shell_pid, this.relicProc), shell)) throw new Error('relic shell census changed')
+        held = { ...held, issued: true }
+        save({ ...record, retirement: { ...record.retirement!, relic: held } })
+      }
+      if (canRetire?.() !== true) throw new Error('relic scope is no longer idle')
+      const retired = object(await client.call('pane.retire_held_owned', {
+        target, hold_token: held.holdToken, input_epoch: held.inputEpoch!,
+      }))
+      if (retired.type !== 'pane_retirement' || retired.pane_id !== chat.pane
+        || !['retired', 'gone'].includes(String(retired.status))) throw new Error('relic retirement unconfirmed')
+      // Preserve the original slot until workspace retirement commits. A retry can
+      // positively observe its absence without manufacturing a new birth receipt.
+    }
+    return record
   }
 
   /** A failed observation is not absence. Only a positively gone pane licenses a

@@ -147,7 +147,7 @@ export interface ProjectScopeLifecycleDeps {
   /** The shared manager's read-only Chat sample (on Herdr). */
   conversationTerminal?: {
     inspectChat?(scope: string | null): Promise<ChatInspection>
-    retireEmptyWorkspace?(scope: string | null, expected: ChatInspection): Promise<WorkspaceRetirement>
+    retireEmptyWorkspace?(scope: string | null, expected: ChatInspection, canRetire?: () => boolean): Promise<WorkspaceRetirement>
   }
   /** The scope's provider. With NO Claude owner, a Codex scope (`openai-codex`) has no exact
    * retirement authority, so sleep refuses it; a Claude owner is decided by its own kind. */
@@ -515,12 +515,12 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
       // a provider switch is still a Claude owner and sleeps below.
       if (deps.providerFor?.(scope) === 'openai-codex') return { status: 'refused', reason: 'codex owner: no exact retirement authority' }
       if (before?.status === 'live') return { status: 'refused', reason: 'the live Chat is not a Claude pool owner: no exact retirement authority' }
-      if (before?.status === 'gone' && deps.conversationTerminal?.retireEmptyWorkspace !== undefined) {
+      if ((before?.status === 'gone' || before?.status === 'relics') && deps.conversationTerminal?.retireEmptyWorkspace !== undefined) {
         const evidence = await awake(scope)
         if (evidence.status === 'awake') return { status: 'refused', reason: `awake: ${evidence.reasons.join(', ')}` }
         if (evidence.status === 'unknown') return { status: 'unknown', reason: evidence.reason }
         if (closed) return { status: 'refused', reason: 'lifecycle closed' }
-        const cleanup = await deps.conversationTerminal.retireEmptyWorkspace(scope, before)
+        const cleanup = await deps.conversationTerminal.retireEmptyWorkspace(scope, before, () => !closed && admittedEvidence(scope).status === 'idle')
         if (cleanup.status === 'unknown' || cleanup.status === 'refused') return cleanup
       }
       return { status: 'absent' }
@@ -570,7 +570,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
     if (closed || inspect === undefined || before === undefined || before.status === 'none') {
       return { status: 'retired', sessionId: owner.sessionId, workspace: 'left-for-reconciliation' }
     }
-    const cleanup = await deps.conversationTerminal?.retireEmptyWorkspace?.(scope, before)
+    const cleanup = await deps.conversationTerminal?.retireEmptyWorkspace?.(scope, before, () => !closed && admittedEvidence(scope).status === 'idle')
     if (cleanup?.status === 'retired') return { status: 'retired', sessionId: owner.sessionId, workspace: 'workspace-retired' }
     if (cleanup?.status === 'unknown' || cleanup?.status === 'refused') {
       log.warn('project_scope_workspace_retirement_unconfirmed', { scope, ...cleanup })

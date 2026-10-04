@@ -333,8 +333,14 @@ export interface HerdrLayoutApply {
   readonly layout: {
     readonly workspace_id?: string
     readonly tab_id: string
-    readonly root: { readonly pane_id: string }
+    readonly root: { readonly pane_id: string; readonly retirement_identity?: HerdrPaneRetirementIdentity | null }
   }
+}
+
+/** Server-issued direct-child lifetime, captured only from the creation reply. */
+export interface HerdrPaneRetirementIdentity {
+  readonly terminal_id: string
+  readonly runtime_generation: string
 }
 
 /** Project placement uses these protocol-22 fields in addition to pane labels.
