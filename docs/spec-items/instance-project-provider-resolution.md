@@ -117,7 +117,12 @@ is a local credential check, not a claim of live owner/build/restart acceptance 
   A conclusively pre-native account refusal is retryable after account release,
   without fabricating retirement or leaving a phantom durable owner. Unknown
   launches, foreign refusal receipts and any native journal remain fenced.
+  The account census excludes a kernel task only after two readable Linux stat
+  observations agree on its PID, start time and flags including `PF_KTHREAD`.
+  Empty argv or a missing executable alone never permits exclusion; unreadable
+  userspace tasks, malformed stat and changed kernel evidence remain unknown.
   Verify: `runtime/adapters/codex-cli/persistent/project-owner-admission-refusal.test.ts`,
+  `runtime/adapters/codex-cli/account-writer-lock.test.ts`,
   `runtime/adapters/codex-cli/persistent/project-control-bootstrap-account-lease.test.ts`,
   `trident/codex-review.test.ts`, `trident/codex-build.test.ts`,
   `open/__tests__/codex-durable-owner.test.ts`.
