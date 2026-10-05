@@ -18,6 +18,7 @@ import time
 
 LOCK_NAME = '.neutron-account-writer.lock'
 NATIVE_LOCK_NAME = '.neutron-account-native.lock'
+PF_KTHREAD = 0x00200000  # Linux include/linux/sched.h; proc stat field 9.
 
 
 class Busy(Exception):
@@ -72,8 +73,17 @@ def native_lock(home):
 
 def process_identity(path):
     data = (path / 'stat').read_text()
-    fields = data[data.rfind(')') + 2:].split()
-    return fields[0], fields[19]
+    pid, opening, rest = data.partition(' (')
+    _comm, closing, tail = rest.rpartition(') ')
+    fields = tail.split()
+    if not opening or not closing or pid != path.name or len(fields) < 20 \
+            or fields[0] not in ('R', 'S', 'D', 'T', 't', 'X', 'Z', 'P', 'I') \
+            or any(not value.isascii() or not value.isdecimal() for value in (fields[6], fields[19])):
+        raise ValueError('Process census stat is malformed')
+    flags = int(fields[6])
+    if flags > 0xffffffff:
+        raise ValueError('Process census flags are malformed')
+    return fields[0], int(fields[19]), flags
 
 
 def census(home, proc=Path('/proc')):
@@ -93,6 +103,13 @@ def census(home, proc=Path('/proc')):
                 continue
             before = process_identity(path)
             if before[0] in ('Z', 'X'):
+                continue
+            if before[2] & PF_KTHREAD:
+                # Kernel tasks have no userspace executable. Require the same
+                # PID/start and flags twice; missing exe/argv alone proves nothing.
+                after = process_identity(path)
+                if before[1:] != after[1:]:
+                    raise ValueError('Process census changed')
                 continue
             argv = os.fsdecode((path / 'cmdline').read_bytes()).split('\0')
             executable = Path(os.readlink(path / 'exe')).name
