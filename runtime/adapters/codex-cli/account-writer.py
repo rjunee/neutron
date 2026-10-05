@@ -16,9 +16,11 @@ import stat
 import sys
 import time
 
+from codex_account_client import observe_account_consumers
+from codex_account_observation import account_identity
+
 LOCK_NAME = '.neutron-account-writer.lock'
 NATIVE_LOCK_NAME = '.neutron-account-native.lock'
-PF_KTHREAD = 0x00200000  # Linux include/linux/sched.h; proc stat field 9.
 
 
 class Busy(Exception):
@@ -71,77 +73,13 @@ def native_lock(home):
     return fd
 
 
-def process_identity(path):
-    data = (path / 'stat').read_text()
-    pid, opening, rest = data.partition(' (')
-    _comm, closing, tail = rest.rpartition(') ')
-    fields = tail.split()
-    if not opening or not closing or pid != path.name or len(fields) < 20 \
-            or fields[0] not in ('R', 'S', 'D', 'T', 't', 'X', 'Z', 'P', 'I') \
-            or any(not value.isascii() or not value.isdecimal() for value in (fields[6], fields[19])):
-        raise ValueError('Process census stat is malformed')
-    flags = int(fields[6])
-    if flags > 0xffffffff:
-        raise ValueError('Process census flags are malformed')
-    return fields[0], int(fields[19]), flags
-
-
-def census(home, proc=Path('/proc')):
-    """Unwrapped native consumers are competitors too; failed reads are unknown.
-
-    Only executable Codex processes count, not a shell carrying CODEX_HOME.
-    Unset CODEX_HOME uses the process's HOME.
-    """
-    entries = list(proc.iterdir())
-    if not any(p.name == str(os.getpid()) for p in entries):
-        raise ValueError('Incomplete process census')
-    for path in entries:
-        if not path.name.isdigit() or int(path.name) == os.getpid():
-            continue
-        try:
-            if path.stat().st_uid != os.getuid():
-                continue
-            before = process_identity(path)
-            if before[0] in ('Z', 'X'):
-                continue
-            if before[2] & PF_KTHREAD:
-                # Kernel tasks have no userspace executable. Require the same
-                # PID/start and flags twice; missing exe/argv alone proves nothing.
-                after = process_identity(path)
-                if before[1:] != after[1:]:
-                    raise ValueError('Process census changed')
-                continue
-            argv = os.fsdecode((path / 'cmdline').read_bytes()).split('\0')
-            executable = Path(os.readlink(path / 'exe')).name
-            is_codex = executable == 'codex' or any(Path(v).name in ('codex', 'codex.js') for v in argv[:2])
-            if not is_codex:
-                continue
-            environment = dict(v.split('=', 1) for v in os.fsdecode((path / 'environ').read_bytes()).split('\0') if '=' in v)
-            after = process_identity(path)
-            if before[1] != after[1]:
-                raise ValueError('Process census changed')
-            if after[0] in ('Z', 'X'):
-                continue
-            value = environment.get('CODEX_HOME')
-            if not value:
-                if not environment.get('HOME'):
-                    raise ValueError('Native account home is unknown')
-                value = str(Path(environment['HOME']) / '.codex')
-            candidate = Path(value)
-            if not candidate.is_absolute():
-                candidate = Path(os.readlink(path / 'cwd')) / candidate
-            if candidate.resolve() == home:
-                raise Busy('An existing native consumer owns this account')
-        except FileNotFoundError:
-            # A vanished PID is the only unreadable process proven gone.
-            if path.exists():
-                try:
-                    if process_identity(path)[0] in ('Z', 'X'):
-                        continue
-                except FileNotFoundError:
-                    if not path.exists():
-                        continue
-                raise ValueError('Process census is incomplete')
+def census(home):
+    identity = account_identity(home, os.getuid())
+    result = observe_account_consumers(os.getuid())
+    if account_identity(home, os.getuid()) != identity:
+        raise ValueError('Account directory changed during observation')
+    if any(consumer['accountId'] == identity for consumer in result['nativeConsumers']):
+        raise Busy('An existing native consumer owns this account')
 
 
 def stable_census(home):
@@ -193,11 +131,15 @@ def main(argv):
         raise ValueError('Account admission requires Linux process evidence')
     if argv[0] == '--census':
         home = canonical_home(argv[1])
+        identity = account_identity(home, os.getuid())
         # Caller holds the reservation throughout this short-lived probe. A
         # native writer owns the other lock even though its flock is released.
         fd = native_lock(home)
         try:
             stable_census(home)
+            if identity != account_identity(home, os.getuid()):
+                raise ValueError('Account directory changed during admission')
+            lock_file(home, NATIVE_LOCK_NAME, fd)
         finally:
             os.close(fd)
         return
@@ -220,9 +162,14 @@ def main(argv):
     env = dict(os.environ)
     native = native_command(binary, env)
     home = canonical_home(home_value or str(Path(os.environ['HOME']) / '.codex'))
+    identity = account_identity(home, os.getuid())
     fd = lock(home, inherited)
     lifetime = native_lock(home)
     stable_census(home)
+    if identity != account_identity(home, os.getuid()):
+        raise ValueError('Account directory changed during admission')
+    lock_file(home, LOCK_NAME, fd)
+    lock_file(home, NATIVE_LOCK_NAME, lifetime)
     os.set_inheritable(lifetime, True)
     # Only this launch process releases the reservation, and only after it owns
     # lifetime exclusion. Parent descriptors merely close. A native's tools may

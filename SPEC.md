@@ -342,6 +342,22 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-10-05 — Codex account admission shares one classifier across deployment observers.
+
+Every Codex launch and auth mutation observes native account consumers while
+holding the existing account reservation, then retains the native lifetime lock.
+Self-hosted complete local observation and an operator-provisioned protected
+observer are deliberate deployment transports for one public classifier and
+admission contract. A configured observer is mandatory; unknown, unavailable or
+invalid evidence refuses rather than falling back. Its only operation is bounded,
+challenged, signed credential-free census, with connected-peer kernel pinning.
+It owns no credentials, account custody, process control or service lifecycle.
+The observer has an independent lifecycle so its failure fences new admission
+without terminating existing work. This does not change the account-lifetime
+decision of 2026-10-04 or guarantee exclusion of later unwrapped launches.
+Exact protocol and acceptance belong to
+`docs/spec-items/instance-project-provider-resolution.md`.
+
 ### 2026-10-04 — Explicit current-shell authority for legacy workspace cleanup.
 
 Owner-directed unused-pane cleanup preserves creation-bound automatic retirement.

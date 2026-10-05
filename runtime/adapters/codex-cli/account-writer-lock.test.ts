@@ -66,6 +66,16 @@ test('synthetic process census covers live, missing, changed, default-home and d
   expect(result.status).toBe(0)
 })
 
+test('authenticated observation verifies real signatures and fences unknown in both consumers', () => {
+  const result = spawnSync('python3', ['-B', join(import.meta.dir, 'account-observation-client-test.py')], { encoding: 'utf8' })
+  expect({ status: result.status, error: result.status === 0 ? '' : result.stderr }).toEqual({ status: 0, error: '' })
+})
+
+test('observation contract rejects opposite-direction semantic mutants', () => {
+  const result = spawnSync('python3', ['-B', join(import.meta.dir, 'account-observation-mutation-test.py')], { encoding: 'utf8' })
+  expect({ status: result.status, error: result.status === 0 ? '' : result.stderr }).toEqual({ status: 0, error: '' })
+})
+
 test('private proc excludes unreadable outsiders but still refuses unknown insiders and finds known natives', () => {
   const result = spawnSync('python3', ['-B', join(import.meta.dir, 'account-writer-boundary-test.py')], {
     encoding: 'utf8', timeout: 25_000,
@@ -258,6 +268,8 @@ test('startup reservation stays exclusive until the native process acquires its 
   const home = root(), lease = acquireCodexAccountWriteLease(home)
   const script = join(import.meta.dir, 'account-writer.py')
   const program = `import importlib.util,sys
+from pathlib import Path
+sys.path.insert(0,str(Path(sys.argv[1]).parent))
 spec=importlib.util.spec_from_file_location('writer',sys.argv[1])
 writer=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(writer)

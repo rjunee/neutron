@@ -121,6 +121,7 @@ is a local credential check, not a claim of live owner/build/restart acceptance 
   observations agree on its PID, start time and flags including `PF_KTHREAD`.
   Empty argv or a missing executable alone never permits exclusion; unreadable
   userspace tasks, malformed stat and changed kernel evidence remain unknown.
+  The admission observation protocol below governs local and protected observers.
   Verify: `runtime/adapters/codex-cli/persistent/project-owner-admission-refusal.test.ts`,
   `runtime/adapters/codex-cli/account-writer-lock.test.ts`,
   `runtime/adapters/codex-cli/persistent/project-control-bootstrap-account-lease.test.ts`,
@@ -129,3 +130,95 @@ is a local credential check, not a claim of live owner/build/restart acceptance 
 - [ ] A Codex project orchestrates an actual build through completion on Codex.
   Depends on [the project REPL orchestration change](the-orchestrator-owns-the-build-loop.md)
   (#545). Substrate selection alone does not replace the native Workflow launcher.
+
+## Account admission observation protocol v1
+
+The canonical classifier is Python module
+`runtime/adapters/codex-cli/codex_account_observation.py`:
+`observe_uid(uid, proc=Path('/proc'), max_processes=65536, timeout_ms=2000)`
+returns exactly `{nativeConsumers: [{pid, startTicks, accountId}],
+scannedProcesses}` or raises `ObservationUnknown` with a bounded reason code.
+`account_identity(path, uid)` returns the opaque account ID. The protected
+observer imports these reviewed bytes; it must not maintain a second classifier.
+PID and UID are JSON integers, start ticks are canonical decimal strings. Account
+IDs are lowercase SHA-256 hex of the bytes
+`b'neutron-codex-account-v1\0' + os.fsencode(canonical_absolute_path) + b'\0'
++ ascii(device) + b':' + ascii(inode)` for an existing directory owned by the
+verified real UID. Neither account credentials nor their digest are involved.
+
+Root provisions `/etc/neutron/codex-observer/<real-uid>.json`, with exactly
+`{version: 1, kind: 'codex-observer-pin', instanceId, hostId, socketPath,
+publicKey}`. The public key is Ed25519 SPKI PEM; identifiers are 1–128 ASCII
+letters, digits, dots, underscores or hyphens. The file and every ancestor are
+root-owned, not group/world writable and not symlinks. Its absence selects
+complete local observation. Its presence selects the protected observer;
+unreadable, malformed, unavailable or refusing configuration never falls back.
+The endpoint is an absolute protected Unix socket. This selection is operator
+deployment configuration, not a runtime feature flag or a second classifier.
+
+Each direction carries one strict UTF-8 JSON object followed by LF and EOF (the
+client half-closes its write side after the request). Duplicate
+keys, extra fields, non-finite numbers, extra frames and invalid encodings refuse.
+Request (maximum 1,024 bytes): exactly `{version: 1,
+kind: 'codex-live-census-request', instanceId, challenge}`; challenge is 32 random
+bytes encoded as 64 lowercase hex characters. No PID, UID, path, environment,
+argv or namespace query selector is accepted. Before parsing the request, the
+server must acquire the connected caller's kernel `SO_PEERPIDFD`, retain it
+through response, reconcile SO_PEERCRED with all four proc UIDs and stable
+PID/start, and revalidate liveness around observation and signing. Reopening a
+numeric PID does not satisfy this prerequisite.
+
+Success is exactly `{payload, signature}`. Signature is canonical padded base64
+of the 64-byte Ed25519 signature over UTF-8 JSON of payload with sorted keys,
+no whitespace, ASCII escaping and no non-finite numbers. Payload is exactly
+`{version: 1, kind: 'codex-live-census', instanceId, uid, hostId, bootId,
+challenge, caller: {pid, startTicks}, startedMonotonicNs,
+finishedMonotonicNs, bounds: {maxProcesses: 65536, maxDurationMs: 2000},
+scannedProcesses, nativeConsumers: [{pid, startTicks, accountId}]}`.
+Monotonic nanoseconds are canonical decimal strings from `CLOCK_MONOTONIC`;
+boot ID is the canonical lowercase UUID from the kernel. Consumers are unique,
+sorted by PID, maximum 4,096; scannedProcesses is an integer from 1 to 65,536.
+The client checks the protected pin, signature, every exact schema and binding,
+its own PID/start/real UID, current boot, fresh challenge, and scan start/end
+inside its request interval (maximum 3 seconds), before interpreting consumers.
+Response maximum is 1 MiB. The observer closes the connection after one response.
+The Linux client uses `/usr/bin/openssl` for Ed25519 verification, with anonymous
+memory descriptors for the public key, signed bytes and signature. Missing or
+unsupported verification is unknown; no executable is selected through PATH.
+
+Refusal is exactly `{version: 1, kind: 'codex-live-census-refusal', reason}`,
+where reason is one of `peer`, `request`, `incomplete`, `changed`, `budget`,
+`unavailable`. Refusals carry no successful observation and always fence
+admission; unsigned refusal cannot grant permission. Disconnect, timeout and
+every validation failure are also `accountAdmissionUnknown`.
+
+The classifier derives population membership from all four credential UID
+fields, never proc inode ownership. A relevant live userspace process requires
+stable PID/start, credentials, executable and classification evidence before
+exclusion. A Codex consumer uses observed nonempty CODEX_HOME, then observed
+HOME/.codex, then verified-real-UID NSS home/.codex; relative paths use stable
+observed cwd. NSS, namespaces, account path and device/inode must remain stable.
+NSS fallback requires the target and observer to share the mount namespace and
+root filesystem identity. A matching root inode alone does not prove the same
+NSS database or providers. A protected observer with a distinct read-only mount
+namespace therefore refuses missing-HOME/CODEX_HOME consumers as unknown. Native
+launch supplies explicit canonical CODEX_HOME; explicit HOME/CODEX_HOME may cross
+mount namespaces only with target-root account path/device/inode equivalence.
+No process-name exception or ignored read error establishes completeness.
+The server proves its complete host proc view separately, then revalidates boot,
+enumeration and all classification evidence; budget exhaustion is unknown.
+
+Launch and auth mutation invoke the same observation client while holding their
+existing account reservation. Matching account identity returns `accountBusy`;
+complete distinct accounts admit. The actual native retains the lifetime lock
+after helper death. The client revalidates its account identity around observation
+and lock handoff. Observation is not an atomic kernel snapshot or a lease against
+later unwrapped launches. No credential read, copied account, process control,
+service control or reusable receipt is introduced.
+
+Acceptance requires valid same/distinct-account controls, NSS fallback, unknown
+and malformed/reforged/replayed response controls, changed process/account/boot
+controls, plus reservation and native-lifetime tests in both admission orders.
+The focused Python observation suite and existing account-writer suites run
+before the consuming tests listed above. The integrating gate also runs
+`open/__tests__/project-build-e2e.test.ts` and all owned TypeScript projects.
