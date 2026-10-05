@@ -63,5 +63,15 @@ positive control. It performed no account canonicalization, lock acquisition or
 credential writes. A separate ordinary-user host census still refused an
 unreadable userspace executable, while an isolated process namespace admitted.
 That residual remains fenced; isolated test success is not live admission proof.
-The full suite has not run for this change at this evidence update. No live
+The canonical `bash scripts/check-shared-host.sh` subsequently completed with
+exit 0 on tested revision `173b7fa31f3e5ee1289b068945d5484774f0dfc4`:
+lint passed, all 51 typechecks passed, and all 1,795 declared test files were
+discovered, assigned and executed across 19 lanes with zero failed lanes.
+The host measured the same suite input identity before and after execution:
+`79b3a03519ff68289b98b0ef49baf464e42a0f770cdb6be5cd7d1d42078bcf18`.
+The retained log SHA-256 is
+`7e71b8a2044a2303194f25110ba1add15158703e4ef88749d7b3bde24fcf8eab`.
+This final receipt-only update leaves production and test blobs unchanged;
+the local receipt names the tested revision, not a new receipt for the changed
+publication head. Exact-head CI remains required before merge. No live
 credential adoption or exclusion against later unwrapped launches is claimed.
