@@ -51,3 +51,17 @@ The tested production blob is `4740f1d393b949da5857a9a5dd0b9417d9b4f1d6`;
 the detector test blob is `3f503743aa888007ab4e833ae1d977a61c101eaf` and
 the consuming test blob is `8366d355be63ede5e2cd2a1c1047007aad95d03e`.
 The full repository suite and exact publication-head CI remain separate gates.
+
+Canonical integration receipt (2026-10-06): tested revision
+`27cae5e17b7cd02b380d6d37c200f25a6562ae19`, with the merged account-census
+kernel repair included. `bash scripts/check-shared-host.sh` exited 0. Its owned
+TypeScript matrix checked all 51 projects, including the root and Trident
+projects. The full coverage audit reported 1,795 declared, Bun-discovered,
+assigned and executed files, across 19 lanes with zero failing lanes.
+The suite input identity stayed
+`ba25ef188bb05de8146f17347920829d060e5619c1d70d96a60428410082cf96`.
+The retained log's SHA-256 is
+`aac0851ccd43ac8ebfc77f2e8d362abfcb724d39f8c67383d5200789346ff7f1`.
+This receipt identifies that tested revision, not the subsequent evidence-only
+publication commit. Exact publication-head CI and deployed live acceptance remain
+outstanding; expired native-child ownership is not retired by this detector fix.
