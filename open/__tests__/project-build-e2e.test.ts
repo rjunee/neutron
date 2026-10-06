@@ -1038,6 +1038,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
   synthesisShape?: WorkerWorld['synthesisShape']; rateLimitedSynthesis?: boolean; nativeUsage?: boolean
   nativeContinuation?: 'available' | 'unavailable' | 'foreign-launch' | 'lost-ack' | 'adopted' | 'adopted-unavailable' | 'adopted-relay' | 'adopted-relay-missing-scope' | 'restart' | 'repeated' | 'held-ack'
   nativeCapacity?: string
+  nativeQuotaWithoutRequestId?: boolean
+  nativeQuotaError?: 'api_error'
   nativeQueuedOrdinary?: boolean
   nativeWriterQueue?: boolean
   beforeNativeQuota?: () => Promise<void>
@@ -1324,7 +1326,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       const childTranscript = join(directory, 'agent-quota.jsonl')
       await writeFile(childTranscript, JSON.stringify({ ...identity, type: 'user', message: { role: 'user', content: args.prompt } }) + '\n')
       const rejectQuota = () => appendFile(childTranscript, JSON.stringify({ ...identity, type: 'assistant', message: { role: 'assistant', model: '<synthetic>', content: [], stop_reason: 'stop_sequence' },
-        isApiErrorMessage: true, error: 'rate_limit', apiErrorStatus: 429, requestId: 'quota-request' }) + '\n')
+        isApiErrorMessage: true, error: options.nativeQuotaError ?? 'rate_limit', apiErrorStatus: 429,
+        ...(options.nativeQuotaWithoutRequestId ? { apiErrorIsTransient: true } : { requestId: 'quota-request' }) }) + '\n')
       await options.beforeNativeQuota?.()
       if (options.nativeQueuedOrdinary) emitQuota = rejectQuota
       else await rejectQuota()
@@ -7933,7 +7936,7 @@ test.each(['available', 'spent execution'] as const)('native writer queue credit
 }, 30_000)
 
 test('repeated native quota episodes wait visibly and resume the same child through the original merge gates', async () => {
-  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'repeated', nativeCapacity: 'all-full' })
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'repeated', nativeCapacity: 'all-full', nativeQuotaWithoutRequestId: true })
   f.capacity!.setRetryDelay(1)
   const record = f.store.recordStageEvent.bind(f.store)
   f.store.recordStageEvent = async (id, stage, meta) => {
@@ -8027,8 +8030,8 @@ test.each(['unknown', 'forged', 'wrong-modelId', 'wrong-childId', 'wrong-leaseId
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 30_000)
 
-test.each(['capacity', 'original-result'] as const)('native quota waiting remains visible and reaches merge after %s arrives', async clearedBy => {
-  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeCapacity: 'all-full' })
+test.each(['capacity', 'original-result'] as const)('native quota without requestId waits visibly and reaches merge after %s arrives', async clearedBy => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeCapacity: 'all-full', nativeQuotaWithoutRequestId: true })
   f.capacity!.setRetryDelay(10)
   const record = f.store.recordStageEvent.bind(f.store)
   let waited = false
@@ -8054,6 +8057,35 @@ test.each(['capacity', 'original-result'] as const)('native quota waiting remain
   expect(f.admission.listLeases('liveChild')).toHaveLength(0)
   expect(f.capacity!.requests.filter(row => row.kind === 'claude-native-observe')).toHaveLength(clearedBy === 'capacity' ? 2 : 1)
 }, 30_000)
+
+test.each(['unknown', 'forged', 'native-unknown', 'observation-nativeAgentId'] as const)('native quota without requestId cannot authorize continuation with %s capacity', async nativeCapacity => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeCapacity, nativeQuotaWithoutRequestId: true })
+  const outcome = await drive(f)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', on: expect.stringContaining('capacity-unavailable') })
+  expect(f.capacity!.requests.some(row => row.kind === 'claude-native-bind-child')).toBe(true)
+  if (nativeCapacity !== 'forged') expect(f.capacity!.requests.some(row => row.kind === 'claude-native-observe')).toBe(true)
+  expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(0)
+  expect(f.nativeInputs.filter(line => line.includes('synthesis:'))).toHaveLength(1)
+  expect(f.db.all('SELECT * FROM claude_native_continuations')).toHaveLength(0)
+  expect(f.store.stageEvents(f.row.id).filter(event => event.stage.startsWith('claude-quota-'))).toHaveLength(0)
+  expect(f.admission.listLeases('liveChild')).toHaveLength(1)
+  expect(f.github.prs[0]!.state).toBe('OPEN')
+}, 30_000)
+
+test('an arbitrary native API error without requestId cannot wake quota continuation', async () => {
+  const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeCapacity: 'all-full',
+    nativeQuotaWithoutRequestId: true, nativeQuotaError: 'api_error' })
+  const prepared = await f.prepare()
+  const request: BoundedWorkRequest = { ...prepared.workers.build.request, run_id: f.row.id,
+    step_id: `${f.row.id}:synthesis:arbitrary-error`, role: 'synthesis', needs_approval_decision: false, budget: { wall_ms: 1000 } }
+  const outcome = await prepared.substrate.inRepl!.run(request, 'in-repl', new AbortController().signal)
+  expect(outcome.kind).toBe('unknown')
+  expect(f.nativeInputs.filter(line => line.includes('synthesis:'))).toHaveLength(1)
+  expect(f.nativeInputs.filter(line => line.startsWith('Invoke SendMessage'))).toHaveLength(0)
+  expect(f.capacity!.requests.filter(row => row.kind === 'claude-native-observe')).toHaveLength(0)
+  expect(f.store.stageEvents(f.row.id).filter(event => event.stage.startsWith('claude-quota-'))).toHaveLength(0)
+  expect(f.admission.listLeases('liveChild')).toHaveLength(1)
+}, 10_000)
 
 test.each(['deadline', 'cancelled'] as const)('native quota waiting preserves the original child on %s', async mode => {
   const f = await fixture({ rateLimitedSynthesis: true, nativeContinuation: 'available', nativeCapacity: 'all-full' })
