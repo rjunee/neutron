@@ -4,12 +4,46 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createTimelineHandler, startTimelineServer, timelineWindow, timelineSourceReader } from '../build-timeline-server.ts'
-import { appendPhaseObservation } from '../build-timeline-sources.ts'
+import { appendPhaseObservation, appendChangedPhaseObservations, collectCiCheckRuns, collectPullRequestCatalogue, readPhaseObservations } from '../build-timeline-sources.ts'
 import { combineTimelineSources } from '@neutronai/trident/build-timeline-catalogue.ts'
 import { projectTimeline, type TimelineSnapshot } from '@neutronai/trident/build-timeline.ts'
 
 const auth = `Basic ${Buffer.from('viewer:test-secret').toString('base64')}`
 const snapshot = () => combineTimelineSources({ observedAt: 1000, repositories: [] }, [], [], 1000)
+
+test('authenticated API keeps superseded cancelled CI duration fixed across later reads', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'timeline-superseded-check-'))
+  const observations = join(dir, 'observations.ndjson'), catalogueFile = join(dir, 'catalogue.json')
+  const now = Date.now(), oldHead = 'a'.repeat(40), newHead = 'b'.repeat(40), phaseId = `github-check:example/open#7:${oldHead}:10`
+  try {
+    await appendPhaseObservation(observations, { eventId: 'old-open', phaseId, links: [{ repository: 'example/open', prNumber: 7 }],
+      phase: 'ci', model: null, startedAt: now - 120_000, endedAt: null, observedAt: now - 60_000,
+      inputTokens: null, outputTokens: null, cacheReadTokens: null, cacheCreationTokens: null, costUsd: null,
+      source: { kind: 'github', sourceEventId: '10', attribution: 'explicit', basis: `check run for PR head ${oldHead}`,
+        evidenceRef: 'https://github.com/example/open/actions/runs/100/job/10' } })
+    const catalogue = await collectPullRequestCatalogue(['example/open'], { now: () => now,
+      fetcher: (async () => Response.json([{ number: 7, title: 'Superseded check', html_url: 'https://github.com/example/open/pull/7',
+        created_at: new Date(now - 180_000).toISOString(), closed_at: null, merged_at: null, state: 'open',
+        head: { sha: newHead }, updated_at: new Date(now).toISOString() }])) as unknown as typeof fetch })
+    const result = await collectCiCheckRuns(catalogue, { observations: await readPhaseObservations(observations), now: () => now,
+      fetcher: (async url => Response.json(String(url).includes('/commits/') ? { check_runs: [{ id: 20, name: 'current suite', status: 'completed',
+        started_at: new Date(now - 50_000).toISOString(), completed_at: new Date(now - 40_000).toISOString() }] } : {
+        id: 10, head_sha: oldHead, name: 'old suite', status: 'completed', conclusion: 'cancelled',
+        started_at: new Date(now - 120_000).toISOString(), completed_at: new Date(now - 90_000).toISOString(),
+        html_url: 'https://github.com/example/open/actions/runs/100/job/10' })) as typeof fetch })
+    await appendChangedPhaseObservations(observations, result.observations)
+    await writeFile(catalogueFile, JSON.stringify(result.catalogue))
+    const handler = createTimelineHandler({ username: 'viewer', password: 'test-secret', read: timelineSourceReader({ catalogue: catalogueFile, observations, databases: [] }) })
+    for (let read = 0; read < 2; read++) {
+      const response = await handler(new Request('http://localhost/api/timeline', { headers: { authorization: auth } }))
+      expect(response.status).toBe(200)
+      const data = await response.json() as TimelineSnapshot, card = data.cards[0]!
+      expect(card.segments.find(s => s.id === phaseId)).toMatchObject({ end: now - 90_000, timing: 'recorded', model: null,
+        usage: { tokens: null, costUsd: null, coverage: 'unknown' } })
+      expect(card.workSignal?.state).toBe('recent')
+    }
+  } finally { await rm(dir, { recursive: true, force: true }) }
+})
 
 test('page, rendered timeline and JSON all deny anonymous and wrong credentials before reading', async () => {
   let reads = 0

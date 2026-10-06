@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import { link, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -30,6 +30,24 @@ const observation = (overrides: Partial<DirectPhaseObservation> = {}): DirectPha
   observedAt: 3000,
   ...overrides,
 })
+
+const ciBase = Date.parse('2026-09-02T00:00:00Z'), oldHead = 'a'.repeat(40), newHead = 'b'.repeat(40)
+const oldCheck = (id = 10): DirectPhaseObservation => observation({
+  eventId: `old-${id}`, phaseId: `github-check:example/open#1:${oldHead}:${id}`,
+  links: [{ repository: 'example/open', prNumber: 1 }], phase: 'ci', model: null,
+  startedAt: ciBase, endedAt: null, observedAt: ciBase + id,
+  source: { kind: 'github', sourceEventId: String(id), attribution: 'explicit',
+    evidenceRef: `https://github.com/example/open/actions/runs/100/job/${id}`, basis: `check run for PR head ${oldHead}` },
+})
+const historicalCheck = (id = 10) => ({ id, head_sha: oldHead, name: 'suite', status: 'completed', conclusion: 'cancelled',
+  started_at: new Date(ciBase).toISOString(), completed_at: new Date(ciBase + 60_000).toISOString(),
+  html_url: `https://github.com/example/open/actions/runs/100/job/${id}` })
+async function nextHeadCatalogue() {
+  const catalogue = await collectPullRequestCatalogue(['example/open'], {
+    fetcher: (async () => Response.json([{ ...pull(1), head: { sha: newHead } }])) as unknown as typeof fetch, now: () => ciBase + 100_000,
+  })
+  return catalogue
+}
 
 async function withLog(run: (file: string) => Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), 'timeline-observations-'))
@@ -197,6 +215,101 @@ describe('timeline catalogue', () => {
     expect(history.map(row => row.startedAt)).toEqual([base, base + 3000, base + 3000])
     expect(new Set(history.map(row => row.eventId)).size).toBe(3)
   }))
+
+  test('superseded in-progress check closes at actual cancelled completion without changing current-head readiness', async () => withLog(async file => {
+    await appendPhaseObservation(file, oldCheck())
+    const before = await readFile(file, 'utf8'), calls: string[] = []
+    const result = await collectCiCheckRuns(await nextHeadCatalogue(), {
+      observations: await readPhaseObservations(file), now: () => ciBase + 120_000,
+      fetcher: (async url => {
+        calls.push(new URL(String(url)).pathname)
+        return Response.json(String(url).includes('/commits/') ? { check_runs: [{ ...historicalCheck(20), head_sha: newHead, conclusion: 'success' }] } : historicalCheck())
+      }) as typeof fetch,
+    })
+    expect(calls).toEqual([`/repos/example/open/commits/${newHead}/check-runs`, '/repos/example/open/check-runs/10'])
+    expect(result.catalogue.repositories[0]!.prs[0]).toMatchObject({ headSha: newHead, ciRunning: false, ciPending: false, ciCoverage: 'head-only' })
+    expect(await appendChangedPhaseObservations(file, result.observations)).toBe(2)
+    const closed = (await readPhaseObservations(file)).find(r => r.phaseId === oldCheck().phaseId)!
+    expect(closed).toMatchObject({ startedAt: ciBase, endedAt: ciBase + 60_000, inputTokens: null, costUsd: null })
+    expect((await readFile(file, 'utf8')).startsWith(before)).toBe(true)
+    const next = await collectCiCheckRuns(result.catalogue, { previous: result.catalogue, observations: await readPhaseObservations(file),
+      now: () => ciBase + 130_000, fetcher: (async () => { throw new Error('terminal checks must not be polled again') }) as unknown as typeof fetch })
+    expect(next.observations).toEqual([])
+    expect(next.catalogue.apiRequests).toBe(result.catalogue.apiRequests)
+  }))
+
+  test('known still-running superseded check stays open while the current head is terminal', async () => {
+    const result = await collectCiCheckRuns(await nextHeadCatalogue(), { observations: [oldCheck()], now: () => ciBase + 120_000,
+      fetcher: (async url => Response.json(String(url).includes('/commits/') ? { check_runs: [{ ...historicalCheck(20), head_sha: newHead }] }
+        : { ...historicalCheck(), status: 'in_progress', conclusion: null, completed_at: null })) as typeof fetch })
+    expect(result.observations.find(r => r.phaseId === oldCheck().phaseId)).toMatchObject({ endedAt: null, inputTokens: null })
+    expect(result.catalogue.repositories[0]!.prs[0]).toMatchObject({ ciRunning: false, ciPending: false })
+  })
+
+  test('missing, failed, foreign and invalid historical check evidence retains unknown completion', async () => {
+    const replies = [new Response('missing', { status: 404 }), new Response('failed', { status: 503 }),
+      Response.json({}), Response.json({ ...historicalCheck(), id: 99 }), Response.json({ ...historicalCheck(), head_sha: newHead }),
+      Response.json({ ...historicalCheck(), html_url: 'https://github.com/example/foreign/actions/runs/100/job/10' }),
+      Response.json({ ...historicalCheck(), status: 'unexpected' }), Response.json({ ...historicalCheck(), completed_at: null }),
+      Response.json({ ...historicalCheck(), started_at: 'invalid' }), Response.json({ ...historicalCheck(), completed_at: new Date(ciBase - 1).toISOString() }),
+      Response.json({ ...historicalCheck(), completed_at: new Date(ciBase + 900_000).toISOString() })]
+    for (const reply of replies) {
+      const result = await collectCiCheckRuns(await nextHeadCatalogue(), { observations: [oldCheck()], now: () => ciBase + 120_000,
+        fetcher: (async url => String(url).includes('/commits/') ? Response.json({ check_runs: [] }) : reply) as typeof fetch })
+      const historical = result.observations.find(r => r.phaseId === oldCheck().phaseId)!
+      expect(historical).toMatchObject({ startedAt: ciBase, endedAt: null, inputTokens: null, outputTokens: null, costUsd: null })
+      expect(historical.source.basis).toContain('unavailable; completion unknown')
+    }
+  })
+
+  test('historical polling is bounded and persisted attempts rotate failures and running checks fairly', async () => withLog(async file => {
+    for (const id of [10, 11, 12]) await appendPhaseObservation(file, oldCheck(id))
+    const calls: number[] = []
+    for (let cycle = 0; cycle < 4; cycle++) {
+      const result = await collectCiCheckRuns(await nextHeadCatalogue(), { limit: 1, observations: await readPhaseObservations(file), now: () => ciBase + 120_000 + cycle * 1000,
+        fetcher: (async url => {
+          const path = new URL(String(url)).pathname
+          if (path.includes('/commits/')) return Response.json({ check_runs: [] })
+          const id = Number(path.split('/').at(-1)); calls.push(id)
+          return id === 10 ? new Response('missing', { status: 404 }) : Response.json({ ...historicalCheck(id), status: 'in_progress', conclusion: null, completed_at: null })
+        }) as typeof fetch })
+      expect(result.catalogue.apiRequests).toBe(3) // one catalogue, one current head, one known old check
+      expect(result.observations).toHaveLength(1)
+      expect(await appendChangedPhaseObservations(file, result.observations)).toBe(1)
+    }
+    expect(calls).toEqual([10, 11, 12, 10])
+    expect((await readPhaseObservations(file)).every(r => r.endedAt === null)).toBe(true)
+  }))
+
+  test('non-provider, ambiguous and unavailable-repository observations cannot create historical requests', async () => {
+    const variants = [oldCheck(), oldCheck(), oldCheck(), oldCheck()]
+    variants[0]!.source.kind = 'orchestrator'
+    variants[1]!.links.push({ repository: 'example/other', prNumber: 2 })
+    variants[2]!.phaseId = `github-check:example/open#1:${newHead}:10`
+    variants[3]!.phaseId = `github-check:example/open#1:not-a-head:10`
+    const catalogue = await nextHeadCatalogue()
+    const result = await collectCiCheckRuns(catalogue, { observations: variants, now: () => ciBase + 120_000,
+      fetcher: (async url => { expect(String(url)).toContain('/commits/'); return Response.json({ check_runs: [] }) }) as typeof fetch })
+    expect(result.observations).toEqual([])
+    catalogue.repositories[0]!.error = 'unavailable'
+    expect((await collectCiCheckRuns(catalogue, { observations: [oldCheck()], fetcher: (async () => { throw new Error('must not query failed repository') }) as unknown as typeof fetch })).observations).toEqual([])
+  })
+
+  test('historical lookup deadline stops work without fabricating observations for unattempted checks', async () => {
+    const catalogue = await nextHeadCatalogue(), calls: string[] = []
+    const clock = spyOn(performance, 'now').mockReturnValueOnce(0).mockReturnValueOnce(1).mockReturnValue(15_001)
+    try {
+      const result = await collectCiCheckRuns(catalogue, { observations: [oldCheck(10), oldCheck(11)], now: () => ciBase + 120_000,
+        fetcher: (async (url, init) => {
+          if (String(url).includes('/commits/')) return Response.json({ check_runs: [] })
+          calls.push(String(url)); expect(init?.signal).toBeInstanceOf(AbortSignal)
+          return new Response('failed', { status: 503 })
+        }) as typeof fetch })
+      expect(calls).toHaveLength(1)
+      expect(result.observations.map(r => r.phaseId)).toEqual([oldCheck(10).phaseId])
+      expect(result.observations[0]?.endedAt).toBeNull()
+    } finally { clock.mockRestore() }
+  })
 })
 
 describe('direct phase observations', () => {

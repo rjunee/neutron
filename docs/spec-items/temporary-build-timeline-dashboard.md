@@ -119,6 +119,20 @@ spans carry unknown tokens unless a provider actually attributed usage.
       GitHub CI snapshots may revise the recorded start for the same check-run
       identity; the newest observation supplies timing without rewriting earlier
       snapshots. Non-GitHub phase start identities remain immutable.
+- [ ] A push replacing an observed unfinished CI head does not strand its check
+      interval. Each refresh reconciles at most 20 already observed unfinished
+      superseded check identities within a 15-second lookup budget, oldest attempted observation first, through
+      their exact repository/check endpoint. No historical head enumeration occurs.
+      Successful, failed and still-running lookup attempts advance their canonical
+      journal snapshots so the bounded budget remains fair across refreshes/restarts.
+      Only matching provider check ID, head and repository evidence with valid
+      start/completion clocks and explicit completed status closes an interval.
+      Missing, foreign, invalid or failed evidence retains unknown completion;
+      terminal checks leave this reconciliation queue. Historical work never
+      supplies current-head readiness. Verify cancelled completion after a push,
+      persisted retry fairness, refusal controls, immutable journal history and
+      stable authenticated API duration in `scripts/build-timeline-sources.test.ts`
+      and `scripts/__tests__/build-timeline-server.test.ts`.
 - [ ] An exact registered native task-start receipt yields an open phase with its
       recorded start clock, observed unique model or unknown, and cumulative
       exact-turn usage or unknown. Completion updates the same phase, never adds
