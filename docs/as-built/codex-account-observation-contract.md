@@ -6,14 +6,15 @@ could therefore make admission unknown; treating their displayed names as proof
 of absence would have broken account exclusion. The earlier kernel-task change
 remains valid but does not solve protected userspace observation.
 
-`runtime/adapters/codex-cli/codex_account_observation.py:166` is now the single
+`runtime/adapters/codex-cli/codex_account_observation.py:168` is now the single
 classifier. It derives membership from all four credential UID fields, verifies
 PID/start and executable identity before excluding userspace, retains the stable
 kernel-task distinction, and repeats classification and complete enumeration.
-Account identities combine canonical directory path and device/inode through a
-domain-separated opaque digest (`:68`). Target-root directory-descriptor traversal
+Account identities combine verified directory device/inode through a
+domain-separated opaque digest (`:68`); paths remain transient evidence rather
+than part of account identity. Target-root directory-descriptor traversal
 checks the account's actual filesystem identity across read-only mount namespaces
-(`:90`). No auth file is opened by observation.
+(`:92`). No auth file is opened by observation.
 
 `runtime/adapters/codex-cli/codex_account_client.py:274` selects complete local
 observation only when the fixed operator pin is absent. A configured observer is
@@ -41,6 +42,18 @@ verified account identity across read-only mounts. This limitation is explicit
 in the normative protocol; protected observation does not guess another
 namespace's NSS home.
 
+The subsequent bind-alias review found a separate physical-identity defect:
+canonical paths differ across bind mounts even when they expose one directory.
+A path-bearing digest could therefore admit a second writer alongside an
+unwrapped consumer. The corrected v1 digest uses only verified device/inode,
+retaining UID ownership and all path stability/equivalence checks. Both a
+synthetic control and an actual private bind-mount consuming test failed before
+this correction. The real control checks native-launch refusal, refusal before
+the TypeScript credential-mutation callback, distinct-directory admission and
+admission after verified synthetic-native exit. Restoring the path-bearing
+digest makes that same live assertion fail. The prior immutable decision remains
+unchanged; the 2026-10-06 decision records physical-directory exclusion.
+
 Validation measured in this change:
 
 - The named admission, project-owner/bootstrap, build/review, durable owner,
@@ -60,6 +73,18 @@ Validation measured in this change:
   every new file and every added diff line. A full local tree scan remains red
   on existing-content denylist matches and linked-worktree metadata; the scoped
   screen is not a full-tree or CI pass.
+
+The measurements above predate the bind-alias correction. Its affected-scope
+validation passed all 18 tests and 61 assertions in
+`bun test runtime/adapters/codex-cli/account-writer-lock.test.ts`, including the
+real mount control, 15 classifier controls, 10 client controls and 13 synthetic
+semantic mutants, plus the real bind-alias path-hash mutant. Both
+`bunx tsc --noEmit -p tsconfig.json` and
+`bunx tsc --noEmit -p app/tsconfig.json` passed again. The full canonical suite and
+build E2E remain with the integrating gate owner. The unchanged executable
+recognizer uses the native `codex` basename or
+`codex`/`codex.js` in the first two argv entries (`:182`); this record does not
+claim detection of arbitrarily renamed unwrapped executables.
 
 The separate protected-observer implementation owns its server-side
 SO_PEERPIDFD authentication, complete host-view proof, bounded worker, protected

@@ -239,6 +239,22 @@ class CensusTest(unittest.TestCase):
         self.home.mkdir()
         self.assertNotEqual(observation.account_identity(self.home, os.getuid()), before)
 
+    def test_physical_account_identity_collapses_bind_alias_paths(self):
+        alias = self.root / 'bind-alias'
+        # Two canonical paths to one verified directory object are equivalent;
+        # a different inode remains independent. Real mounts are covered by the
+        # consuming bind-alias fixture, without this observation seam.
+        original = observation.account_evidence
+        physical = original(self.home, os.getuid())
+        def evidence(path, uid):
+            if Path(path) == alias:
+                return str(alias), physical[1], physical[2]
+            return original(path, uid)
+        with patch.object(observation, 'account_evidence', evidence):
+            self.assertEqual(observation.account_identity(alias, os.getuid()), observation.account_identity(self.home, os.getuid()))
+            self.busy(alias)
+        self.assertNotEqual(observation.account_identity(self.root / '.codex', os.getuid()), observation.account_identity(self.home, os.getuid()))
+
     def test_retry_only_admits_complete_observation_and_preserves_busy(self):
         with patch.object(writer, 'census', side_effect=[observation.ObservationUnknown(), None]) as check:
             writer.stable_census(self.home)

@@ -40,6 +40,7 @@ CLASSIFIER = [
     ('test_enumeration_and_budgets_refuse', 'if paths != entries():', 'if False:'),
     ('test_stable_kernel_and_zombie_exclusion', 'PF_KTHREAD = 0x00200000', 'PF_KTHREAD = 0'),
     ('test_mount_namespace_account_equivalence_and_nss', 'if nss is not None and namespaces != observer_namespaces:', 'if False:'),
+    ('test_physical_account_identity_collapses_bind_alias_paths', "b'neutron-codex-account-v1\\0' + str(device)", "b'neutron-codex-account-v1\\0' + os.fsencode(_canonical) + b'\\0' + str(device)"),
 ]
 CLIENT = [
     ('test_forged_and_wrong_key_signatures_refuse', "if result.returncode != 0:", 'if False:'),
@@ -53,4 +54,4 @@ if __name__ == '__main__':
         check('codex_account_observation.py', 'account-writer-test.py', 'observation', 'CensusTest', method, before, after)
     for method, before, after in CLIENT:
         check('codex_account_client.py', 'account-observation-client-test.py', 'client', 'ClientTest', method, before, after)
-    print('12 semantic mutants rejected; all corresponding valid controls passed')
+    print('13 semantic mutants rejected; all corresponding valid controls passed')

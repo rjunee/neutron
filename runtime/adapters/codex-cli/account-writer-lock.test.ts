@@ -84,6 +84,14 @@ test('private proc excludes unreadable outsiders but still refuses unknown insid
   expect(result.stdout).toContain('outside refusal and isolated native positive/negative controls passed')
 }, 30_000)
 
+test('real bind aliases share admission against an unwrapped native and reject the old path hash', () => {
+  const result = spawnSync('python3', ['-B', join(import.meta.dir, 'account-writer-bind-alias-test.py'), binary], {
+    encoding: 'utf8', timeout: 30_000,
+  })
+  expect({ status: result.status, error: result.stderr }).toEqual({ status: 0, error: '' })
+  expect(result.stdout).toContain('path-hash mutant rejected')
+}, 35_000)
+
 test('exec adapter exposes accountBusy before the synthetic native can start', async () => {
   const home = root(), lease = acquireCodexAccountWriteLease(home)
   try {

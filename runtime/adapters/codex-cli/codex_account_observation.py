@@ -70,9 +70,11 @@ def account_identity(path, uid):
 
 
 def _account_digest(evidence):
-    canonical, device, inode = evidence
-    return hashlib.sha256(b'neutron-codex-account-v1\0' + os.fsencode(canonical)
-                          + b'\0' + str(device).encode('ascii') + b':' + str(inode).encode('ascii')).hexdigest()
+    _canonical, device, inode = evidence
+    # Bind mounts can give one directory object multiple canonical paths.
+    # Paths remain observation evidence, but cannot split account exclusion.
+    return hashlib.sha256(b'neutron-codex-account-v1\0' + str(device).encode('ascii')
+                          + b':' + str(inode).encode('ascii')).hexdigest()
 
 
 def _exe(path):

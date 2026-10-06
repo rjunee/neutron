@@ -342,6 +342,17 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-10-06 — Codex account exclusion identifies the physical directory object.
+
+The admission-observation contract of 2026-10-05 identifies an account by its
+verified directory device and inode, with UID ownership checked independently.
+Canonical paths remain observation evidence but do not enter the opaque account
+digest: distinct bind-mount paths may expose the same directory and therefore
+must contend for the same account. Native and auth-mutation admission must refuse
+an overlapping unwrapped consumer through either bind or symlink aliases, while
+distinct physical directories remain independent. Exact encoding and consuming
+controls belong to `docs/spec-items/instance-project-provider-resolution.md`.
+
 ### 2026-10-05 — Codex account admission shares one classifier across deployment observers.
 
 Every Codex launch and auth mutation observes native account consumers while

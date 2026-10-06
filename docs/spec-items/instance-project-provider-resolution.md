@@ -142,9 +142,14 @@ scannedProcesses}` or raises `ObservationUnknown` with a bounded reason code.
 observer imports these reviewed bytes; it must not maintain a second classifier.
 PID and UID are JSON integers, start ticks are canonical decimal strings. Account
 IDs are lowercase SHA-256 hex of the bytes
-`b'neutron-codex-account-v1\0' + os.fsencode(canonical_absolute_path) + b'\0'
-+ ascii(device) + b':' + ascii(inode)` for an existing directory owned by the
-verified real UID. Neither account credentials nor their digest are involved.
+`b'neutron-codex-account-v1\0' + ascii(device) + b':' + ascii(inode)` for an
+existing directory owned by the verified real UID. Device and inode are canonical
+unsigned decimal encodings of the verified `st_dev` and `st_ino`. Canonical paths
+remain transient stability and filesystem-equivalence evidence; they are not
+part of the opaque ID, because bind mounts can expose one physical directory at
+different canonical paths. Symlink and bind aliases must both exclude an
+overlapping unwrapped consumer; a distinct directory remains independent.
+Neither account credentials nor their digest are involved.
 
 Root provisions `/etc/neutron/codex-observer/<real-uid>.json`, with exactly
 `{version: 1, kind: 'codex-observer-pin', instanceId, hostId, socketPath,
@@ -222,3 +227,7 @@ controls, plus reservation and native-lifetime tests in both admission orders.
 The focused Python observation suite and existing account-writer suites run
 before the consuming tests listed above. The integrating gate also runs
 `open/__tests__/project-build-e2e.test.ts` and all owned TypeScript projects.
+`account-writer-bind-alias-test.py` exercises a real isolated bind mount against
+an unwrapped synthetic native, both launch and auth-mutation consumers, a
+distinct-directory positive control and restoration of the unsafe path-bearing
+digest as a must-fail semantic mutant.
