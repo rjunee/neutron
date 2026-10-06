@@ -39,7 +39,13 @@ test('typed subscription quota errors need no quotaLimits enrichment', async () 
   expect(await f.run([f.initial, { ...f.final, quotaLimits: null }])).toBe(false)
 })
 
-for (const field of ['agentId', 'sessionId', 'isSidechain', 'type', 'isApiErrorMessage', 'error', 'apiErrorStatus', 'requestId', 'message'] as const) {
+test('native synthetic 429 without requestId wakes reconciliation without inventing provider identity', async () => {
+  const f = await fixture()
+  expect(await f.run([f.initial, { ...f.final, requestId: undefined, quotaLimits: undefined,
+    apiErrorIsTransient: true, message: { ...f.final.message, stop_reason: 'stop_sequence' } }])).toBe(true)
+})
+
+for (const field of ['agentId', 'sessionId', 'isSidechain', 'type', 'isApiErrorMessage', 'error', 'apiErrorStatus', 'message'] as const) {
   test(`child quota observation requires provider envelope ${field}`, async () => {
     const f = await fixture()
     expect(await f.run([f.initial, { ...f.final, [field]: undefined }])).toBe(false)
@@ -66,6 +72,17 @@ test('quoted errors, partial writes and a resumed child remain uncertain', async
   expect(await f.run([f.initial, f.final], '\n{"partial":')).toBe(false)
   expect(await f.run([f.initial, f.final, { ...f.initial, message: { role: 'user', content: 'Continue' } }])).toBe(false)
   expect(await f.run()).toBe(true)
+})
+
+test('missing requestId cannot make foreign or arbitrary errors a local quota hint', async () => {
+  const f = await fixture()
+  const final = { ...f.final, requestId: undefined, quotaLimits: undefined }
+  for (const change of [
+    { agentId: 'foreign' }, { sessionId: 'foreign' }, { isSidechain: false },
+    { error: 'api_error' }, { apiErrorStatus: 503 }, { isApiErrorMessage: false },
+    { message: { ...final.message, model: 'claude-fable-5-1' } },
+  ]) expect(await f.run([f.initial, { ...final, ...change }])).toBe(false)
+  expect(await f.run([f.initial, final])).toBe(true)
 })
 
 test('the initial provider envelope must belong to this child and contain one request', async () => {
