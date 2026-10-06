@@ -94,3 +94,22 @@ and the canonical full repository gate remain required on the integrating tree;
 their coordinating gate owner avoids duplicate runs. Snapshot observation still
 does not exclude a later unwrapped launch. No account custody, credential copy,
 service actuation or new feature flag is introduced.
+
+### Canonical integrating receipt — 2026-10-06
+
+The integrating gate has now completed at exact tested commit
+`d9218de47f22d60605407fa6d5e62a2ccb3bc90f` (tree
+`cad166393ba35a20d53cbdffca5eea19c99c1e3b`).
+`bash scripts/check-shared-host.sh` exited zero: all 51 TypeScript projects,
+including `tsconfig.json` and `trident/tsconfig.json`, passed. The runner declared,
+discovered, assigned and executed all 1,795 files across 19 lanes, with zero
+failed lanes; the consuming `open/__tests__/project-build-e2e.test.ts` was part
+of that full run. Conditional live tests remain conditional, not live acceptance.
+The unchanged suite input identity was
+`9a3b6b380911336fef7ea6519a30e652564370f751c1b3f89a9ed07ae2973459`;
+the complete captured log SHA-256 was
+`446eef2a861072e6a9cbb2e619c8eaabdc1b9aac5fb818c9f33bd94757009d5d`.
+This appended evidence changes the final publication head: the gate receipt
+belongs to the exact tested revision above, not a substituted final identity.
+Protected observer deployment and ordinary-host consuming acceptance remain
+separate, unproven requirements.
