@@ -242,8 +242,95 @@ describe('timeline catalogue', () => {
     const result = await collectCiCheckRuns(await nextHeadCatalogue(), { observations: [oldCheck()], now: () => ciBase + 120_000,
       fetcher: (async url => Response.json(String(url).includes('/commits/') ? { check_runs: [{ ...historicalCheck(20), head_sha: newHead }] }
         : { ...historicalCheck(), status: 'in_progress', conclusion: null, completed_at: null })) as typeof fetch })
-    expect(result.observations.find(r => r.phaseId === oldCheck().phaseId)).toMatchObject({ endedAt: null, inputTokens: null })
+    expect(result.observations.some(r => r.phaseId === oldCheck().phaseId)).toBe(false)
+    expect(result.catalogue.historicalCiRetries).toEqual([{ phaseId: oldCheck().phaseId, lastAttemptAt: ciBase + 120_000,
+      nextAttemptAt: ciBase + 180_000, failures: 0, outcome: 'pending' }])
     expect(result.catalogue.repositories[0]!.prs[0]).toMatchObject({ ciRunning: false, ciPending: false })
+  })
+
+  test('genuine check and Actions URLs close after a push, including canonical repository case', async () => {
+    for (const path of ['runs/10', 'actions/runs/100', 'actions/runs/100/job/10']) {
+      const record = oldCheck()
+      record.source.evidenceRef = `https://github.com/example/open/${path}`
+      const result = await collectCiCheckRuns(await nextHeadCatalogue(), { observations: [record], now: () => ciBase + 120_000,
+        fetcher: (async url => Response.json(String(url).includes('/commits/') ? { check_runs: [] }
+          : { ...historicalCheck(), html_url: `https://github.com/Example/Open/${path}` })) as typeof fetch })
+      expect(result.observations).toHaveLength(1)
+      expect(result.observations[0]).toMatchObject({ phaseId: record.phaseId, endedAt: ciBase + 60_000 })
+      expect(result.catalogue.historicalCiRetries).toEqual([])
+    }
+  })
+
+  test('foreign or mismatched check URL evidence cannot close a historical interval', async () => {
+    for (const html_url of ['https://github.com/example/foreign/runs/10', 'https://github.com/example/open/runs/11',
+      'https://github.com/example/open/actions/runs/200/job/10', 'https://github.com.evil.test/example/open/runs/10',
+      'https://github.com@example.test/example/open/runs/10', 'https://github.com/example/open/../foreign/runs/10']) {
+      const result = await collectCiCheckRuns(await nextHeadCatalogue(), { observations: [oldCheck()], now: () => ciBase + 120_000,
+        fetcher: (async url => Response.json(String(url).includes('/commits/') ? { check_runs: [] } : { ...historicalCheck(), html_url })) as typeof fetch })
+      expect(result.observations).toEqual([])
+      expect(result.catalogue.historicalCiRetries?.[0]?.outcome).toBe('unavailable')
+    }
+  })
+
+  test('a day of failed lookups backs off durably without growing or refreshing phase evidence', async () => withLog(async file => {
+    await appendPhaseObservation(file, oldCheck())
+    const before = await readFile(file, 'utf8'), original = await readPhaseObservations(file)
+    let previous = await nextHeadCatalogue(), attempts = 0
+    for (let minute = 0; minute < 24 * 60; minute++) {
+      const result = await collectCiCheckRuns(await nextHeadCatalogue(), { previous, observations: original,
+        now: () => ciBase + 120_000 + minute * 60_000,
+        fetcher: (async url => {
+          if (String(url).includes('/commits/')) return Response.json({ check_runs: [] })
+          attempts++; return new Response('unavailable', { status: 404 })
+        }) as typeof fetch })
+      expect(result.observations).toEqual([])
+      if (result.observations.length) await appendChangedPhaseObservations(file, result.observations)
+      previous = JSON.parse(JSON.stringify(result.catalogue))
+    }
+    expect(attempts).toBe(29)
+    expect(previous.historicalCiRetries).toHaveLength(1)
+    expect(previous.historicalCiRetries?.[0]).toMatchObject({ failures: 7, outcome: 'unavailable' })
+    expect(previous.historicalCiRetries![0]!.nextAttemptAt - previous.historicalCiRetries![0]!.lastAttemptAt).toBe(3_600_000)
+    expect(await readFile(file, 'utf8')).toBe(before)
+    expect(await readPhaseObservations(file)).toEqual(original)
+    const completed = await collectCiCheckRuns(await nextHeadCatalogue(), { previous, observations: original,
+      now: () => ciBase + 120_000 + 25 * 3_600_000,
+      fetcher: (async url => Response.json(String(url).includes('/commits/') ? { check_runs: [] } : historicalCheck())) as typeof fetch })
+    expect(await appendChangedPhaseObservations(file, completed.observations)).toBe(1)
+    expect((await readPhaseObservations(file))[0]).toMatchObject({ startedAt: ciBase, endedAt: ciBase + 60_000 })
+    expect(completed.catalogue.historicalCiRetries).toEqual([])
+    expect((await readFile(file, 'utf8')).startsWith(before)).toBe(true)
+  }))
+
+  test('unchanged running evidence stays unchanged, but a provider start revision appends once', async () => withLog(async file => {
+    await appendPhaseObservation(file, oldCheck())
+    let previous = await nextHeadCatalogue()
+    for (let cycle = 0; cycle < 3; cycle++) {
+      const result = await collectCiCheckRuns(await nextHeadCatalogue(), { previous, observations: await readPhaseObservations(file),
+        now: () => ciBase + 120_000 + cycle * 60_000,
+        fetcher: (async url => Response.json(String(url).includes('/commits/') ? { check_runs: [] } : {
+          ...historicalCheck(), status: 'in_progress', conclusion: null, completed_at: null,
+          started_at: new Date(ciBase + (cycle ? 3000 : 0)).toISOString(),
+        })) as typeof fetch })
+      expect(await appendChangedPhaseObservations(file, result.observations)).toBe(cycle === 1 ? 1 : 0)
+      previous = JSON.parse(JSON.stringify(result.catalogue))
+    }
+    expect((await readPhaseObservations(file))[0]).toMatchObject({ startedAt: ciBase + 3000, endedAt: null, observedAt: ciBase + 180_000 })
+  }))
+
+  test('malformed durable retries cannot defer known historical checks', async () => {
+    const valid = { phaseId: oldCheck().phaseId, lastAttemptAt: ciBase + 119_000, nextAttemptAt: ciBase + 179_000, failures: 1, outcome: 'unavailable' }
+    for (const metadata of [null, {}, [null], [{ ...valid, phaseId: 'foreign' }], [valid, valid],
+      [{ ...valid, lastAttemptAt: ciBase + 121_000 }], [{ ...valid, nextAttemptAt: Number.MAX_SAFE_INTEGER }],
+      [{ ...valid, failures: 8 }], [{ ...valid, outcome: 'completed' }], [{ ...valid, failures: 0 }]]) {
+      const previous = await nextHeadCatalogue()
+      previous.historicalCiRetries = metadata as unknown as NonNullable<typeof previous.historicalCiRetries>
+      const result = await collectCiCheckRuns(await nextHeadCatalogue(), { previous, observations: [oldCheck(), oldCheck(11)], now: () => ciBase + 120_000,
+        fetcher: (async url => Response.json(String(url).includes('/commits/') ? { check_runs: [] }
+          : historicalCheck(Number(String(url).split('/').at(-1))))) as typeof fetch })
+      expect(result.observations).toHaveLength(2)
+      expect(result.catalogue.historicalCiRetries).toEqual([])
+    }
   })
 
   test('missing, failed, foreign and invalid historical check evidence retains unknown completion', async () => {
@@ -256,17 +343,17 @@ describe('timeline catalogue', () => {
     for (const reply of replies) {
       const result = await collectCiCheckRuns(await nextHeadCatalogue(), { observations: [oldCheck()], now: () => ciBase + 120_000,
         fetcher: (async url => String(url).includes('/commits/') ? Response.json({ check_runs: [] }) : reply) as typeof fetch })
-      const historical = result.observations.find(r => r.phaseId === oldCheck().phaseId)!
-      expect(historical).toMatchObject({ startedAt: ciBase, endedAt: null, inputTokens: null, outputTokens: null, costUsd: null })
-      expect(historical.source.basis).toContain('unavailable; completion unknown')
+      expect(result.observations).toEqual([])
+      expect(result.catalogue.historicalCiRetries?.[0]).toMatchObject({ phaseId: oldCheck().phaseId, failures: 1, outcome: 'unavailable' })
     }
   })
 
   test('historical polling is bounded and persisted attempts rotate failures and running checks fairly', async () => withLog(async file => {
     for (const id of [10, 11, 12]) await appendPhaseObservation(file, oldCheck(id))
     const calls: number[] = []
+    let previous = await nextHeadCatalogue()
     for (let cycle = 0; cycle < 4; cycle++) {
-      const result = await collectCiCheckRuns(await nextHeadCatalogue(), { limit: 1, observations: await readPhaseObservations(file), now: () => ciBase + 120_000 + cycle * 1000,
+      const result = await collectCiCheckRuns(await nextHeadCatalogue(), { previous, limit: 1, observations: await readPhaseObservations(file), now: () => ciBase + 120_000 + cycle * 60_000,
         fetcher: (async url => {
           const path = new URL(String(url)).pathname
           if (path.includes('/commits/')) return Response.json({ check_runs: [] })
@@ -274,8 +361,9 @@ describe('timeline catalogue', () => {
           return id === 10 ? new Response('missing', { status: 404 }) : Response.json({ ...historicalCheck(id), status: 'in_progress', conclusion: null, completed_at: null })
         }) as typeof fetch })
       expect(result.catalogue.apiRequests).toBe(3) // one catalogue, one current head, one known old check
-      expect(result.observations).toHaveLength(1)
-      expect(await appendChangedPhaseObservations(file, result.observations)).toBe(1)
+      expect(result.observations).toHaveLength(0)
+      expect(await appendChangedPhaseObservations(file, result.observations)).toBe(0)
+      previous = JSON.parse(JSON.stringify(result.catalogue))
     }
     expect(calls).toEqual([10, 11, 12, 10])
     expect((await readPhaseObservations(file)).every(r => r.endedAt === null)).toBe(true)
@@ -306,8 +394,8 @@ describe('timeline catalogue', () => {
           return new Response('failed', { status: 503 })
         }) as typeof fetch })
       expect(calls).toHaveLength(1)
-      expect(result.observations.map(r => r.phaseId)).toEqual([oldCheck(10).phaseId])
-      expect(result.observations[0]?.endedAt).toBeNull()
+      expect(result.observations).toEqual([])
+      expect(result.catalogue.historicalCiRetries?.map(r => r.phaseId)).toEqual([oldCheck(10).phaseId])
     } finally { clock.mockRestore() }
   })
 })

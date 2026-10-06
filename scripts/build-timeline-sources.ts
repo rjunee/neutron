@@ -28,11 +28,21 @@ export type CatalogueSnapshot = {
   observedAt: number
   fullObservedAt: number
   apiRequests: number
+  /** Collector scheduling only; never provider observations or work liveness. */
+  historicalCiRetries?: HistoricalCiRetry[]
   repositories: Array<{
     repository: string
     error: string | null
     prs: CataloguePullRequest[]
   }>
+}
+
+type HistoricalCiRetry = {
+  phaseId: string
+  lastAttemptAt: number
+  nextAttemptAt: number
+  failures: number
+  outcome: 'unavailable' | 'pending'
 }
 
 export type DirectPhaseObservation = {
@@ -240,6 +250,40 @@ type GithubCheck = {
 
 export type CiCollection = { catalogue: CatalogueSnapshot; observations: DirectPhaseObservation[] }
 
+function historicalRetryDelay(failures: number): number {
+  return Math.min(3_600_000, 60_000 * 2 ** Math.max(0, failures - 1))
+}
+
+/** Accept GitHub's check and Actions URLs, comparing repository names case-insensitively. */
+function checkEvidenceUrl(value: string, repository: string, checkId: string): string {
+  const url = new URL(value)
+  const path = /^\/([^/]+)\/([^/]+)\/(runs\/([1-9]\d*)|actions\/runs\/[1-9]\d*(?:\/job\/[1-9]\d*)?)\/?$/.exec(url.pathname)
+  if (url.origin !== 'https://github.com' || url.username || url.password || !path ||
+      `${path[1]}/${path[2]}`.toLowerCase() !== repository.toLowerCase() ||
+      (path[4] !== undefined && path[4] !== checkId)) throw new Error('Historical check repository mismatch')
+  url.pathname = `/${path[1]!.toLowerCase()}/${path[2]!.toLowerCase()}/${path[3]}`
+  return url.href
+}
+
+/** Durable retry state is bounded to one validated entry per known unfinished check. */
+function historicalRetries(value: unknown, phases: Set<string>, knownCount: number, now: number): Map<string, HistoricalCiRetry> {
+  const result = new Map<string, HistoricalCiRetry>(), seen = new Set<string>()
+  if (!Array.isArray(value) || value.length > knownCount) return result
+  for (const entry of value) {
+    if (!isRecord(entry) || typeof entry.phaseId !== 'string' || !phases.has(entry.phaseId)) continue
+    if (seen.has(entry.phaseId)) { result.delete(entry.phaseId); continue }
+    seen.add(entry.phaseId)
+    if (!Number.isSafeInteger(entry.lastAttemptAt) || Number(entry.lastAttemptAt) < 0 || Number(entry.lastAttemptAt) > now ||
+        !Number.isSafeInteger(entry.failures) || Number(entry.failures) < 0 || Number(entry.failures) > 7 ||
+        (entry.outcome !== 'pending' && entry.outcome !== 'unavailable') ||
+        (entry.outcome === 'pending' ? entry.failures !== 0 : entry.failures === 0) ||
+        !Number.isSafeInteger(entry.nextAttemptAt) || entry.nextAttemptAt !== Number(entry.lastAttemptAt) + historicalRetryDelay(Number(entry.failures))) continue
+    result.set(entry.phaseId, { phaseId: entry.phaseId, lastAttemptAt: Number(entry.lastAttemptAt),
+      nextAttemptAt: Number(entry.nextAttemptAt), failures: Number(entry.failures), outcome: entry.outcome })
+  }
+  return result
+}
+
 /** Sample current-head readiness and reconcile only already observed unfinished older checks. */
 export async function collectCiCheckRuns(
   catalogue: CatalogueSnapshot,
@@ -348,9 +392,7 @@ export async function collectCiCheckRuns(
       }
     }
   }
-  // Each attempted historical lookup advances its existing journal observation,
-  // including unknown completion after a failed lookup. Oldest observations go
-  // first so failed or still-running checks cannot monopolize the finite budget.
+  // Retry clocks belong to the existing catalogue, not immutable phase evidence.
   const unfinished = (options.observations ?? []).flatMap(record => {
     if (record.phase !== 'ci' || record.source.kind !== 'github' || record.endedAt !== null || record.links.length !== 1) return []
     const link = record.links[0]!, checkId = record.source.sourceEventId
@@ -362,12 +404,18 @@ export async function collectCiCheckRuns(
     const head = record.phaseId.slice(prefix.length, -(checkId.length + 1))
     if (!/^[a-f0-9]{40}$/.test(head) || head === pr.headSha || record.observedAt >= now) return []
     return [{ record, link, head, checkId }]
-  }).sort((a, b) => a.record.observedAt - b.record.observedAt || a.record.phaseId.localeCompare(b.record.phaseId)).slice(0, limit)
+  })
+  const retries = historicalRetries(options.previous?.historicalCiRetries ?? catalogue.historicalCiRetries,
+    new Set(unfinished.map(({ record }) => record.phaseId)), options.observations?.length ?? 0, now)
+  const due = unfinished.filter(({ record }) => (retries.get(record.phaseId)?.nextAttemptAt ?? 0) <= now)
+    .sort((a, b) => (retries.get(a.record.phaseId)?.lastAttemptAt ?? 0) - (retries.get(b.record.phaseId)?.lastAttemptAt ?? 0) ||
+      a.record.observedAt - b.record.observedAt || a.record.phaseId.localeCompare(b.record.phaseId)).slice(0, limit)
   const historicalDeadline = performance.now() + 15_000
-  for (const { record, link, head, checkId } of unfinished) {
+  for (const { record, link, head, checkId } of due) {
     const remaining = Math.ceil(historicalDeadline - performance.now())
     if (remaining <= 0) break
-    let startedAt = record.startedAt, endedAt: number | null = null, evidence = 'unavailable; completion unknown'
+    let startedAt = record.startedAt, endedAt: number | null = null, basis = record.source.basis
+    let outcome: HistoricalCiRetry['outcome'] = 'unavailable'
     try {
       requireRepository(link.repository)
       catalogue.apiRequests += 1
@@ -377,30 +425,39 @@ export async function collectCiCheckRuns(
       if (!isRecord(raw) || raw.id !== Number(checkId) || raw.head_sha !== head || typeof raw.name !== 'string' ||
           typeof raw.html_url !== 'string' || typeof raw.status !== 'string' ||
           !['queued', 'in_progress', 'completed', 'waiting', 'requested', 'pending'].includes(raw.status)) throw new Error('Historical check identity/status mismatch')
-      const url = new URL(raw.html_url)
-      if (url.origin !== 'https://github.com' || !url.pathname.startsWith(`/${link.repository}/actions/runs/`) ||
-          (record.source.evidenceRef !== undefined && raw.html_url !== record.source.evidenceRef)) throw new Error('Historical check repository mismatch')
+      const url = checkEvidenceUrl(raw.html_url, link.repository, checkId)
+      if (record.source.evidenceRef !== undefined && url !== checkEvidenceUrl(record.source.evidenceRef, link.repository, checkId)) {
+        throw new Error('Historical check evidence mismatch')
+      }
       const start = Date.parse(isoTimestamp(raw.started_at, 'historical check started_at')!)
       if (!Number.isSafeInteger(start) || start < 0 || start > now) throw new Error('Historical check start invalid')
       if (raw.status === 'completed') {
         const end = Date.parse(isoTimestamp(raw.completed_at, 'historical check completed_at')!)
         if (typeof raw.conclusion !== 'string' || !raw.conclusion || !Number.isSafeInteger(end) || end < start || end > now) throw new Error('Historical check completion invalid')
         startedAt = start; endedAt = end
-        evidence = `provider completed (${raw.conclusion})`
+        basis = `${record.source.basis.split('; historical completion lookup:')[0]}; historical completion lookup: provider completed (${raw.conclusion})`
       } else {
         if (raw.completed_at !== null) throw new Error('Historical check has conflicting completion')
         startedAt = start
-        evidence = `provider ${raw.status}; completion unknown`
+        outcome = 'pending'
       }
     } catch {
-      // Retain the last measured interval, with unknown completion. This attempt
-      // is not current-head readiness and never invents a provider endpoint.
+      // Failed attempts update scheduling only, never a provider observation clock.
     }
-    observations.push(validatePhaseObservation({ ...record,
-      eventId: `${record.phaseId}:${now}`, startedAt, endedAt, observedAt: now,
-      source: { ...record.source, basis: `${record.source.basis.split('; historical completion lookup:')[0]}; historical completion lookup: ${evidence}` },
-    }))
+    if (endedAt !== null) retries.delete(record.phaseId)
+    else {
+      const failures = outcome === 'pending' ? 0 : Math.min(7, (retries.get(record.phaseId)?.failures ?? 0) + 1)
+      retries.set(record.phaseId, { phaseId: record.phaseId, lastAttemptAt: now,
+        nextAttemptAt: now + historicalRetryDelay(failures), failures, outcome })
+    }
+    if (startedAt !== record.startedAt || endedAt !== record.endedAt) {
+      observations.push(validatePhaseObservation({ ...record,
+        eventId: `${record.phaseId}:${now}`, startedAt, endedAt, observedAt: now,
+        source: { ...record.source, basis },
+      }))
+    }
   }
+  catalogue.historicalCiRetries = [...retries.values()]
   return { catalogue, observations }
 }
 
@@ -549,7 +606,7 @@ export async function appendPhaseObservation(file: string, value: DirectPhaseObs
   }
 }
 
-/** Persist changed evidence and unfinished historical lookup attempts for fair retries. */
+/** Persist only changed phase evidence. Retry scheduling lives in the catalogue. */
 export async function appendChangedPhaseObservations(
   file: string, values: DirectPhaseObservation[],
 ): Promise<number> {
@@ -563,9 +620,7 @@ export async function appendChangedPhaseObservations(
         const { eventId: _eventId, observedAt: _observedAt, ...rest } = item
         return JSON.stringify(rest)
       }
-      const historicalAttempt = old.endedAt === null && record.source.kind === 'github' && record.phase === 'ci' &&
-        record.source.basis.includes('; historical completion lookup:') && record.observedAt > old.observedAt
-      if (!historicalAttempt && comparable(old) === comparable(record)) continue
+      if (comparable(old) === comparable(record)) continue
     }
     await appendPhaseObservation(file, record)
     current.set(record.phaseId, record)

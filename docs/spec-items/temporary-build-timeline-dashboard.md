@@ -121,16 +121,24 @@ spans carry unknown tokens unless a provider actually attributed usage.
       snapshots. Non-GitHub phase start identities remain immutable.
 - [ ] A push replacing an observed unfinished CI head does not strand its check
       interval. Each refresh reconciles at most 20 already observed unfinished
-      superseded check identities within a 15-second lookup budget, oldest attempted observation first, through
+      superseded check identities within a 15-second lookup budget, oldest eligible attempt first, through
       their exact repository/check endpoint. No historical head enumeration occurs.
-      Successful, failed and still-running lookup attempts advance their canonical
-      journal snapshots so the bounded budget remains fair across refreshes/restarts.
+      The existing catalogue stores validated retry metadata for known unfinished
+      identities so the bounded budget remains fair across refreshes/restarts.
+      Unavailable evidence backs off from one minute to a one-hour maximum;
+      still-pending evidence waits one minute. Unresolved phase evidence remains
+      intact. Failed or unchanged lookups never append journal events or refresh
+      provider observation clocks. Changed provider timing appends a new snapshot.
       Only matching provider check ID, head and repository evidence with valid
       start/completion clocks and explicit completed status closes an interval.
+      Both GitHub repository `/runs/<check-id>` and Actions run/job URLs are
+      supported, with case-insensitive repository identity and matching stored
+      evidence URLs. Malformed retry metadata cannot defer a known check.
       Missing, foreign, invalid or failed evidence retains unknown completion;
       terminal checks leave this reconciliation queue. Historical work never
       supplies current-head readiness. Verify cancelled completion after a push,
-      persisted retry fairness, refusal controls, immutable journal history and
+      persisted retry fairness, a day of failed lookups without journal growth,
+      refusal controls, immutable journal history and
       stable authenticated API duration in `scripts/build-timeline-sources.test.ts`
       and `scripts/__tests__/build-timeline-server.test.ts`.
 - [ ] An exact registered native task-start receipt yields an open phase with its
