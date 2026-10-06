@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from codex_account_observation import ObservationUnknown
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('writer', HERE / 'account-writer.py')
@@ -35,8 +36,8 @@ def potential_native(home, readable):
 def unreadable_refuses(home):
     try:
         writer.stable_census(home)
-    except PermissionError as error:
-        assert error.errno == 13
+    except ObservationUnknown as error:
+        assert error.reason == 'incomplete'
         return
     raise AssertionError('unreadable live potential native must refuse')
 
@@ -51,6 +52,7 @@ def inside(home):
             pass
         else:
             raise AssertionError('known live native must be found by the same census')
+        (home / 'distinct-account').mkdir()
         writer.stable_census(home / 'distinct-account')
     writer.stable_census(home)
     with potential_native(home, False):

@@ -342,6 +342,33 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-10-06 — Codex account exclusion identifies the physical directory object.
+
+The admission-observation contract of 2026-10-05 identifies an account by its
+verified directory device and inode, with UID ownership checked independently.
+Canonical paths remain observation evidence but do not enter the opaque account
+digest: distinct bind-mount paths may expose the same directory and therefore
+must contend for the same account. Native and auth-mutation admission must refuse
+an overlapping unwrapped consumer through either bind or symlink aliases, while
+distinct physical directories remain independent. Exact encoding and consuming
+controls belong to `docs/spec-items/instance-project-provider-resolution.md`.
+
+### 2026-10-05 — Codex account admission shares one classifier across deployment observers.
+
+Every Codex launch and auth mutation observes native account consumers while
+holding the existing account reservation, then retains the native lifetime lock.
+Self-hosted complete local observation and an operator-provisioned protected
+observer are deliberate deployment transports for one public classifier and
+admission contract. A configured observer is mandatory; unknown, unavailable or
+invalid evidence refuses rather than falling back. Its only operation is bounded,
+challenged, signed credential-free census, with connected-peer kernel pinning.
+It owns no credentials, account custody, process control or service lifecycle.
+The observer has an independent lifecycle so its failure fences new admission
+without terminating existing work. This does not change the account-lifetime
+decision of 2026-10-04 or guarantee exclusion of later unwrapped launches.
+Exact protocol and acceptance belong to
+`docs/spec-items/instance-project-provider-resolution.md`.
+
 ### 2026-10-04 — Explicit current-shell authority for legacy workspace cleanup.
 
 Owner-directed unused-pane cleanup preserves creation-bound automatic retirement.

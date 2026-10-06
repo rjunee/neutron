@@ -63,7 +63,9 @@ deleted. The recorded alternatives are the REPL substrate (Decisions Log
 2026-09-12), where herdr is the default container and the in-process PTY host is
 retained as a selectable backend, and Claude authentication deployment (Decisions
 Log 2026-09-30), where a provisioned native host relay is mandatory while an
-unregistered self-host keeps native authentication. The rule is scoped rather
+unregistered self-host keeps native authentication, and Codex admission observation
+(Decisions Log 2026-10-05), where a provisioned protected observer is mandatory
+while an unregistered self-host uses the same classifier locally. The rule is scoped rather
 than dropped because a standing absolute the tree contradicts teaches the next
 reader to ignore it — and the exception costs something real: two supported
 backends means the shared interface must stay honest about both, which is a sweep,

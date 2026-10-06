@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process'
-import { closeSync, constants, fstatSync, mkdirSync, openSync, realpathSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, realpathSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -36,12 +36,16 @@ export function acquireCodexAccountWriteLease(canonicalHome: string): CodexAccou
     if (!isAbsolute(canonicalHome)) throw new Error('Account home must be absolute')
     mkdirSync(canonicalHome, { recursive: true, mode: 0o700 })
     canonicalHome = realpathSync(canonicalHome)
+    const directory = statSync(canonicalHome, { bigint: true })
+    if (!directory.isDirectory() || directory.uid !== BigInt(process.getuid!())) throw new Error('Account directory owner is unknown')
     fd = openSync(join(canonicalHome, '.neutron-account-writer.lock'),
       constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600)
     const stat = fstatSync(fd)
+    const named = lstatSync(join(canonicalHome, '.neutron-account-writer.lock'))
     if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid?.() || (stat.mode & 0o077) !== 0) {
       throw new Error('Account lock is not an owned private regular file')
     }
+    if (stat.dev !== named.dev || stat.ino !== named.ino) throw new Error('Account reservation changed')
     libc ??= loadLibc()
     if (libc.symbols.flock(fd, 2 | 4) !== 0) {
       const errno = libc.errno()
@@ -56,6 +60,12 @@ export function acquireCodexAccountWriteLease(canonicalHome: string): CodexAccou
       throw new CodexAccountWriterError(result.status === 73 ? 'accountBusy' : 'accountAdmissionUnknown',
         result.status === 73 ? 'Another native process owns this account; use a distinct account or wait for its exit'
           : 'Account writer admission could not be established')
+    }
+    const after = statSync(canonicalHome, { bigint: true })
+    const namedAfter = lstatSync(join(canonicalHome, '.neutron-account-writer.lock'))
+    if (after.dev !== directory.dev || after.ino !== directory.ino || after.uid !== directory.uid
+      || realpathSync(canonicalHome) !== canonicalHome || stat.dev !== namedAfter.dev || stat.ino !== namedAfter.ino) {
+      throw new Error('Account directory or reservation changed during observation')
     }
     const acquired = fd
     let closed = false
