@@ -44,3 +44,10 @@ verifier passed with 30/32 resolution probes and two SDK resolution notes;
 this was not a new frozen installation. The required shared-host gate, final CI,
 independent review and served operational proof remain integration/release
 requirements. No publication, deployment or runtime write occurred in this change.
+
+Integration review: independent Sol source review approved corrective commit
+`3456255bd6fb0b67f853aab407a6d9a1377f9639`. Bounded Claude Opus review on
+2026-10-06 confirmed both prior blockers resolved and found no new merge
+blocker. Its source review did not establish deployment or full-suite proof.
+The integration worktree's normal frozen dependency installation completed
+without changes. Final candidate gates and served proof remain outstanding.
