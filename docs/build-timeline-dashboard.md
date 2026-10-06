@@ -28,7 +28,15 @@ bun scripts/build-timeline-sources.ts catalogue \
 
 The collector uses `GH_TOKEN` or `GITHUB_TOKEN` when supplied. It fetches the
 inclusive paginated history, then refreshes changed PRs between full sweeps. CI
-sampling is bounded to recent/current heads; each PR states its coverage. The
+readiness sampling is bounded to recent/current heads; each PR states its coverage.
+Each refresh also checks at most 20 already observed unfinished superseded checks within 15 seconds
+by exact repository/check identity, supporting GitHub check and Actions URLs.
+The existing catalogue stores validated retry scheduling, oldest eligible attempt
+first. Failed lookups back off from one minute to a one-hour maximum; pending
+checks wait one minute. Failed or unchanged lookups do not grow phase history or
+refresh provider observation clocks. Unresolved completion remains unknown. No
+past-head history is enumerated, and historical status never establishes current
+head readiness. Terminal checks leave this reconciliation queue. The
 web page refreshes every 30 seconds and pages 50 PRs at a time. Search and repository
 filters apply before pagination. The default chart shows the observed-work window,
 from first recorded phase start to last recorded phase end; missing phases remain
