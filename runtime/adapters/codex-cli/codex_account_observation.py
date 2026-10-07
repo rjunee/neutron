@@ -85,6 +85,39 @@ def _exe(path):
     return target, observed.st_dev, observed.st_ino
 
 
+def _sudo_reference():
+    """Protected canonical system launcher identity, never a name allowlist.
+
+    Optional evidence: without it the ordinary native recognition still applies.
+    Walk the resolved ancestry through no-follow directory descriptors so every
+    object granting this exclusion is root-owned and not writable by others.
+    """
+    descriptors = []
+    try:
+        canonical = Path('/usr/bin/sudo').resolve(strict=True)
+        descriptors.append(os.open('/', os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW))
+        evidence = []
+        for index, name in enumerate(('', *canonical.parts[1:])):
+            if index:
+                flags = os.O_PATH | os.O_NOFOLLOW
+                if index < len(canonical.parts) - 1:
+                    flags |= os.O_DIRECTORY
+                descriptors.append(os.open(name, flags, dir_fd=descriptors[-1]))
+            observed = os.fstat(descriptors[-1])
+            regular = index == len(canonical.parts) - 1
+            if observed.st_uid != 0 or observed.st_mode & 0o022 \
+                    or not (stat.S_ISREG(observed.st_mode) if regular else stat.S_ISDIR(observed.st_mode)):
+                return None
+            evidence.append((observed.st_dev, observed.st_ino, observed.st_uid, observed.st_mode,
+                             observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns))
+        return str(canonical), tuple(evidence)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    finally:
+        for fd in descriptors:
+            os.close(fd)
+
+
 def _namespace(path):
     return tuple(os.readlink(path / 'ns' / name) for name in ('mnt', 'user', 'pid'))
 
@@ -183,7 +216,16 @@ def _inspect(path, uid, proc):
     # target for stability checks; remove its marker only for recognition.
     deleted = executable[0].endswith(' (deleted)')
     executable_name = executable[0][:-10] if deleted else executable[0]
-    native = Path(executable_name).name == 'codex' or any(Path(arg).name in ('codex', 'codex.js') for arg in args[:2])
+    explicit_native = Path(executable_name).name == 'codex' or Path(args[0]).name in ('codex', 'codex.js')
+    native = explicit_native or any(Path(arg).name in ('codex', 'codex.js') for arg in args[1:2])
+    launcher = None
+    if native and not explicit_native:
+        reference = _sudo_reference()
+        if reference is not None and executable[1:] == reference[1][-1][:2]:
+            # A retained sudo's argv describes its child. The kernel executable
+            # identity, backed by protected system ancestry, proves the parent.
+            launcher = reference
+            native = False
     environment = candidate = cwd = nss = namespaces = account = root_account = None
     if native:
         if any(value != uid for value in uids):
@@ -211,6 +253,8 @@ def _inspect(path, uid, proc):
     if before[1:] != after[1:] or after[0] in ('Z', 'X') or uids != process_uids(path) \
             or executable != _exe(path) or argv != read_bounded(path / 'cmdline'):
         raise ObservationUnknown('changed')
+    if launcher is not None and launcher != _sudo_reference():
+        raise ObservationUnknown('changed')
     if native:
         if environment != read_bounded(path / 'environ') or namespaces != _namespace(path) \
                 or account != account_evidence(candidate, uid) \
@@ -221,7 +265,7 @@ def _inspect(path, uid, proc):
             record = pwd.getpwuid(uids[0])
             if nss != (record.pw_uid, record.pw_dir):
                 raise ObservationUnknown('changed')
-    evidence = (before[1:], uids, executable, argv, environment, cwd, nss, namespaces, account, root_account)
+    evidence = (before[1:], uids, executable, argv, environment, cwd, nss, namespaces, account, root_account, launcher)
     consumer = {'pid': int(path.name), 'startTicks': str(before[1]),
                 'accountId': _account_digest(account)} if native else None
     return consumer, evidence

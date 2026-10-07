@@ -181,6 +181,186 @@ class CensusTest(unittest.TestCase):
             with self.assertRaisesRegex(observation.ObservationUnknown, 'changed'):
                 self.scan()
 
+    def sudo_launcher(self):
+        # The mandatory single-UID test namespace cannot map host root's UID.
+        # Keep real system file device/inode/type/mode evidence, but supply the
+        # fixture's protected ownership explicitly. Production still reads and
+        # refuses the actual unmapped ownership; negative controls corrupt each
+        # ancestor's ownership independently through the real reference reader.
+        canonical = Path('/usr/bin/sudo').resolve(strict=True)
+        protected_objects = {(value.st_dev, value.st_ino) for value in
+                             (path.stat() for path in (canonical, *canonical.parents))}
+        original = observation.os.fstat
+        def ownership(fd):
+            observed = original(fd)
+            if (observed.st_dev, observed.st_ino) in protected_objects and observed.st_uid != 0:
+                values = {name: getattr(observed, name) for name in
+                          ('st_dev', 'st_ino', 'st_uid', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                values['st_uid'] = 0
+                return SimpleNamespace(**values)
+            return observed
+        owner = patch.object(observation.os, 'fstat', ownership)
+        owner.start()
+        self.addCleanup(owner.stop)
+        reference = observation._sudo_reference()
+        self.assertIsNotNone(reference, 'fixture requires a protected system sudo')
+        path = self.process(os.getpid() + 200000, False)
+        (path / 'exe').unlink()
+        (path / 'exe').symlink_to('/usr/bin/sudo')
+        (path / 'cmdline').write_bytes(b'sudo\0codex\0exec\0')
+        foreign = 0 if os.getuid() else 1
+        (path / 'status').write_text('Uid: ' + ' '.join(map(str, (os.getuid(), foreign, foreign, foreign))))
+        (path / 'environ').unlink()
+        return path
+
+    def test_trusted_sudo_launcher_preserves_same_distinct_account_admission(self):
+        launcher = self.sudo_launcher()
+        original = observation.read_bounded
+        def read(path):
+            if path == launcher / 'environ':
+                self.fail('trusted launcher exclusion must not read environment')
+            return original(path)
+        other = self.root / 'other-account'
+        other.mkdir()
+        with patch.object(observation, 'read_bounded', read):
+            self.assertEqual([item['pid'] for item in self.scan()['nativeConsumers']], [int(self.pid.name)])
+            self.busy()
+            self.admitted(other)
+            # A separately observed all-foreign-UID child is outside membership.
+            child = self.process(os.getpid() + 300000, True)
+            (child / 'status').write_text('Uid: ' + ' '.join([str(os.getuid() + 1)] * 4))
+            (child / 'environ').unlink()
+            self.busy()
+            self.admitted(other)
+
+    def test_sudo_name_and_untrusted_reference_cannot_exclude(self):
+        launcher = self.sudo_launcher()
+        counterfeit = self.root / 'sudo'
+        shutil.copyfile('/usr/bin/sudo', counterfeit)
+        (launcher / 'exe').unlink()
+        (launcher / 'exe').symlink_to(counterfeit)
+        with self.assertRaises(observation.ObservationUnknown):
+            self.scan()
+        original_exe = observation._exe
+        def deleted(path):
+            target, device, inode = original_exe(path)
+            return (target + ' (deleted)' if path == launcher else target), device, inode
+        with patch.object(observation, '_exe', deleted):
+            with self.assertRaises(observation.ObservationUnknown):
+                self.scan()
+        (launcher / 'exe').unlink()
+        (launcher / 'exe').symlink_to('/usr/bin/sudo')
+        with patch.object(observation, '_sudo_reference', return_value=None):
+            with self.assertRaises(observation.ObservationUnknown):
+                self.scan()
+        original_resolve = Path.resolve
+        for error in (PermissionError('synthetic unavailable reference'), RuntimeError('synthetic reference loop')):
+            def resolve(path, *args, **kwargs):
+                if path == Path('/usr/bin/sudo'):
+                    raise error
+                return original_resolve(path, *args, **kwargs)
+            with patch.object(Path, 'resolve', resolve):
+                with self.assertRaises(observation.ObservationUnknown):
+                    self.scan()
+        original = observation.os.fstat
+        reference = observation._sudo_reference()
+        for index in range(len(reference[1])):
+            wrong_type = stat.S_IFDIR if index == len(reference[1]) - 1 else stat.S_IFREG
+            for field, value in (('st_uid', 1), ('st_mode', reference[1][index][3] | 0o022),
+                                 ('st_mode', wrong_type | 0o755)):
+                with self.subTest(index=index, field=field):
+                    def metadata(fd):
+                        observed = original(fd)
+                        if (observed.st_dev, observed.st_ino) == reference[1][index][:2]:
+                            values = {name: getattr(observed, name) for name in
+                                      ('st_dev', 'st_ino', 'st_uid', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                            values[field] = value
+                            return SimpleNamespace(**values)
+                        return observed
+                    with patch.object(observation.os, 'fstat', metadata):
+                        with self.assertRaises(observation.ObservationUnknown):
+                            self.scan()
+
+    def test_trusted_launcher_requires_stable_reference_and_process_evidence(self):
+        launcher = self.sudo_launcher()
+        original = observation._sudo_reference
+        for threshold in (2, 3):
+            for field in ('unavailable', 'canonical', 'device', 'inode', 'mode', 'owner', 'content'):
+                with self.subTest(threshold=threshold, field=field):
+                    calls = 0
+                    def reference():
+                        nonlocal calls
+                        value = original()
+                        calls += 1
+                        if calls < threshold:
+                            return value
+                        if field == 'unavailable':
+                            return None
+                        canonical, ancestry = value
+                        if field == 'canonical':
+                            return canonical + '-changed', ancestry
+                        changed = list(ancestry[-1])
+                        changed[{'device': 0, 'inode': 1, 'owner': 2, 'mode': 3, 'content': 6}[field]] += 1
+                        return canonical, (*ancestry[:-1], tuple(changed))
+                    with patch.object(observation, '_sudo_reference', reference):
+                        with self.assertRaises(observation.ObservationUnknown):
+                            self.scan()
+        original_identity = observation.process_identity
+        for field in ('start', 'uids', 'argv', 'raw', 'device', 'inode'):
+            with self.subTest(field=field):
+                calls = 0
+                original_exe, original_read, original_uids = observation._exe, observation.read_bounded, observation.process_uids
+                def identity(path):
+                    nonlocal calls
+                    value = original_identity(path)
+                    if path == launcher:
+                        calls += 1
+                        if field == 'start' and calls >= 2:
+                            return value[0], value[1] + 1, value[2]
+                    return value
+                def executable(path):
+                    target, device, inode = original_exe(path)
+                    if path == launcher and calls >= 2:
+                        return (target + ' (deleted)' if field == 'raw' else target,
+                                device + 1 if field == 'device' else device,
+                                inode + 1 if field == 'inode' else inode)
+                    return target, device, inode
+                def read(path):
+                    if path == launcher / 'cmdline' and calls >= 2 and field == 'argv':
+                        return b'sudo\0changed-command\0'
+                    return original_read(path)
+                def credentials(path):
+                    value = original_uids(path)
+                    return (*value[:3], value[3] + 1) if path == launcher and calls >= 2 and field == 'uids' else value
+                with patch.object(observation, 'process_identity', identity), \
+                        patch.object(observation, '_exe', executable), \
+                        patch.object(observation, 'read_bounded', read), \
+                        patch.object(observation, 'process_uids', credentials):
+                    with self.assertRaisesRegex(observation.ObservationUnknown, 'changed'):
+                        self.scan()
+
+    def test_mixed_uid_native_and_wrappers_still_refuse(self):
+        launcher = self.sudo_launcher()
+        (launcher / 'environ').write_bytes(('CODEX_HOME=' + str(self.home) + '\0').encode())
+        for target, argv in ((self.binary, b'misleading-reader\0'),
+                             (Path('/usr/bin/sudo'), b'codex\0exec\0'),
+                             (Path('/usr/bin/true'), b'codex\0exec\0'),
+                             (Path('/usr/bin/true'), b'node\0codex.js\0')):
+            with self.subTest(target=target, argv=argv):
+                (launcher / 'exe').unlink()
+                (launcher / 'exe').symlink_to(target)
+                (launcher / 'cmdline').write_bytes(argv)
+                with self.assertRaises(observation.ObservationUnknown):
+                    self.scan()
+
+    def test_native_wrapper_recognition_survives_unavailable_sudo(self):
+        (self.pid / 'exe').unlink()
+        (self.pid / 'exe').symlink_to('/usr/bin/true')
+        (self.pid / 'cmdline').write_bytes(b'node\0codex.js\0')
+        with patch.object(observation, '_sudo_reference', return_value=None):
+            self.busy()
+            self.admitted(self.root / '.codex')
+
     def deleted_process(self, name='synthetic-reader', argv=None):
         for process in (self.own, self.pid):
             for namespace in ('mnt', 'user', 'pid'):

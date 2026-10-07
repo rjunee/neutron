@@ -32,6 +32,14 @@ def check(filename, suite_file, variable, case, method, before, after):
 
 
 CLASSIFIER = [
+    ('test_trusted_sudo_launcher_preserves_same_distinct_account_admission', 'launcher = reference\n            native = False', 'launcher = reference\n            native = True'),
+    ('test_sudo_name_and_untrusted_reference_cannot_exclude', 'executable[1:] == reference[1][-1][:2]', "Path(executable[0]).name == 'sudo'"),
+    ('test_sudo_name_and_untrusted_reference_cannot_exclude', 'if observed.st_uid != 0 or observed.st_mode & 0o022', 'if False'),
+    ('test_trusted_launcher_requires_stable_reference_and_process_evidence', 'if launcher is not None and launcher != _sudo_reference():', 'if False:'),
+    ('test_trusted_launcher_requires_stable_reference_and_process_evidence', 'namespaces, account, root_account, launcher)', 'namespaces, account, root_account)'),
+    ('test_mixed_uid_native_and_wrappers_still_refuse', 'if any(value != uid for value in uids):', 'if False:'),
+    ('test_mixed_uid_native_and_wrappers_still_refuse', 'if native and not explicit_native:', 'if native:'),
+    ('test_native_wrapper_recognition_survives_unavailable_sudo', 'reference = _sudo_reference()', "reference = _sudo_reference()\n        if reference is None:\n            raise ObservationUnknown('unavailable')"),
     ('test_deleted_non_codex_retains_same_distinct_account_admission', 'if not stat.S_ISREG(observed.st_mode):', "if not stat.S_ISREG(observed.st_mode) or target.endswith(' (deleted)'):"),
     ('test_deleted_native_and_wrapper_preserve_same_distinct_account_admission', '    environment = candidate = cwd = nss = namespaces = account = root_account = None', '    if deleted:\n        native = False\n    environment = candidate = cwd = nss = namespaces = account = root_account = None'),
     ('test_deleted_native_and_wrapper_preserve_same_distinct_account_admission', "executable[0][:-10] if deleted else executable[0]", 'executable[0]'),
