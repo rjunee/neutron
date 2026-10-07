@@ -32,6 +32,7 @@ def check(filename, suite_file, variable, case, method, before, after):
 
 
 CLASSIFIER = [
+    ('test_reference_symlink_hop_cannot_trust_its_protected_destination', "canonical = Path('/usr/bin/sudo')", "canonical = Path('/usr/bin/sudo').resolve(strict=True)"),
     ('test_trusted_sudo_launcher_preserves_same_distinct_account_admission', 'launcher = reference\n            native = False', 'launcher = reference\n            native = True'),
     ('test_sudo_name_and_untrusted_reference_cannot_exclude', 'executable[1:] == reference[1][-1][:2]', "Path(executable[0]).name == 'sudo'"),
     ('test_sudo_name_and_untrusted_reference_cannot_exclude', 'if observed.st_uid != 0 or observed.st_mode & 0o022', 'if False'),

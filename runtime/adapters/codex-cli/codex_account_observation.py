@@ -89,12 +89,12 @@ def _sudo_reference():
     """Protected canonical system launcher identity, never a name allowlist.
 
     Optional evidence: without it the ordinary native recognition still applies.
-    Walk the resolved ancestry through no-follow directory descriptors so every
-    object granting this exclusion is root-owned and not writable by others.
+    Walk the literal system path through no-follow directory descriptors so
+    symlink hops cannot discard unprotected ancestry before identity is proved.
     """
     descriptors = []
     try:
-        canonical = Path('/usr/bin/sudo').resolve(strict=True)
+        canonical = Path('/usr/bin/sudo')
         descriptors.append(os.open('/', os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW))
         evidence = []
         for index, name in enumerate(('', *canonical.parts[1:])):
@@ -111,7 +111,7 @@ def _sudo_reference():
             evidence.append((observed.st_dev, observed.st_ino, observed.st_uid, observed.st_mode,
                              observed.st_size, observed.st_mtime_ns, observed.st_ctime_ns))
         return str(canonical), tuple(evidence)
-    except (OSError, ValueError, RuntimeError):
+    except (OSError, ValueError):
         return None
     finally:
         for fd in descriptors:

@@ -212,8 +212,10 @@ mount namespaces only with target-root account path/device/inode equivalence.
 No process-name exception or ignored read error establishes completeness.
 A retained system sudo launcher whose second argv entry names Codex is excluded
 only when its readable regular-file executable device/inode matches canonical
-`/usr/bin/sudo`, reached through root-owned ancestry with no group/other write
-permission. Executable Codex recognition and a Codex first argv entry still
+`/usr/bin/sudo`, walking that literal path through root-owned ancestry with no
+group/other write permission. Every symlink component, including the executable,
+is refused; resolving a reference before checking its ancestry cannot establish
+trust. Executable Codex recognition and a Codex first argv entry still
 require native proof. The reference's canonical path, every ancestor's identity,
 ownership and mode, and file metadata are retained and rechecked alongside raw
 proc executable target, device/inode, all four UIDs, PID/start and argv across
@@ -246,7 +248,9 @@ and malformed/reforged/replayed response controls, changed process/account/boot
 controls, plus reservation and native-lifetime tests in both admission orders.
 Trusted sudo identity with mixed UIDs must preserve independent same-account busy
 and distinct-account admission, without environment access; a counterfeit sudo,
-unprotected reference, changed reference or changed launcher evidence must refuse.
+unprotected reference, a symlink through an unprotected hop to an otherwise
+protected regular executable, changed reference or changed launcher evidence
+must refuse.
 Mixed-UID Codex executables and recognized wrappers must still refuse, while
 native wrappers retain same/distinct-account behavior without a sudo reference.
 Verify these controls and opposite-direction restoration mutants in

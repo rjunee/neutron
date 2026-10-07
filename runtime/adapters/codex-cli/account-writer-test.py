@@ -187,7 +187,7 @@ class CensusTest(unittest.TestCase):
         # fixture's protected ownership explicitly. Production still reads and
         # refuses the actual unmapped ownership; negative controls corrupt each
         # ancestor's ownership independently through the real reference reader.
-        canonical = Path('/usr/bin/sudo').resolve(strict=True)
+        canonical = Path('/usr/bin/sudo')
         protected_objects = {(value.st_dev, value.st_ino) for value in
                              (path.stat() for path in (canonical, *canonical.parents))}
         original = observation.os.fstat
@@ -253,13 +253,13 @@ class CensusTest(unittest.TestCase):
         with patch.object(observation, '_sudo_reference', return_value=None):
             with self.assertRaises(observation.ObservationUnknown):
                 self.scan()
-        original_resolve = Path.resolve
-        for error in (PermissionError('synthetic unavailable reference'), RuntimeError('synthetic reference loop')):
-            def resolve(path, *args, **kwargs):
-                if path == Path('/usr/bin/sudo'):
+        original_open = observation.os.open
+        for error in (PermissionError('synthetic unavailable reference'), OSError('synthetic reference loop')):
+            def unavailable(path, *args, **kwargs):
+                if path == 'sudo':
                     raise error
-                return original_resolve(path, *args, **kwargs)
-            with patch.object(Path, 'resolve', resolve):
+                return original_open(path, *args, **kwargs)
+            with patch.object(observation.os, 'open', unavailable):
                 with self.assertRaises(observation.ObservationUnknown):
                     self.scan()
         original = observation.os.fstat
@@ -280,6 +280,45 @@ class CensusTest(unittest.TestCase):
                     with patch.object(observation.os, 'fstat', metadata):
                         with self.assertRaises(observation.ObservationUnknown):
                             self.scan()
+
+    def test_reference_symlink_hop_cannot_trust_its_protected_destination(self):
+        launcher = self.sudo_launcher()
+        target = Path('/usr/bin/true')
+        (launcher / 'exe').unlink()
+        (launcher / 'exe').symlink_to(target)
+        (launcher / 'cmdline').write_bytes(b'node\0codex.js\0')
+        hop = self.root / 'unprotected-hop'
+        hop.mkdir(mode=0o777)
+        hop.chmod(0o777)
+        original_open, original_resolve, original_metadata = observation.os.open, Path.resolve, observation.os.fstat
+        destination = target.stat()
+        def protected_destination(fd):
+            observed = original_metadata(fd)
+            if (observed.st_dev, observed.st_ino) == (destination.st_dev, destination.st_ino):
+                values = {name: getattr(observed, name) for name in
+                          ('st_dev', 'st_ino', 'st_uid', 'st_mode', 'st_size', 'st_mtime_ns', 'st_ctime_ns')}
+                values['st_uid'] = 0
+                return SimpleNamespace(**values)
+            return observed
+        for component, end in (('usr', Path('/usr')), ('bin', Path('/usr/bin')), ('sudo', target)):
+            with self.subTest(component=component):
+                link = hop / component
+                link.symlink_to(end)
+                def redirect(path, *args, **kwargs):
+                    if path == Path('/usr/bin/sudo'):
+                        # Resolving first discards the writable hop entirely.
+                        return original_resolve(hop / 'sudo', strict=True) if component == 'sudo' else target
+                    return original_resolve(path, *args, **kwargs)
+                def literal(path, flags, *args, **kwargs):
+                    if path == component and 'dir_fd' in kwargs:
+                        return original_open(link, flags)
+                    return original_open(path, flags, *args, **kwargs)
+                with patch.object(Path, 'resolve', redirect), \
+                        patch.object(observation.os, 'open', literal), \
+                        patch.object(observation.os, 'fstat', protected_destination):
+                    with self.assertRaises(observation.ObservationUnknown):
+                        self.scan()
+                    self.assertIsNone(observation._sudo_reference())
 
     def test_trusted_launcher_requires_stable_reference_and_process_evidence(self):
         launcher = self.sudo_launcher()
