@@ -33,8 +33,9 @@ def check(filename, suite_file, variable, case, method, before, after):
 
 CLASSIFIER = [
     ('test_deleted_non_codex_retains_same_distinct_account_admission', 'if not stat.S_ISREG(observed.st_mode):', "if not stat.S_ISREG(observed.st_mode) or target.endswith(' (deleted)'):"),
-    ('test_deleted_native_and_wrapper_refuse_even_with_readable_account', 'if native and deleted:', 'if False:'),
-    ('test_deleted_native_and_wrapper_refuse_even_with_readable_account', "executable[0][:-10] if deleted else executable[0]", 'executable[0]'),
+    ('test_deleted_native_and_wrapper_preserve_same_distinct_account_admission', '    environment = candidate = cwd = nss = namespaces = account = root_account = None', '    if deleted:\n        native = False\n    environment = candidate = cwd = nss = namespaces = account = root_account = None'),
+    ('test_deleted_native_and_wrapper_preserve_same_distinct_account_admission', "executable[0][:-10] if deleted else executable[0]", 'executable[0]'),
+    ('test_deleted_non_codex_requires_readable_regular_stable_evidence', 'return target, observed.st_dev, observed.st_ino', "return target.removesuffix(' (deleted)'), observed.st_dev, observed.st_ino"),
     ('test_same_distinct_alias_and_relative_accounts', 'if uid not in uids or', 'if True or uid not in uids or'),
     ('test_same_distinct_alias_and_relative_accounts', 'deadline = time.monotonic_ns() + timeout_ms * 1000000', "raise ObservationUnknown('incomplete')"),
     ('test_credentials_not_inode_ownership_select_population', 'if uid not in uids or', 'if path.stat().st_uid != uid or'),

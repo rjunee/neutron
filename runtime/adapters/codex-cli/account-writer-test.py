@@ -182,6 +182,11 @@ class CensusTest(unittest.TestCase):
                 self.scan()
 
     def deleted_process(self, name='synthetic-reader', argv=None):
+        for process in (self.own, self.pid):
+            for namespace in ('mnt', 'user', 'pid'):
+                link = process / 'ns' / namespace
+                link.unlink()
+                link.symlink_to(os.readlink(Path('/proc/self/ns') / namespace))
         executable = self.root / name
         shutil.copyfile('/usr/bin/cat', executable)
         executable.chmod(0o700)
@@ -219,12 +224,12 @@ class CensusTest(unittest.TestCase):
             self.busy()
             self.admitted(other)
 
-    def test_deleted_native_and_wrapper_refuse_even_with_readable_account(self):
-        for process in (self.own, self.pid):
-            for name in ('mnt', 'user', 'pid'):
-                link = process / 'ns' / name
-                link.unlink()
-                link.symlink_to(os.readlink(Path('/proc/self/ns') / name))
+    def test_deleted_native_and_wrapper_preserve_same_distinct_account_admission(self):
+        # The real deleted reader must be the sole native, so an exclusion
+        # mutant cannot hide behind the independent synthetic native's lease.
+        (self.pid / 'status').write_text('Uid: ' + ' '.join([str(os.getuid() + 1)] * 4))
+        other = self.root / 'other-account'
+        other.mkdir()
         script = self.root / 'codex.js'
         script.symlink_to('/dev/stdin')
         for name, argv in (('codex', ['synthetic-reader']),
@@ -233,8 +238,12 @@ class CensusTest(unittest.TestCase):
             with self.subTest(name=name):
                 path = self.deleted_process(name, argv)
                 try:
-                    with self.assertRaises(observation.ObservationUnknown):
-                        self.scan()
+                    expected = {'pid': int(path.name),
+                                'startTicks': str(observation.process_identity(path)[1]),
+                                'accountId': observation.account_identity(self.home, os.getuid())}
+                    self.assertEqual(self.scan()['nativeConsumers'], [expected])
+                    self.busy()
+                    self.admitted(other)
                 finally:
                     path.unlink()
 
@@ -277,8 +286,15 @@ class CensusTest(unittest.TestCase):
         (self.pid / 'exe').unlink()
         (self.pid / 'exe').symlink_to(binary)
         (self.pid / 'cmdline').write_bytes(b'synthetic-reader\0')
-        # A literal suffix is indistinguishable in readlink's spelling. Retain
-        # the conservative refusal instead of excluding a possible native.
+        # A literal suffix is indistinguishable in readlink's spelling. Require
+        # complete native account evidence instead of name-based exclusion.
+        self.assertEqual(self.scan()['nativeConsumers'], [{
+            'pid': int(self.pid.name), 'startTicks': '123',
+            'accountId': observation.account_identity(self.home, os.getuid()),
+        }])
+        self.busy()
+        self.admitted(self.root / '.codex')
+        (self.pid / 'environ').unlink()
         with self.assertRaises(observation.ObservationUnknown):
             self.scan()
 

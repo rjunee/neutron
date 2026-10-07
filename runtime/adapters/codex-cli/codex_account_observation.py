@@ -184,8 +184,6 @@ def _inspect(path, uid, proc):
     deleted = executable[0].endswith(' (deleted)')
     executable_name = executable[0][:-10] if deleted else executable[0]
     native = Path(executable_name).name == 'codex' or any(Path(arg).name in ('codex', 'codex.js') for arg in args[:2])
-    if native and deleted:
-        raise ObservationUnknown('incomplete')
     environment = candidate = cwd = nss = namespaces = account = root_account = None
     if native:
         if any(value != uid for value in uids):
