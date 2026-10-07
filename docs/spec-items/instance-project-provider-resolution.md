@@ -210,6 +210,20 @@ namespace therefore refuses missing-HOME/CODEX_HOME consumers as unknown. Native
 launch supplies explicit canonical CODEX_HOME; explicit HOME/CODEX_HOME may cross
 mount namespaces only with target-root account path/device/inode equivalence.
 No process-name exception or ignored read error establishes completeness.
+A retained system sudo launcher whose second argv entry names Codex is excluded
+only when its readable regular-file executable device/inode matches canonical
+`/usr/bin/sudo`, walking that literal path through root-owned ancestry with no
+group/other write permission. Every symlink component, including the executable,
+is refused; resolving a reference before checking its ancestry cannot establish
+trust. Executable Codex recognition and a Codex first argv entry still
+require native proof. The reference's canonical path, every ancestor's identity,
+ownership and mode, and file metadata are retained and rechecked alongside raw
+proc executable target, device/inode, all four UIDs, PID/start and argv across
+both reads and census passes. A substituted, unprotected, unavailable or
+unmatchable reference cannot establish launcher exclusion; existing native
+recognition and its mixed-UID refusal remain in force. The independently observed
+child remains subject to credential-based population membership. Launcher
+exclusion reads no environment or account data.
 An unlinked non-Codex executable may still supply readable regular-file identity
 through proc. Exclusion retains and rechecks its raw link target, device/inode,
 credentials, PID/start and argv. The Linux ` (deleted)` suffix is removed only
@@ -232,6 +246,16 @@ service control or reusable receipt is introduced.
 Acceptance requires valid same/distinct-account controls, NSS fallback, unknown
 and malformed/reforged/replayed response controls, changed process/account/boot
 controls, plus reservation and native-lifetime tests in both admission orders.
+Trusted sudo identity with mixed UIDs must preserve independent same-account busy
+and distinct-account admission, without environment access; a counterfeit sudo,
+unprotected reference, a symlink through an unprotected hop to an otherwise
+protected regular executable, changed reference or changed launcher evidence
+must refuse.
+Mixed-UID Codex executables and recognized wrappers must still refuse, while
+native wrappers retain same/distinct-account behavior without a sudo reference.
+Verify these controls and opposite-direction restoration mutants in
+`account-writer-test.py` and `account-observation-mutation-test.py` under
+`runtime/adapters/codex-cli/`, consumed by `account-writer-lock.test.ts`.
 The focused Python observation suite and existing account-writer suites run
 before the consuming tests listed above. The integrating gate also runs
 `open/__tests__/project-build-e2e.test.ts` and all owned TypeScript projects.
