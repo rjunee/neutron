@@ -44,7 +44,7 @@ test('private namespace init reaps exited orphans and preserves live children an
   expect(stderr).toContain('Ran 4 tests')
 })
 
-for (const authorityRoot of ['native-host-recovery', 'claude-capacity'])
+for (const authorityRoot of ['native-host-recovery', 'claude-capacity', 'codex-observer'])
 for (const installed of [true, false]) test(`private boundary isolates ${authorityRoot} with installed=${installed} and preserves neighboring configuration`, async () => {
   const dir = await mkdtemp(join(tmpdir(), 'process-operator-boundary-'))
   const etc = join(dir, 'etc'), neutron = join(etc, 'neutron')

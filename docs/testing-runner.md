@@ -155,11 +155,14 @@ Non-Linux preload behavior is unchanged. An unreadable live process inside the
 test namespace still causes fail-closed census refusal; isolation excludes the
 invoking host's unrelated processes rather than weakening production admission.
 
-When `/etc/neutron/native-host-recovery` exists, the test boundary mounts a private
-empty filesystem over that directory so a test server does not inherit the live
-instance's operator authority. Neighboring configuration stays visible; the host
-directory and its contents are unchanged. An absent directory stays absent. The
-production loader still uses its fixed effective-UID path and refuses unsafe
+When `/etc/neutron/native-host-recovery`, `/etc/neutron/claude-capacity`, or
+`/etc/neutron/codex-observer` exists, the test boundary mounts a private empty
+filesystem over that directory so tests do not inherit the live instance's
+operator authority, quota registration, or observer trust. Observer registration
+describes the host process table, which the private PID namespace excludes.
+Neighboring configuration stays visible; the host directories and their contents
+are unchanged. An absent directory stays absent without creating host parents.
+Production loaders retain their fixed effective-UID paths and refuse unsafe
 present authority; no environment selector or ownership exception is introduced.
 
 ### Environment scrubbing
