@@ -210,6 +210,11 @@ namespace therefore refuses missing-HOME/CODEX_HOME consumers as unknown. Native
 launch supplies explicit canonical CODEX_HOME; explicit HOME/CODEX_HOME may cross
 mount namespaces only with target-root account path/device/inode equivalence.
 No process-name exception or ignored read error establishes completeness.
+An unlinked non-Codex executable may still supply readable regular-file identity
+through proc. Exclusion retains and rechecks its raw link target, device/inode,
+credentials, PID/start and argv. The Linux ` (deleted)` suffix is removed only
+for recognition; a deleted Codex executable or recognized wrapper remains
+unknown, including a Codex executable with misleading non-Codex argv.
 The server proves its complete host proc view separately, then revalidates boot,
 enumeration and all classification evidence; budget exhaustion is unknown.
 
