@@ -131,10 +131,13 @@ def enter(command, parent_pid=None):
         inherited = (inner.fileno(), *handles)
         # The invoking host's operator authority belongs to its live instance.
         # Quota registration also belongs to the live instance, not fake test
-        # children. Explicit signed relay fixtures provide their own pin/socket.
+        # children. Observer registration belongs to its host process table,
+        # which this namespace excludes. Explicit signed relay and observer
+        # fixtures provide their own pin/socket.
         # Mask only these directories in this private mount namespace. Do not ask
         # bwrap to create missing parents through the host's bind-mounted root.
-        authority_roots = ['/etc/neutron/native-host-recovery', '/etc/neutron/claude-capacity']
+        authority_roots = ['/etc/neutron/native-host-recovery', '/etc/neutron/claude-capacity',
+                           '/etc/neutron/codex-observer']
         authority_mounts = [arg for root in authority_roots if os.path.isdir(root)
                             for arg in ('--tmpfs', root)]
         argv = ['bwrap', '--unshare-user', '--uid', str(os.getuid()), '--gid', str(os.getgid()),

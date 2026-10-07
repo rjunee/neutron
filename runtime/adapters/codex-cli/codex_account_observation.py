@@ -80,7 +80,7 @@ def _account_digest(evidence):
 def _exe(path):
     target = os.readlink(path / 'exe')
     observed = (path / 'exe').stat()
-    if not stat.S_ISREG(observed.st_mode) or target.endswith(' (deleted)'):
+    if not stat.S_ISREG(observed.st_mode):
         raise ObservationUnknown('incomplete')
     return target, observed.st_dev, observed.st_ino
 
@@ -179,7 +179,11 @@ def _inspect(path, uid, proc):
     executable = _exe(path)
     argv = read_bounded(path / 'cmdline')
     args = os.fsdecode(argv).split('\0')
-    native = Path(executable[0]).name == 'codex' or any(Path(arg).name in ('codex', 'codex.js') for arg in args[:2])
+    # Proc retains the regular executable inode after unlink. Preserve the raw
+    # target for stability checks; remove its marker only for recognition.
+    deleted = executable[0].endswith(' (deleted)')
+    executable_name = executable[0][:-10] if deleted else executable[0]
+    native = Path(executable_name).name == 'codex' or any(Path(arg).name in ('codex', 'codex.js') for arg in args[:2])
     environment = candidate = cwd = nss = namespaces = account = root_account = None
     if native:
         if any(value != uid for value in uids):

@@ -2,6 +2,9 @@
 import importlib.util
 import os
 from pathlib import Path
+import shutil
+import stat
+import subprocess
 from types import SimpleNamespace
 import tempfile
 import unittest
@@ -177,6 +180,123 @@ class CensusTest(unittest.TestCase):
         with patch.object(observation, '_exe', changed):
             with self.assertRaisesRegex(observation.ObservationUnknown, 'changed'):
                 self.scan()
+
+    def deleted_process(self, name='synthetic-reader', argv=None):
+        for process in (self.own, self.pid):
+            for namespace in ('mnt', 'user', 'pid'):
+                link = process / 'ns' / namespace
+                link.unlink()
+                link.symlink_to(os.readlink(Path('/proc/self/ns') / namespace))
+        executable = self.root / name
+        shutil.copyfile('/usr/bin/cat', executable)
+        executable.chmod(0o700)
+        child = subprocess.Popen(argv or [str(executable)], executable=str(executable),
+                                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL,
+                                 env={'CODEX_HOME': str(self.home)})
+        def finish():
+            child.stdin.close()
+            child.wait(timeout=5)
+        self.addCleanup(finish)
+        path = self.proc / str(child.pid)
+        path.symlink_to(Path('/proc') / str(child.pid))
+        before = (path / 'exe').stat()
+        executable.unlink()
+        after = (path / 'exe').stat()
+        self.assertTrue(os.readlink(path / 'exe').endswith(' (deleted)'))
+        self.assertTrue(stat.S_ISREG(after.st_mode))
+        self.assertEqual((before.st_dev, before.st_ino), (after.st_dev, after.st_ino))
+        # Preserve the independent synthetic native used by the account controls.
+        if executable == self.binary:
+            executable.touch()
+        return path
+
+    def test_deleted_non_codex_retains_same_distinct_account_admission(self):
+        path = self.deleted_process()
+        original = observation.read_bounded
+        def read(candidate):
+            if candidate == path / 'environ':
+                self.fail('non-Codex exclusion must not read environment')
+            return original(candidate)
+        other = self.root / 'other-account'
+        other.mkdir()
+        with patch.object(observation, 'read_bounded', read):
+            self.busy()
+            self.admitted(other)
+
+    def test_deleted_native_and_wrapper_preserve_same_distinct_account_admission(self):
+        # The real deleted reader must be the sole native, so an exclusion
+        # mutant cannot hide behind the independent synthetic native's lease.
+        (self.pid / 'status').write_text('Uid: ' + ' '.join([str(os.getuid() + 1)] * 4))
+        other = self.root / 'other-account'
+        other.mkdir()
+        script = self.root / 'codex.js'
+        script.symlink_to('/dev/stdin')
+        for name, argv in (('codex', ['synthetic-reader']),
+                           ('synthetic-wrapper', ['codex']),
+                           ('synthetic-node', ['node', str(script)])):
+            with self.subTest(name=name):
+                path = self.deleted_process(name, argv)
+                try:
+                    expected = {'pid': int(path.name),
+                                'startTicks': str(observation.process_identity(path)[1]),
+                                'accountId': observation.account_identity(self.home, os.getuid())}
+                    self.assertEqual(self.scan()['nativeConsumers'], [expected])
+                    self.busy()
+                    self.admitted(other)
+                finally:
+                    path.unlink()
+
+    def test_deleted_non_codex_requires_readable_regular_stable_evidence(self):
+        path = self.deleted_process()
+        original_exe, original_read, original_stat = observation._exe, observation.read_bounded, Path.stat
+        for field in ('target', 'device', 'inode', 'argv', 'nonregular', 'unreadable'):
+            with self.subTest(field=field):
+                calls = 0
+                def executable(candidate):
+                    nonlocal calls
+                    value = original_exe(candidate)
+                    if candidate == path:
+                        calls += 1
+                        if calls >= 2 and field in ('target', 'device', 'inode'):
+                            target, device, inode = value
+                            return (target.removesuffix(' (deleted)') if field == 'target' else target,
+                                    device + 1 if field == 'device' else device,
+                                    inode + 1 if field == 'inode' else inode)
+                    return value
+                def read(candidate):
+                    if candidate == path / 'cmdline':
+                        if field == 'unreadable':
+                            raise PermissionError('synthetic unreadable argv')
+                        if field == 'argv' and calls >= 2:
+                            return b'changed-reader\0'
+                    return original_read(candidate)
+                def metadata(candidate, *args, **kwargs):
+                    if field == 'nonregular' and candidate == path / 'exe':
+                        return SimpleNamespace(st_mode=stat.S_IFDIR)
+                    return original_stat(candidate, *args, **kwargs)
+                with patch.object(observation, '_exe', executable), \
+                        patch.object(observation, 'read_bounded', read), patch.object(Path, 'stat', metadata):
+                    with self.assertRaises(observation.ObservationUnknown):
+                        self.scan()
+
+    def test_literal_deleted_suffix_does_not_hide_native_executable(self):
+        binary = self.root / 'codex (deleted)'
+        binary.touch()
+        (self.pid / 'exe').unlink()
+        (self.pid / 'exe').symlink_to(binary)
+        (self.pid / 'cmdline').write_bytes(b'synthetic-reader\0')
+        # A literal suffix is indistinguishable in readlink's spelling. Require
+        # complete native account evidence instead of name-based exclusion.
+        self.assertEqual(self.scan()['nativeConsumers'], [{
+            'pid': int(self.pid.name), 'startTicks': '123',
+            'accountId': observation.account_identity(self.home, os.getuid()),
+        }])
+        self.busy()
+        self.admitted(self.root / '.codex')
+        (self.pid / 'environ').unlink()
+        with self.assertRaises(observation.ObservationUnknown):
+            self.scan()
 
     def test_changed_identity_and_classification_refuse(self):
         original = observation.process_identity
