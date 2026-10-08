@@ -79,7 +79,9 @@ function authenticated(value: unknown, publicKey: string): value is SignedHostEv
   } catch { return false }
 }
 
-/** The two keys come from independent protected composition, never the request. */
+/** Each authority has its own independently pinned identifier namespace.
+ * Parent/session/boot and operation evidence bind them; request bodies cannot
+ * nominate a key or require the two protected namespaces to be equal. */
 export function verifyNeverAdmittedPlannerPreparation(value: unknown, authority: NativeHostRecoveryAuthority,
   capacity: ClaudeCapacityPin): value is SignedHostEvidence<NeverAdmittedPlannerPreparation> {
   return verifyBase(value, authority, capacity, 'planner-conversation-quarantine-preparation')
@@ -91,7 +93,6 @@ function verifyBase(value: unknown, authority: NativeHostRecoveryAuthority, capa
     const b = value.body as unknown as NeverAdmittedPlannerRetirement, l = b.lease, o = b.observation
     if (b.version !== 1 || b.kind !== kind || b.policy !== 'never-admitted-conversation-v1'
       || b.hostId !== authority.hostId || b.instanceId !== authority.instanceId
-      || capacity.hostId !== authority.hostId || capacity.instanceId !== authority.instanceId
       || !/^[a-f0-9-]{36}$/.test(b.operationId) || !text(b.bootId) || !digest(b.evidenceDigest)
       || !digest(b.requestDigest) || !digest(b.dispatchDigest) || b.nativeAgentId !== null
       || !Array.isArray(b.conversationLeases)
@@ -116,7 +117,7 @@ function verifyBase(value: unknown, authority: NativeHostRecoveryAuthority, capa
       || !positive(parent.processIdentity.start_ticks) || !parent.launch || !relay || !registration
       || !authenticated(registration, capacity.publicKey)) return false
     const r = registration.body as NativeRelayRegistration['body']
-    return r.version === 2 && r.kind === 'claude-native-registered' && r.hostId === b.hostId && r.instanceId === b.instanceId
+    return r.version === 2 && r.kind === 'claude-native-registered' && r.hostId === capacity.hostId && r.instanceId === capacity.instanceId
       && r.bootId === b.bootId && r.parentSessionId === parent.sessionId && r.parentPid === parent.pid
       && r.parentStartTicks === parent.processIdentity.start_ticks && text(r.challenge) && digest(r.scopeDigest)
       && typeof relay.scopeToken === 'string'
@@ -139,7 +140,7 @@ export function verifyNeverAdmittedPlannerRetirement(value: unknown, authority: 
     const parent = b.parent, registration = parent.launch!.relay!.registration
     const r = registration.body, q = b.quarantine.body, o = b.observation
     return q.version === 1 && q.kind === 'claude-native-conversation-quarantined'  && q.operationId === b.operationId
-      && q.hostId === b.hostId && q.instanceId === b.instanceId && q.bootId === b.bootId
+      && q.hostId === capacity.hostId && q.instanceId === capacity.instanceId && q.bootId === b.bootId
       && q.parentSessionId === parent.sessionId && q.parentPid === parent.pid && q.parentStartTicks === r.parentStartTicks
       && q.originalScopeDigest === r.scopeDigest && positive(q.quarantinedAt) && q.quarantinedAt <= o.observedAt
       && q.admissionCount === 0 && q.historyComplete === true && q.relayDrained === true

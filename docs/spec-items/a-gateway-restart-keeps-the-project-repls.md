@@ -700,6 +700,11 @@ parent identity, custody/source evidence digests, and committed quarantine/drain
 proof. The application verifies against its independently configured operator
 key and verifies that the durable quarantine is still effective; bearer access
 alone cannot authorize recovery or nominate the verification key.
+The operator envelope uses the host-recovery authority’s configured identifier
+namespace; relay registration, quarantine and fresh status use the independently
+configured capacity authority’s namespace. These identifiers need not be equal.
+Exact kernel boot, parent process/start/session, original scope/routing and operation
+bind the proofs; neither proof may substitute the other authority’s identifiers.
 
 This operation removes provider access for the entire affected conversation.
 Its affected-work census must account for all current ownership and queued work

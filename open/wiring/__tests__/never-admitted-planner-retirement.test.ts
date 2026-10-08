@@ -44,7 +44,7 @@ async function fixture(change: Partial<BoundedWorkRequest> = {}, phase: 'submiss
   const admission = new ProjectAdmission({ db, ownerHandle: 'owner', bootId: 'original-gateway' }), port = admission.forNativeChild('project')
   const admitted = await port.admit(run.id, request.step_id); if (admitted.status !== 'admitted') throw Error('fixture admission')
   const root = signer(), capacity = signer(), scopeToken = randomBytes(32).toString('base64url'), sessionId = randomUUID()
-  const registration = capacity.signed({ version: 2 as const, kind: 'claude-native-registered' as const, hostId: 'host', instanceId: 'install', bootId: 'kernel',
+  const registration = capacity.signed({ version: 2 as const, kind: 'claude-native-registered' as const, hostId: 'capacity-host', instanceId: 'capacity-install', bootId: 'kernel',
     parentSessionId: sessionId, parentPid: process.pid, parentStartTicks: 1, challenge: 'original-challenge', scopeDigest: createHash('sha256').update(scopeToken).digest('hex') })
   const parent = { sessionId, childGeneration: 'generation', pid: process.pid, processIdentity: { boot_id: 'kernel', start_ticks: 1 },
     launch: { version: 1 as const, sessionId, childGeneration: 'generation', projectId: 'project', executable: { realPath: '/bin/native', sha256: 'a'.repeat(64), version: '1.0.0' },
@@ -61,31 +61,31 @@ async function fixture(change: Partial<BoundedWorkRequest> = {}, phase: 'submiss
     observation: { producer: 'operator', observedAt: Date.now(), consumedInputDigest: 'b'.repeat(64), relaySourceDigest: 'c'.repeat(64),
       originalExecutor: { pid: process.pid + 1000000, bootId: 'kernel', death: 'observed', evidenceDigest: 'd'.repeat(64) } } }
   const preparation = root.signed(preparationBody)
-  const proof: NativeConversationQuarantined = { version: 1, kind: 'claude-native-conversation-quarantined', operationId, hostId: 'host', instanceId: 'install', bootId: 'kernel',
+  const proof: NativeConversationQuarantined = { version: 1, kind: 'claude-native-conversation-quarantined', operationId, hostId: 'capacity-host', instanceId: 'capacity-install', bootId: 'kernel',
     parentSessionId: sessionId, originalScopeDigest: registration.body.scopeDigest, parentPid: parent.pid, parentStartTicks: 1, quarantinedAt: Date.now(),
     admissionCount: 0, historyComplete: true, relayDrained: true, historyDigest: 'e'.repeat(64), sourceDigest: 'c'.repeat(64), routingDigest: hash(registration) }
   const body: NeverAdmittedPlannerRetirement = { ...preparationBody, kind: 'planner-authority-retired', preparation,
     observation: { ...preparationBody.observation, observedAt: Date.now() }, quarantine: capacity.signed(proof) }
-  let liveStatus = true, wrongChallenge = false, lifecycleAllowed = true, quarantines = 0
+  let liveStatus = true, wrongChallenge = false, lifecycleAllowed = true, quarantines = 0, wrongStatusNamespace = false
   const socketPath = join(dir, 'capacity.sock')
   const server = createServer(socket => socket.once('data', bytes => {
     const q = JSON.parse(bytes.toString()); socket.end(JSON.stringify(capacity.signed({ version: 1, kind: 'claude-native-conversation-quarantine-status',
-      hostId: 'host', instanceId: 'install', challenge: wrongChallenge ? 'wrong' : q.challenge, operationId, parentSessionId: sessionId,
+      hostId: wrongStatusNamespace ? 'host' : 'capacity-host', instanceId: wrongStatusNamespace ? 'install' : 'capacity-install', challenge: wrongChallenge ? 'wrong' : q.challenge, operationId, parentSessionId: sessionId,
       originalScopeDigest: registration.body.scopeDigest, quarantineDigest: hash(proof), effective: liveStatus })) + '\n')
   }))
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve) })
   cleanup.push(() => new Promise<void>(resolve => server.close(() => resolve())))
   const authority: NativeHostRecoveryAuthority = { publicKey: root.publicKey, hostId: 'host', instanceId: 'install',
     async attestBoot(challenge) { return root.signed({ version: 1, kind: 'host-boot', hostId: 'host', instanceId: 'install', bootId: 'kernel', challenge }) } }
-  const options = { authority, capacityPin: { version: 1 as const, publicKey: capacity.publicKey, hostId: 'host', instanceId: 'install', socketPath, claudeConfigDir: dir },
+  const options = { authority, capacityPin: { version: 1 as const, publicKey: capacity.publicKey, hostId: 'capacity-host', instanceId: 'capacity-install', socketPath, claudeConfigDir: dir },
     stateRoot, admission, runs, attempts, projectIdForRun: (value: { project_slug: string }) => value.project_slug, listProjectIds: () => ['project', 'other'],
     kernelBootId: () => 'kernel', inspectConversation: () => lifecycleAllowed,
     quarantineConversation: () => { quarantines++; return lifecycleAllowed } }
   return { dir, db, runs, attempts, run, key, state, request, lease, root, capacity, preparation, body, options, admission,
-    status(value: boolean) { liveStatus = value }, badChallenge() { wrongChallenge = true }, busy() { lifecycleAllowed = false }, quarantines: () => quarantines }
+    status(value: boolean) { liveStatus = value }, badChallenge() { wrongChallenge = true }, badStatusNamespace() { wrongStatusNamespace = true }, busy() { lifecycleAllowed = false }, quarantines: () => quarantines }
 }
 
-test('real authenticated surface prepares then consumes exact authority with fresh capacity proof; preserves history and other scope', async () => {
+test('real authenticated surface consumes distinct independently pinned authority namespaces; preserves history and other scope', async () => {
   const f = await fixture(), before = f.runs.get(f.run.id), attempt = f.attempts.get(f.key)
   const journal = await readFile(nativeDispatchReceiptPath(f.state, f.request), 'utf8')
   await f.admission.forNativeChild('other').admit('other-run', 'plan')
@@ -146,9 +146,11 @@ test.each(['unrelated-lease', 'busy-parent', 'live-workflow', 'current-executor'
   expect(f.admission.listLeases()).toContainEqual(f.lease)
 })
 
-test.each(['unavailable', 'challenge'] as const)('fresh capacity status %s refuses consumption', async change => {
+test.each(['unavailable', 'challenge', 'host-namespace'] as const)('fresh capacity status %s refuses consumption', async change => {
   const f = await fixture(); expect(await prepareNeverAdmittedPlanner(f.options, f.preparation)).toEqual({ status: 'prepared' })
-  if (change === 'unavailable') f.status(false); else f.badChallenge()
+  if (change === 'unavailable') f.status(false)
+  else if (change === 'host-namespace') f.badStatusNamespace()
+  else f.badChallenge()
   expect(await retireNeverAdmittedPlanner(f.options, f.root.signed(f.body))).toEqual({ status: 'refused' })
   expect(f.admission.listLeases()).toEqual([f.lease]); expect(f.quarantines()).toBe(0)
 })
@@ -480,4 +482,28 @@ test('logical reset mutations expose forged closure and retired-work replay thro
   const mutantStore = new replay.ProjectAdmissionStore(valid.db), row = valid.rows[0]!
   expect((await valid.admission.maintenance.admit(row.scope, 'conversation', 'chat:new-epoch', row.workRef)).status).toBe('fenced')
   expect((await mutantStore.admit(row.scope, 'conversation', 'chat:new-epoch', row.workRef)).status).toBe('admitted')
+})
+
+test.each(['host-id', 'host-installation', 'capacity-id', 'capacity-installation'] as const)(
+  'independently pinned %s cannot be replaced with the other authority namespace', async change => {
+    const f = await fixture()
+    expect(f.options.authority.hostId).not.toBe(f.options.capacityPin.hostId)
+    expect(f.options.authority.instanceId).not.toBe(f.options.capacityPin.instanceId)
+    if (change === 'host-id') f.options.authority.hostId = f.options.capacityPin.hostId
+    if (change === 'host-installation') f.options.authority.instanceId = f.options.capacityPin.instanceId
+    if (change === 'capacity-id') f.options.capacityPin.hostId = f.options.authority.hostId
+    if (change === 'capacity-installation') f.options.capacityPin.instanceId = f.options.authority.instanceId
+    expect(await prepareNeverAdmittedPlanner(f.options, f.preparation)).toEqual({ status: 'refused' })
+    expect(f.admission.listLeases()).toEqual([f.lease])
+    expect(f.admission.maintenance.isConversationQuarantined(f.body.parent.sessionId)).toBe(false)
+  })
+
+test('authentic capacity signature cannot put a quarantine proof in the operator namespace', async () => {
+  const f = await fixture()
+  expect(await prepareNeverAdmittedPlanner(f.options, f.preparation)).toEqual({ status: 'prepared' })
+  const body = structuredClone(f.body)
+  body.quarantine = f.capacity.signed({ ...body.quarantine.body, hostId: f.options.authority.hostId, instanceId: f.options.authority.instanceId })
+  expect(await retireNeverAdmittedPlanner(f.options, f.root.signed(body))).toEqual({ status: 'refused' })
+  expect(f.admission.listLeases()).toEqual([f.lease])
+  expect(f.quarantines()).toBe(0)
 })

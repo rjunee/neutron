@@ -10,7 +10,10 @@ quarantine decision, retaining the original restricted-profile and reboot polici
 operator preparation and final authorization, the original signed relay
 registration, and a capacity-owner proof of complete zero-admission history and
 permanent conversation quarantine. `runtime/workers/claude-capacity-client.ts`
-checks the current fence using a fresh signed challenge. Historical source custody
+checks the current fence using a fresh signed challenge. Each proof uses its own
+independently configured authority identifier namespace; a consuming fixture with
+distinct host and capacity identities prevents an accidental equality requirement.
+Wrong-namespace pins, proofs and fresh responses refuse. Historical source custody
 is explicitly operator evidence, not a claim that the capacity service measured
 historical code. The public consumer requires the original executor's observed
 exit and the operator's retained operation-closure evidence; current accepted
