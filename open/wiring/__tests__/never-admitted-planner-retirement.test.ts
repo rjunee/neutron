@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from 'bun:test'
+import { afterEach, expect, spyOn, test } from 'bun:test'
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from 'node:crypto'
 import { createServer } from 'node:net'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
@@ -16,7 +16,7 @@ import type { NativeHostRecoveryAuthority, SignedHostEvidence } from '@neutronai
 import { createAdminRespawnSurface } from '@neutronai/gateway/http/admin-respawn-surface.ts'
 import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { seedProject } from '@neutronai/gateway/wiring/__tests__/project-admission-fixture.ts'
-import { prepareNeverAdmittedPlanner, retireNeverAdmittedPlanner } from '../never-admitted-planner-retirement.ts'
+import { completedConversationQuarantine, prepareNeverAdmittedPlanner, retireNeverAdmittedPlanner } from '../never-admitted-planner-retirement.ts'
 import { reconcileClaudeNativeDispatches } from '../claude-native-dispatch-reconcile.ts'
 
 const cleanup: (() => unknown | Promise<unknown>)[] = []
@@ -26,7 +26,9 @@ function signer() {
   return { publicKey: pair.publicKey.export({ type: 'spki', format: 'pem' }).toString(),
     signed: <T>(body: T): SignedHostEvidence<T> => ({ body, signature: sign(null, Buffer.from(JSON.stringify(body)), pair.privateKey).toString('base64') }) }
 }
-async function fixture(change: Partial<BoundedWorkRequest> = {}, phase: 'submission-started' | 'parent-bound' | 'child-bound' = 'submission-started') {
+async function fixture(change: Partial<BoundedWorkRequest> = {}, phase: 'submission-started' | 'parent-bound' | 'child-bound' = 'submission-started',
+  observedIdentity?: { boot_id: string; start_ticks: number }) {
+  const kernel = observedIdentity?.boot_id ?? 'kernel', birth = observedIdentity?.start_ticks ?? 1
   const dir = await mkdtemp(join(tmpdir(), 'conversation-quarantine-')); cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const path = join(dir, 'project.db'); seedMigratedDb(path)
   const db = ProjectDb.open(path); cleanup.push(() => db.close()); seedProject(db, 'project'); seedProject(db, 'other')
@@ -44,11 +46,11 @@ async function fixture(change: Partial<BoundedWorkRequest> = {}, phase: 'submiss
   const admission = new ProjectAdmission({ db, ownerHandle: 'owner', bootId: 'original-gateway' }), port = admission.forNativeChild('project')
   const admitted = await port.admit(run.id, request.step_id); if (admitted.status !== 'admitted') throw Error('fixture admission')
   const root = signer(), capacity = signer(), scopeToken = randomBytes(32).toString('base64url'), sessionId = randomUUID()
-  const registration = capacity.signed({ version: 2 as const, kind: 'claude-native-registered' as const, hostId: 'capacity-host', instanceId: 'capacity-install', bootId: 'kernel',
-    parentSessionId: sessionId, parentPid: process.pid, parentStartTicks: 1, challenge: 'original-challenge', scopeDigest: createHash('sha256').update(scopeToken).digest('hex') })
-  const parent = { sessionId, childGeneration: 'generation', pid: process.pid, processIdentity: { boot_id: 'kernel', start_ticks: 1 },
+  const registration = capacity.signed({ version: 2 as const, kind: 'claude-native-registered' as const, hostId: 'capacity-host', instanceId: 'capacity-install', bootId: kernel,
+    parentSessionId: sessionId, parentPid: process.pid, parentStartTicks: birth, challenge: 'original-challenge', scopeDigest: createHash('sha256').update(scopeToken).digest('hex') })
+  const parent = { sessionId, childGeneration: 'generation', pid: process.pid, processIdentity: { boot_id: kernel, start_ticks: birth },
     launch: { version: 1 as const, sessionId, childGeneration: 'generation', projectId: 'project', executable: { realPath: '/bin/native', sha256: 'a'.repeat(64), version: '1.0.0' },
-      argv: ['/bin/native', '--resume', sessionId], tools: ['Agent'], relay: { scopeToken, registration } } }
+      argv: ['/bin/native', '--resume', sessionId, '--channels', 'server:neutron-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'], tools: ['Agent'], relay: { scopeToken, registration } } }
   const writer = createClaudeNativeDispatchReceipt(state, request, port.dispatchAuthority!(admitted.lease, request, 100))
   writer.record({ kind: 'parent-bound', parent });
   if (phase !== 'parent-bound') writer.record({ kind: 'submission-started' });
@@ -56,32 +58,41 @@ async function fixture(change: Partial<BoundedWorkRequest> = {}, phase: 'submiss
   writer.close(); port.finishPreparing!(admitted.lease)
   const lease = admission.listLeases('liveChild')[0]!, operationId = randomUUID()
   const preparationBody: NeverAdmittedPlannerPreparation = { version: 1, kind: 'planner-conversation-quarantine-preparation', policy: 'never-admitted-conversation-v1',
-    operationId, hostId: 'host', instanceId: 'install', bootId: 'kernel', evidenceDigest: 'a'.repeat(64), lease: { ...lease, reason: 'liveChild' },
+    operationId, hostId: 'host', instanceId: 'install', bootId: kernel, evidenceDigest: 'a'.repeat(64), lease: { ...lease, reason: 'liveChild' },
     requestDigest: hash(request), dispatchDigest: hash(readClaudeNativeDispatchReceipt(state, request)), parent, nativeAgentId: null, conversationLeases: [],
     observation: { producer: 'operator', observedAt: Date.now(), consumedInputDigest: 'b'.repeat(64), relaySourceDigest: 'c'.repeat(64),
-      originalExecutor: { pid: process.pid + 1000000, bootId: 'kernel', death: 'observed', evidenceDigest: 'd'.repeat(64) } } }
+      originalExecutor: { pid: process.pid + 1000000, bootId: kernel, death: 'observed', evidenceDigest: 'd'.repeat(64) } } }
   const preparation = root.signed(preparationBody)
-  const proof: NativeConversationQuarantined = { version: 1, kind: 'claude-native-conversation-quarantined', operationId, hostId: 'capacity-host', instanceId: 'capacity-install', bootId: 'kernel',
-    parentSessionId: sessionId, originalScopeDigest: registration.body.scopeDigest, parentPid: parent.pid, parentStartTicks: 1, quarantinedAt: Date.now(),
+  const proof: NativeConversationQuarantined = { version: 1, kind: 'claude-native-conversation-quarantined', operationId, hostId: 'capacity-host', instanceId: 'capacity-install', bootId: kernel,
+    parentSessionId: sessionId, originalScopeDigest: registration.body.scopeDigest, parentPid: parent.pid, parentStartTicks: birth, quarantinedAt: Date.now(),
     admissionCount: 0, historyComplete: true, relayDrained: true, historyDigest: 'e'.repeat(64), sourceDigest: 'c'.repeat(64), routingDigest: hash(registration) }
   const body: NeverAdmittedPlannerRetirement = { ...preparationBody, kind: 'planner-authority-retired', preparation,
     observation: { ...preparationBody.observation, observedAt: Date.now() }, quarantine: capacity.signed(proof) }
   let liveStatus = true, wrongChallenge = false, lifecycleAllowed = true, quarantines = 0, wrongStatusNamespace = false
+  const registrations: string[] = []
   const socketPath = join(dir, 'capacity.sock')
   const server = createServer(socket => socket.once('data', bytes => {
-    const q = JSON.parse(bytes.toString()); socket.end(JSON.stringify(capacity.signed({ version: 1, kind: 'claude-native-conversation-quarantine-status',
+    const q = JSON.parse(bytes.toString());
+    if (q.kind === 'claude-native-register') {
+      registrations.push(q.parentSessionId)
+      socket.end(JSON.stringify(capacity.signed({ version: 2, kind: 'claude-native-registered',
+        hostId: 'capacity-host', instanceId: 'capacity-install', bootId: q.bootId, parentSessionId: q.parentSessionId,
+        parentPid: q.parentPid, parentStartTicks: q.parentStartTicks, challenge: q.challenge,
+        scopeDigest: createHash('sha256').update(q.scopeToken).digest('hex') })) + '\n'); return
+    }
+    socket.end(JSON.stringify(capacity.signed({ version: 1, kind: 'claude-native-conversation-quarantine-status',
       hostId: wrongStatusNamespace ? 'host' : 'capacity-host', instanceId: wrongStatusNamespace ? 'install' : 'capacity-install', challenge: wrongChallenge ? 'wrong' : q.challenge, operationId, parentSessionId: sessionId,
       originalScopeDigest: registration.body.scopeDigest, quarantineDigest: hash(proof), effective: liveStatus })) + '\n')
   }))
   await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve) })
   cleanup.push(() => new Promise<void>(resolve => server.close(() => resolve())))
   const authority: NativeHostRecoveryAuthority = { publicKey: root.publicKey, hostId: 'host', instanceId: 'install',
-    async attestBoot(challenge) { return root.signed({ version: 1, kind: 'host-boot', hostId: 'host', instanceId: 'install', bootId: 'kernel', challenge }) } }
+    async attestBoot(challenge) { return root.signed({ version: 1, kind: 'host-boot', hostId: 'host', instanceId: 'install', bootId: kernel, challenge }) } }
   const options = { authority, capacityPin: { version: 1 as const, publicKey: capacity.publicKey, hostId: 'capacity-host', instanceId: 'capacity-install', socketPath, claudeConfigDir: dir },
     stateRoot, admission, runs, attempts, projectIdForRun: (value: { project_slug: string }) => value.project_slug, listProjectIds: () => ['project', 'other'],
-    kernelBootId: () => 'kernel', inspectConversation: () => lifecycleAllowed,
+    kernelBootId: () => kernel, inspectConversation: () => lifecycleAllowed,
     quarantineConversation: () => { quarantines++; return lifecycleAllowed } }
-  return { dir, db, runs, attempts, run, key, state, request, lease, root, capacity, preparation, body, options, admission,
+  return { dir, db, runs, attempts, run, key, state, request, lease, root, capacity, preparation, body, options, admission, registrations,
     status(value: boolean) { liveStatus = value }, badChallenge() { wrongChallenge = true }, badStatusNamespace() { wrongStatusNamespace = true }, busy() { lifecycleAllowed = false }, quarantines: () => quarantines }
 }
 
@@ -506,4 +517,183 @@ test('authentic capacity signature cannot put a quarantine proof in the operator
   expect(await retireNeverAdmittedPlanner(f.options, f.root.signed(body))).toEqual({ status: 'refused' })
   expect(f.admission.listLeases()).toEqual([f.lease])
   expect(f.quarantines()).toBe(0)
+})
+
+async function quarantinedChatFixture(complete = true) {
+  const { readProcessIdentity } = await import('@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts')
+  const f = await fixture({}, 'submission-started', readProcessIdentity(process.pid)!)
+  const { FakeHerdrWorkspaceServer } = await import('@neutronai/runtime/adapters/claude-code/persistent/__tests__/herdr-workspace-fake-server.ts')
+  const { createWorkerTerminalHost, createConversationTerminal, projectWorkspaceJournalPath } = await import('../project-build-terminal.ts')
+  const { createProjectScopeLifecycle } = await import('../project-scope-lifecycle.ts')
+  const { herdrHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts')
+  const { deriveReplSupervisionPaths } = await import('@neutronai/runtime/adapters/claude-code/index.ts')
+  const { saveRegistry, getRecord } = await import('@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts')
+  const { poolKeyFor } = await import('@neutronai/runtime/adapters/claude-code/persistent/pool.ts')
+  const server = new FakeHerdrWorkspaceServer(), journalPath = projectWorkspaceJournalPath(f.dir)
+  const makeTerminal = () => createConversationTerminal({
+    host: createWorkerTerminalHost(f.dir, { selected: herdrHost, connect: async () => server }), instanceId: 'owner', selected: herdrHost })!
+  const terminal = makeTerminal(), placement = terminal.placementFor('project')
+  const oldChild = await terminal.host!.spawn([...f.body.parent.launch!.argv], { cwd: f.dir, env: {}, projectPlacement: placement })
+  oldChild.detach?.()
+  const pane = oldChild.paneHandle!; server.panes.get(pane)!.shell_pid = process.pid
+  const registryPath = deriveReplSupervisionPaths(f.dir).replRegistryPath
+  const base = { substrate_instance_id: 'cc-agent-owner', user_id: 'owner', project_id: 'project', conversationProjectId: 'project',
+    credential_identity: 'fixture-native-route', cwd: f.dir, replRegistryPath: registryPath }
+  const key = poolKeyFor(base), parent = f.body.parent
+  const row = { sessionKey: key, sessionId: parent.sessionId, child_generation: parent.childGeneration, pid: parent.pid,
+    cwd: f.dir, channelName: 'neutron-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', conversationProjectId: 'project', has_session: true, pane_handle: pane }
+  saveRegistry(registryPath, { [key]: row })
+  const lookup = (scope: string | null, id: string) => completedConversationQuarantine(f.options, scope, id, f.options.capacityPin)
+  const lifecycle = (target = terminal, overrides: Partial<import('../project-scope-lifecycle.ts').ProjectScopeLifecycleDeps> = {}) => createProjectScopeLifecycle({ admission: f.admission, registryPath,
+    isConversationQuarantined: id => f.admission.maintenance.isConversationQuarantined(id),
+    completedConversationQuarantine: lookup, conversationTerminal: target, idleMs: 0, ...overrides })
+  expect(await prepareNeverAdmittedPlanner(f.options, f.preparation)).toEqual({ status: 'prepared' })
+  if (complete) expect(await retireNeverAdmittedPlanner(f.options, f.root.signed(f.body))).toEqual({ status: 'released' })
+  return { ...f, server, terminal, makeTerminal, journalPath, registryPath, base, key, row, pane, lookup, lifecycle, getRecord }
+}
+
+test('completed quarantine crosses registered wrapper, lifecycle and real workspace manager into a fresh native Chat', async () => {
+  const f = await quarantinedChatFixture()
+  const originalCall = f.server.call.bind(f.server)
+  f.server.call = async (method, params) => {
+    const value = await originalCall(method, params)
+    if (method === 'pane.process_info' && params.pane_id === f.pane) {
+      const info = value.process_info as { foreground_processes: unknown[] }
+      info.foreground_processes.push({ pid: process.pid + 1, name: 'bun', argv: ['bun', 'channel'] },
+        { pid: process.pid + 2, name: 'bun', argv: ['bun', 'bridge'] })
+    }
+    return value
+  }
+  const capacity = await import('@neutronai/runtime/workers/claude-capacity-client.ts')
+  const { buildLlmCallSubstrate } = await import('@neutronai/gateway/wiring/build-llm-call-substrate.ts')
+  const { shutdownAllPersistentRepls } = await import('@neutronai/runtime/adapters/claude-code/persistent/pool.ts')
+  const { createClaudeCodeSubstrateAuto } = await import('@neutronai/runtime/adapters/claude-code/index.ts')
+  const { lifecycleReplHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/__tests__/lifecycle-repl-host.ts')
+  const { pool, supervisedBySessionKey } = await import('@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts')
+  const oldRow = f.getRecord(f.registryPath, f.key), oldPane = structuredClone(f.server.panes.get(f.pane)), closes = [...f.server.closed]
+  const route = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue('fixture-native-route')
+  const pin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(f.options.capacityPin)
+  const peer = lifecycleReplHost({ pid: process.pid }), argvs: string[][] = []
+  cleanup.push(async () => {
+    for (const child of peer.children) child.child.kill()
+    await shutdownAllPersistentRepls()
+    for (const [key, options] of supervisedBySessionKey) if (options.replRegistryPath === f.registryPath) { pool.delete(key); supervisedBySessionKey.delete(key) }
+    pin.mockRestore(); route.mockRestore()
+  })
+  // The wrapper selects the registered route without any local credentials. Only
+  // its native process/dev-channel transport is a peer; placement and lifecycle
+  // retain their real persisted managers, registry and completed authority.
+  const substrate = buildLlmCallSubstrate({ substrate_instance_id: 'cc-agent-owner', cwd: f.dir, user_id: 'owner', owner_handle: 'owner',
+    ownerConversation: true, conversationLifecycle: f.lifecycle(), conversationTerminal: f.terminal,
+    isConversationQuarantined: id => f.admission.maintenance.isConversationQuarantined(id),
+    substrateFactory: opts => {
+      expect(opts.credential_identity).toBe('fixture-native-route')
+      expect(opts.conversationProjectId).toBe('project')
+      expect(opts.projectPlacement).toEqual(f.terminal.placementFor('project'))
+      expect(opts.ptyHost).toBe(f.terminal.host)
+      expect(opts.isConversationQuarantined?.(f.body.parent.sessionId)).toBe(true)
+      const actualHost = opts.ptyHost!
+      return createClaudeCodeSubstrateAuto({ ...opts, ptyHost: { async spawn(argv, options) {
+        expect(options.projectPlacement).toEqual(opts.projectPlacement)
+        const registered = [...supervisedBySessionKey.values()].find(value => value.replRegistryPath === f.registryPath)
+        expect(registered?.conversationProjectId).toBe('project')
+        expect(registered?.isConversationQuarantined).toBe(opts.isConversationQuarantined)
+        argvs.push(argv)
+        const placed = await actualHost.spawn(argv, options)
+        placed.detach?.()
+        return { ...await peer.host.spawn(argv, options), paneHandle: placed.paneHandle! }
+      } } })
+    } })!
+  const events = []
+  for await (const event of substrate.start({ prompt: 'fresh independent work', tools: [], model_preference: ['sonnet'],
+    metering_context: { project_id: 'project', conversationProjectId: 'project' } }).events) events.push(event)
+  expect(events.filter(e => e.kind === 'error')).toEqual([])
+  expect(events.some(e => e.kind === 'completion')).toBe(true)
+  expect(argvs).toHaveLength(1); expect(argvs[0]).not.toContain('--resume')
+  expect(peer.children[0]!.sessionId).not.toBe(f.body.parent.sessionId)
+  expect(f.registrations).toEqual([peer.children[0]!.sessionId])
+  expect(peer.children[0]!.prompts).toEqual(['fresh independent work'])
+  expect(f.server.panes.get(f.pane)).toEqual(oldPane); expect(f.server.closed).toEqual(closes)
+  expect(f.getRecord(f.registryPath, f.key)).toEqual(oldRow)
+  const rows = JSON.parse(await readFile(f.journalPath, 'utf8')), record = Object.values(rows)[0] as { chat: { pane: string }; quarantinedChats: { pane: string }[] }
+  expect(record.chat.pane).not.toBe(f.pane); expect(record.quarantinedChats.map(p => p.pane)).toEqual([f.pane])
+  expect(await f.makeTerminal().inspectChat!('project')).toMatchObject({ status: 'live', pane: record.chat.pane })
+})
+
+test('prepared-only quarantine cannot release a live terminal claim; completed metadata survives manager restart before spawn', async () => {
+  const f = await quarantinedChatFixture(false), original = await readFile(f.journalPath, 'utf8')
+  expect(f.lookup('project', f.body.parent.sessionId)).toBeUndefined()
+  expect((await f.lifecycle().handoffChat('project', { sessionKey: 'next', credentialId: 'next' })).status).toBe('refused')
+  expect(await readFile(f.journalPath, 'utf8')).toBe(original)
+  expect(await retireNeverAdmittedPlanner(f.options, f.root.signed(f.body))).toEqual({ status: 'released' })
+  expect(f.lookup('other', f.body.parent.sessionId)).toBeUndefined()
+  expect(f.lookup('project', 'wrong')).toBeUndefined()
+  expect(await f.lifecycle().handoffChat('project', { sessionKey: 'next', credentialId: 'next' })).toEqual({ status: 'ready' })
+  const restarted = f.makeTerminal()
+  expect(await restarted.inspectChat!('project')).toMatchObject({ status: 'none' })
+  expect(await f.lifecycle(restarted).handoffChat('project', { sessionKey: 'next', credentialId: 'next' })).toEqual({ status: 'ready' })
+  expect(f.server.panes.has(f.pane)).toBe(true)
+})
+
+test.each(['forged-preparation', 'generation', 'reused-pid', 'registry-alias', 'foreign-native', 'channel', 'workspace-token', 'moved-pane', 'pane-incarnation', 'journal-race', 'authority-race', 'unresolved-owner'] as const)(
+  'completed Chat handoff refuses %s and preserves all live panes', async change => {
+    const f = await quarantinedChatFixture(), original = await readFile(f.journalPath, 'utf8')
+    const { saveRegistry } = await import('@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts')
+    if (change === 'forged-preparation') {
+      const bad = { ...f.preparation, signature: Buffer.alloc(64).toString('base64') }
+      f.db.runSync('UPDATE planner_authority_retirements SET authorization = ? WHERE operation_id = ?', [JSON.stringify(bad), f.body.operationId])
+      f.db.runSync('UPDATE native_conversation_quarantines SET authorization = ? WHERE operation_id = ?', [JSON.stringify(bad), f.body.operationId])
+    }
+    if (change === 'generation') saveRegistry(f.registryPath, { [f.key]: { ...f.row, child_generation: 'other' } })
+    if (change === 'reused-pid') saveRegistry(f.registryPath, { [f.key]: { ...f.row, pid: process.pid + 1 } })
+    if (change === 'registry-alias') saveRegistry(f.registryPath, { [f.key]: f.row, alias: { ...f.row, sessionKey: 'alias' } })
+    if (change === 'foreign-native') f.server.panes.get(f.pane)!.argv = ['codex', '--resume', randomUUID()]
+    if (change === 'channel') f.server.panes.get(f.pane)!.argv = ['claude', '--resume', f.body.parent.sessionId, '--channels', 'server:other']
+    if (change === 'workspace-token') f.server.workspaces.values().next().value!.tokens = {}
+    if (change === 'moved-pane') f.server.panes.get(f.pane)!.workspace_id = 'another-workspace'
+    if (change === 'pane-incarnation') {
+      const rows = JSON.parse(original), record = Object.values(rows)[0] as { chat: { retirementIdentity?: unknown } }
+      record.chat.retirementIdentity = { terminal_id: 'original-terminal', runtime_generation: 'original-generation' }
+      await writeFile(f.journalPath, JSON.stringify(rows))
+    }
+    let raced = false
+    const call = f.server.call.bind(f.server)
+    f.server.call = async (method, params) => {
+      const result = await call(method, params)
+      if (method === 'pane.process_info' && !raced && (change === 'journal-race' || change === 'authority-race')) {
+        raced = true
+        if (change === 'journal-race') {
+          const rows = JSON.parse(await readFile(f.journalPath, 'utf8'))
+          ;(Object.values(rows)[0] as { revision: string }).revision = 'concurrently-changed'
+          await writeFile(f.journalPath, JSON.stringify(rows))
+        } else f.db.runSync('UPDATE planner_authority_retirements SET completion = NULL WHERE operation_id = ?', [f.body.operationId])
+      }
+      return result
+    }
+    const before = [...f.server.panes], closes = [...f.server.closed]
+    const lifecycle = f.lifecycle(f.terminal, change === 'unresolved-owner'
+      ? { sessions: async () => ({ live: [], unresolved: 1 }) } : {})
+    const outcome = await lifecycle.handoffChat('project', { sessionKey: 'next', credentialId: 'next' })
+    expect(['refused', 'unknown']).toContain(outcome.status)
+    expect([...f.server.panes]).toEqual(before); expect(f.server.closed).toEqual(closes)
+    const rows = JSON.parse(await readFile(f.journalPath, 'utf8')), record = Object.values(rows)[0] as { chat: { pane: string }; quarantinedChats?: unknown[] }
+    expect(record.chat.pane).toBe(f.pane); expect(record.quarantinedChats).toBeUndefined()
+    if (change === 'journal-race' || change === 'authority-race') expect(raced).toBe(true)
+  })
+
+test('completed Chat metadata release preserves worker and unrelated scopes and cannot retire its historical workspace', async () => {
+  const f = await quarantinedChatFixture()
+  const worker = await f.terminal.host!.spawn(['fixture-worker'], { cwd: f.dir, env: {}, projectPlacement: {
+    ...f.terminal.placementFor('project'), role: 'worker', operationId: 'worker-operation', taskLabel: 'Existing worker',
+  } })
+  const sibling = await f.terminal.host!.spawn(['fixture-other-chat'], { cwd: f.dir, env: {}, projectPlacement: f.terminal.placementFor('other') })
+  worker.detach?.(); sibling.detach?.()
+  const before = structuredClone([...f.server.panes]), closes = [...f.server.closed]
+  expect(await f.lifecycle().handoffChat('project', { sessionKey: 'next', credentialId: 'next' })).toEqual({ status: 'ready' })
+  expect([...f.server.panes]).toEqual(before); expect(f.server.closed).toEqual(closes)
+  const restarted = f.makeTerminal(), inspected = await restarted.inspectChat!('project')
+  expect(inspected.status).toBe('none')
+  expect((await restarted.retireEmptyWorkspace!('project', inspected)).status).toBe('refused')
+  expect(await restarted.inspectChat!('other')).toMatchObject({ status: 'live', pane: sibling.paneHandle })
+  expect([...f.server.panes]).toEqual(before)
 })

@@ -3,7 +3,7 @@ import type { PtyChild, PtyHost, PtySpawnOpts } from '@neutronai/runtime/adapter
 
 /** Real dev-channel HTTP peer behind an in-memory process boundary. Lifecycle
  * tests assert actual child kills, not merely an option named "ephemeral". */
-export function lifecycleReplHost() {
+export function lifecycleReplHost(options: { pid?: number } = {}) {
   const children: Array<{ child: PtyChild; sessionId: string; prompts: string[] }> = []
   let replyGate: (() => Promise<void>) | undefined
   const host: PtyHost = {
@@ -11,7 +11,7 @@ export function lifecycleReplHost() {
       const index = argv.indexOf('--session-id')
       const sessionId = argv[index >= 0 ? index + 1 : argv.indexOf('--resume') + 1]!
       const { port, token } = bakedChildSinkInfo(argv)
-      const pid = 780000 + children.length
+      const pid = options.pid ?? 780000 + children.length
       const prompts: string[] = []
       let dead = false
       let resolveExit!: (code: number | null) => void

@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { HerdrError, verifyHerdrProtocol, type HerdrRpc } from './herdr-client.ts'
 import { HERDR_PROTOCOL_VERSION, type HerdrLayoutApply, type HerdrLayoutPaneNode, type HerdrProjectLayoutParams, type HerdrPaneRetirementIdentity } from './herdr-protocol.ts'
 import { withFlockSync } from './registry-lock.ts'
+import { readProcessIdentity, type ProcessIdentity } from './process-identity.ts'
 import { inspectIdleRelicShell, type RelicProcReader } from './relic-shell-census.ts'
 
 /** Null is General; the literal project id "general" is a different scope. */
@@ -17,6 +18,16 @@ export interface ProjectPanePlacement {
   taskLabel?: string
   /** Durable per-dispatch identity, reused on retry. Required for workers. */
   operationId?: string
+}
+
+export interface QuarantinedChatIdentity {
+  operationId: string
+  sessionId: string
+  childGeneration: string
+  pid: number
+  processIdentity: ProcessIdentity
+  pane: string
+  channelName: string
 }
 
 interface ChatSlot { tab: string; pane: string; placeholderArgv?: string[]; retirementIdentity?: HerdrPaneRetirementIdentity | undefined }
@@ -51,6 +62,8 @@ interface WorkspaceRecord {
   chat?: ChatSlot
   /** Old shell panes retained after authenticated death of their native owner. */
   relinquishedChats?: ChatSlot[]
+  /** Live quarantined history. Never eligible for dead-shell relic cleanup. */
+  quarantinedChats?: Array<ChatSlot & { quarantine: QuarantinedChatIdentity }>
   workers?: Record<string, WorkerOperation>
   retirement?: { operationId: string; revision: string;
     relic?: { pane: string; holdToken: string; inputEpoch?: number; issued?: boolean; releasing?: boolean } }
@@ -233,7 +246,7 @@ export class ProjectWorkspaceManager {
         }
         if (existing.version !== 1 || JSON.stringify(existing.scope) !== JSON.stringify(scope)
           || !nonempty(existing.token) || existing.state !== 'ready' || !nonempty(existing.workspace)
-          || (existing.chat ? !nonempty(existing.chat.tab) || !nonempty(existing.chat.pane) : !existing.relinquishedChats?.length)) {
+          || (existing.chat ? !nonempty(existing.chat.tab) || !nonempty(existing.chat.pane) : !existing.relinquishedChats?.length && !existing.quarantinedChats?.length)) {
           throw new ProjectWorkspaceRefusal('project-workspaces: existing ownership is invalid or pending; reconcile before retry')
         }
         return existing
@@ -425,6 +438,45 @@ export class ProjectWorkspaceManager {
     try { return await operation } finally { if (this.operations.get(key) === operation) this.operations.delete(key) }
   }
 
+  /** Relinquish only the active Chat claim after completed native quarantine.
+   * Historical panes stay live and distinct from dead-owner shell relics. */
+  async relinquishQuarantinedChat(client: HerdrRpc, placement: ProjectPanePlacement,
+    identity: QuarantinedChatIdentity, authorized: () => boolean): Promise<boolean> {
+    const scope = scopeOf(placement), key = createHash('sha256').update(JSON.stringify(scope)).digest('hex')
+    const prior = this.operations.get(key) ?? Promise.resolve()
+    const operation = prior.catch(() => undefined).then(async () => {
+      try {
+        const before = this.journal.read(rows => structuredClone(rows[key]))
+        if (!before || before.state !== 'ready' || before.chat?.pane !== identity.pane || before.chat.placeholderArgv
+          || !nonempty(identity.operationId) || !nonempty(identity.sessionId) || !nonempty(identity.childGeneration)
+          || !nonempty(identity.channelName) || !authorized()) return false
+        const inspected = await this.inspect(client, scope, key)
+        if (inspected.status !== 'live' || inspected.pane !== identity.pane || inspected.revision !== before.revision) return false
+        const pane = object(object(await client.call('pane.get', { pane_id: identity.pane })).pane)
+        if (pane.pane_id !== identity.pane || pane.workspace_id !== before.workspace || pane.tab_id !== before.chat.tab
+          || before.chat.retirementIdentity && !isDeepStrictEqual(pane.retirement_identity, before.chat.retirementIdentity)) return false
+        const info = object(object(await client.call('pane.process_info', { pane_id: identity.pane })).process_info)
+        const processes = info.foreground_processes
+        if (info.pane_id !== identity.pane || !Array.isArray(processes)) return false
+        const matches = processes.map(object).filter(p => p.pid === identity.pid)
+        if (matches.length !== 1 || !Array.isArray(matches[0]!.argv)
+          || !matches[0]!.argv.includes(identity.sessionId)
+          || !matches[0]!.argv.some((arg: unknown) => typeof arg === 'string' && arg.includes(identity.channelName))) return false
+        return this.journal.update(rows => {
+          if (!isDeepStrictEqual(rows[key], before) || !authorized()
+            || !isDeepStrictEqual(readProcessIdentity(identity.pid), identity.processIdentity)) return false
+          const { chat, ...retained } = before
+          rows[key] = { ...retained, revision: randomUUID(), quarantinedChats: [
+            ...(before.quarantinedChats ?? []), { ...chat!, quarantine: structuredClone(identity) },
+          ] }
+          return true
+        })
+      } catch { return false }
+    })
+    this.operations.set(key, operation)
+    try { return await operation } finally { if (this.operations.get(key) === operation) this.operations.delete(key) }
+  }
+
   /** Never substitute workspace.close or a sampled empty pane list for this RPC.
    * Reservation survives uncertain replies and excludes other processes' placement. */
   async retireEmptyWorkspace(client: HerdrRpc, placement: ProjectPanePlacement, expected: ChatInspection, canRetire?: () => boolean): Promise<WorkspaceRetirement> {
@@ -439,6 +491,9 @@ export class ProjectWorkspaceManager {
         const pong = object(await client.call('ping', {}))
         if (pong.type !== 'pong' || pong.protocol !== HERDR_PROTOCOL_VERSION
           || object(pong.capabilities ?? {}).owned_empty_workspace_retirement !== true) return { status: 'unsupported' }
+        if (this.journal.read(rows => !!rows[key]?.quarantinedChats?.length)) {
+          return { status: 'refused', reason: 'quarantined Chat history is retained; automatic workspace retirement is not authorized' }
+        }
         const hasRelics = this.journal.read(rows => !!rows[key]?.relinquishedChats?.length)
         if (hasRelics && (object(pong.capabilities ?? {}).owned_pane_input_hold !== true
           || object(pong.capabilities ?? {}).owned_pane_retirement !== true)) return { status: 'unsupported' }
@@ -508,7 +563,7 @@ export class ProjectWorkspaceManager {
         return { status: 'refused', reason: 'workspace ownership is invalid' }
       }
       if (record.state === 'retired') return { status: 'none' }
-      const slot = record.chat ?? record.relinquishedChats?.[0]
+      const slot = record.chat ?? record.relinquishedChats?.[0] ?? record.quarantinedChats?.[0]
       if (!['ready', 'retiring'].includes(record.state) || !nonempty(record.workspace) || !slot
         || !nonempty(slot.tab) || !nonempty(slot.pane)) {
         return { status: 'refused', reason: 'workspace ownership is invalid or pending' }
@@ -524,7 +579,7 @@ export class ProjectWorkspaceManager {
       if (found.workspace_id !== workspace || object(found.tokens)[TOKEN] !== record.token) {
         return { status: 'refused', reason: 'live workspace ownership mismatch' }
       }
-      if (!record.chat) return { status: 'relics', workspace, pane: slot.pane, revision }
+      if (!record.chat) return { status: record.relinquishedChats?.length ? 'relics' : 'none', workspace, pane: slot.pane, revision }
       const live = await this.verifyChat(client, workspace, record.chat)
       if (!live) return { status: 'gone', workspace, pane: record.chat.pane, revision }
       return { status: record.chat.placeholderArgv ? 'placeholder' : 'live', workspace, pane: record.chat.pane, revision }

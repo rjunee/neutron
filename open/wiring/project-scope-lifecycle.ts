@@ -62,6 +62,8 @@
  *     pane is adopted, never spawned over. Gateway restart is not a sleep event; idle
  *     timers are in-process and re-arm on the next settled turn.
  */
+import { relinquishQuarantinedConversationChat, type CompletedQuarantineReader } from '@neutronai/runtime/adapters/claude-code/persistent/quarantined-chat.ts'
+import type { QuarantinedChatIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/project-workspaces.ts'
 import { createLogger, type LogFields } from '@neutronai/logger'
 import type { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import type {
@@ -134,6 +136,7 @@ export interface ProjectScopeLifecycleDeps {
   /** The durable REPL registry (production: the instance's supervision registry). The
    * wake pin and `isAsleep` read the scope's asleep rows from it. */
   registryPath?: string
+  completedConversationQuarantine?: CompletedQuarantineReader
   isConversationQuarantined?: (sessionId: string) => boolean
   /** Override of the durable asleep-row reader (tests). */
   asleepConversations?: (scope: string | null) => ReturnType<typeof readAsleepConversations>
@@ -147,6 +150,7 @@ export interface ProjectScopeLifecycleDeps {
   foregroundMs?: (scope: string | null) => Promise<number | null> | number | null
   /** The shared manager's read-only Chat sample (on Herdr). */
   conversationTerminal?: {
+    relinquishQuarantinedChat?(scope: string | null, identity: QuarantinedChatIdentity, authorized: () => boolean): Promise<boolean>
     inspectChat?(scope: string | null): Promise<ChatInspection>
     retireEmptyWorkspace?(scope: string | null, expected: ChatInspection, canRetire?: () => boolean): Promise<WorkspaceRetirement>
   }
@@ -341,6 +345,18 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
       // kind (a durable Codex native owner after a live provider switch): the manager
       // would refuse the placement, and this owner has no exact authority to retire it.
       const held = await deps.conversationTerminal?.inspectChat?.(scope)
+      if (held?.status === 'refused') return { status: 'unknown', reason: held.reason }
+      if (held?.status === 'live' && held.pane && deps.registryPath && deps.completedConversationQuarantine
+        && deps.conversationTerminal?.relinquishQuarantinedChat) {
+        const current = await sessions(poolProjectIds(scope))
+        if (current.unresolved > 0 || current.live.length || current.pending?.length) {
+          return { status: 'unknown', reason: 'quarantined Chat handoff has another or unresolved owner' }
+        }
+        const released = await relinquishQuarantinedConversationChat({ scope, pane: held.pane,
+          registryPath: deps.registryPath, completed: deps.completedConversationQuarantine,
+          relinquish: (identity, authorized) => deps.conversationTerminal!.relinquishQuarantinedChat!(scope, identity, authorized) })
+        if (released && readmit(next.sessionKey)) return { status: 'ready' }
+      }
       if (held?.status === 'live') {
         const reason = 'the scope Chat is held by a live owner the Claude pool does not own (a Codex native owner ' +
           'after a provider switch, or an unadopted survivor); nothing was closed. Recovery: switch the project back ' +
