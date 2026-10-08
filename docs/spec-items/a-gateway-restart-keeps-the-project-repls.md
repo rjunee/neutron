@@ -641,6 +641,34 @@ missing child binding remains explicitly null. Parent-only metadata, deadline
 expiry, a missing worktree, an API-error transcript or an operator signature
 without complete custody evidence cannot establish eligibility.
 
+An explicitly owner-authorized logical project-conversation reset may additionally
+name exact stale `conversation` leases from `chat` or `acting-turn` producers.
+The signed preparation and final authorization enumerate `{ lease,
+retirementOperationId }` entries (`conversationLeases`, empty normally), plus a
+`conversationReset` judgment containing the canonical `topicKey`,
+`ownerAuthorized: true` and a protected `censusDigest` when the list is nonempty.
+Each work reference must exactly match that project's canonical owner-chat topic
+and the original producer's timestamp or UUID suffix. Every referenced retirement
+must be an immutable, completed, independently authenticated restricted-planner
+record in this installation, scope and kernel boot, with the same producer epoch
+and observed original executor closure. Current producer epochs, unsigned,
+incomplete, mismatched or merely asserted closure refuse.
+
+These extra rows represent historical **logical conversation admission ownership**.
+The closure record does not authenticate a separate chat turn's historical native
+parent. No such join or zero-admission claim for old chat turns is inferred. All
+historical native effects and outcomes remain unknown. The owner authorizes this
+specific logical-topic reset; the complete current project census must contain
+only the target native conversation, with no other live or unresolved session,
+ordinary active turn, pending spawn or unrelated workspace. The entire canonical
+lease multiset must equal the target planner lease plus the exact signed list.
+Duplicates, unlisted rows, another topic or producer, and any changed lease refuse.
+Preparation permanently tombstones each listed scope/work reference across tokens,
+producer epochs and restarts before drain. The completed quarantine operation
+atomically consumes only those unchanged rows with its planner lease, preserving
+all authorization and closure records. A partial failure keeps every remaining
+lease and fence; exact completed retry never revives or broadens authority.
+
 Before any relay quarantine, an independently signed application preparation
 binds the exact original lease, request, dispatch and conversation. The application
 checks the complete affected-work census and commits its project maintenance hold,
@@ -691,7 +719,8 @@ partial drain, changed lease, pending whole-host termination preparation or
 conflicting maintenance fence retains ownership. Existing restriction and
 whole-host receipt versions retain their original meanings.
 
-Consume completion and remove only the unchanged exact lease atomically, retaining
+Consume completion and remove only the unchanged exact planner lease and explicitly
+prepared logical conversation leases atomically, retaining
 immutable preparation, quarantine and completion records. Consumption is
 idempotent and leaves native outcome, run/attempt history, dispatch, reservations
 and result artifacts unchanged. Quarantine remains even after lease consumption.
@@ -716,6 +745,11 @@ requests. Normal parent lifecycle and composer guards remain authoritative.
 - [ ] Re-registering the same conversation with a new token or scope, daemon and
       gateway restart, native adoption, continuation and replacement-session
       replay are refused. A fresh unrelated conversation is the positive control.
+- [ ] An explicitly listed dead-producer logical conversation admission is retired
+      only with its trusted consumed closure, exact canonical topic and owner reset
+      judgment. A changed, omitted, duplicated, current-epoch, cross-topic or
+      forged closure/lease refuses; an unrelated fresh topic remains usable and
+      the same retired work reference cannot replay under a new epoch or token.
 - [ ] Unrelated/ambiguous affected work, pending whole-host preparation, reused
       process identity, stale completion and changed canonical lease refuse.
       Duplicate consumption and interrupted recovery preserve sibling leases,

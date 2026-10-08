@@ -7,7 +7,10 @@ import { resolveLiveProjectSessions } from '@neutronai/runtime/adapters/claude-c
 import { inspectConversationQuarantine, quarantinePersistentConversation } from '@neutronai/runtime/adapters/claude-code/persistent/conversation-quarantine.ts'
 import { readClaudeNativeDispatchReceipt, verifyNativeDispatchSubmissionStarted, type SignedNativeDispatchRecord } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { verifyNeverAdmittedPlannerRetirement, verifyNeverAdmittedPlannerPreparation, type NeverAdmittedPlannerRetirement, type NeverAdmittedPlannerAuthority } from '@neutronai/runtime/workers/never-admitted-planner-retirement.ts'
-import { plannerRetirementDigest } from '@neutronai/runtime/workers/planner-authority-retirement.ts'
+import { plannerRetirementDigest, verifyPlannerAuthorityRetirement } from '@neutronai/runtime/workers/planner-authority-retirement.ts'
+import type { AdmissionLeaseRow } from '@neutronai/gateway/project-admission-store.ts'
+import { appWsProjectTopicId } from '@neutronai/wire-types/topic-id.ts'
+import { OWNER_USER_ID } from '../owner-identity.ts'
 import { loadClaudeCapacityPin, verifyCurrentConversationQuarantine, type ClaudeCapacityPin } from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { verifyHostBootObservation } from '@neutronai/runtime/workers/native-host-termination.ts'
 import { retirePlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
@@ -24,6 +27,43 @@ export interface NeverAdmittedRetirementSeams {
 }
 const OBSERVATION_TIMEOUT_MS = 5_000
 const DRAIN_TIMEOUT_MS = 10_000
+
+/** The old receipt proves producer closure, not a historical parent join for a
+ * different chat turn. The independent reset judgment names logical ownership. */
+function conversationAuthority(options: PlannerAuthorityRetirementOptions, body: NeverAdmittedPlannerAuthority): AdmissionLeaseRow[] | undefined {
+  try {
+    const entries = body.conversationLeases
+    if (entries.length === 0) return []
+    if (!options.authority || body.lease.scope.projectId === null) return
+    const topic = `${options.admission.ownerHandle}:${appWsProjectTopicId(OWNER_USER_ID, body.lease.scope.projectId)}`
+    if (body.conversationReset?.ownerAuthorized !== true || body.conversationReset.topicKey !== topic
+      || new Set(entries.map(entry => entry.lease.token)).size !== entries.length
+      || new Set(entries.map(entry => entry.lease.workRef)).size !== entries.length) return
+    const records = options.admission.maintenance.listPlannerRetirements()
+    for (const { lease, retirementOperationId } of entries) {
+      if (!isDeepStrictEqual(lease.scope, body.lease.scope) || lease.token === body.lease.token) return
+      const producer = /^(chat|acting-turn):([^:]+)$/.exec(lease.producer)
+      if (!producer || producer[2] === options.admission.bootId || !lease.workRef.startsWith(`${topic}:`)) return
+      const suffix = lease.workRef.slice(topic.length + 1)
+      if (producer[1] === 'chat'
+        ? !/^[1-9][0-9]*$/.test(suffix) || !Number.isSafeInteger(Number(suffix))
+        : !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(suffix)) return
+      const record = records.find(row => row.operationId === retirementOperationId)
+      if (!record?.completion) return
+      const authorization: unknown = JSON.parse(record.authorization)
+      if (!verifyPlannerAuthorityRetirement(authorization, options.authority)) return
+      const old = authorization.body, executor = old.observation.originalExecutor
+      const oldProducer = /^native-child:([^:]+):[a-f0-9]{64}$/.exec(old.lease.producer)
+      if (old.operationId !== retirementOperationId || old.bootId !== body.bootId || executor.bootId !== body.bootId
+        || executor.pid === process.pid || executor.pid === body.parent.pid
+        || old.parent.sessionId !== body.parent.sessionId || oldProducer?.[1] !== producer[2]
+        || !isDeepStrictEqual(old.lease, record.lease) || !isDeepStrictEqual(old.lease.scope, lease.scope)
+        || !isDeepStrictEqual(JSON.parse(record.completion), { version: 1, kind: 'planner-authority-retirement-consumed',
+          operationId: retirementOperationId, authorizationDigest: plannerRetirementDigest(authorization), nativeLoop: 'unknown', outcome: 'unknown' })) return
+    }
+    return entries.map(entry => entry.lease)
+  } catch { return }
+}
 
 function original(options: PlannerAuthorityRetirementOptions, body: NeverAdmittedPlannerAuthority): BoundedWorkRequest | undefined {
   try {
@@ -70,7 +110,8 @@ export async function retireNeverAdmittedPlanner(options: PlannerAuthorityRetire
     const boot = await bounded(() => authority.attestBoot(challenge, AbortSignal.timeout(OBSERVATION_TIMEOUT_MS)), OBSERVATION_TIMEOUT_MS)
     if (!verifyHostBootObservation(boot, authority, challenge, body.bootId) || kernel() !== body.bootId) return refused
     const request = original(options, body)
-    if (!request) return refused
+    const conversations = conversationAuthority(options, body)
+    if (!request || !conversations) return refused
     const current = options.quarantineCurrent ?? (async (b: NeverAdmittedPlannerRetirement) =>
       verifyCurrentConversationQuarantine(capacity, { operationId: b.operationId, parentSessionId: b.parent.sessionId,
         originalScopeDigest: b.quarantine.body.originalScopeDigest }, plannerRetirementDigest(b.quarantine.body),
@@ -81,23 +122,23 @@ export async function retireNeverAdmittedPlanner(options: PlannerAuthorityRetire
     const completion = JSON.stringify({ version: 1, kind: 'planner-authority-retirement-consumed', operationId: body.operationId,
       authorizationDigest: plannerRetirementDigest(raw), nativeLoop: 'unknown', outcome: 'unknown' })
     const eligible = () => kernel() === body.bootId && original(options, body) !== undefined
+      && conversationAuthority(options, body) !== undefined
     const prior = store.listPlannerRetirements().find(row => row.operationId === body.operationId)
     if (prior?.completion !== null && prior !== undefined) {
-      const status = await store.consumePlannerRetirement(body.operationId, body.lease, authorization, completion, eligible)
+      const status = await store.consumePlannerRetirement(body.operationId, body.lease, authorization, completion, eligible, conversations)
       if (status !== 'refused') await reopen()
       return { status }
     }
-    const leases = options.admission.listLeases().filter(row => row.scope.projectId === body.lease.scope.projectId)
-    if (leases.length !== 1 || !isDeepStrictEqual(leases[0], body.lease)) return refused
+    if (!store.matchesScopeLeases(body.lease.scope, [body.lease, ...conversations])) return refused
     const active = await resolveLiveProjectSessions([body.lease.scope.projectId!])
-    if (active.unresolved !== 0) return refused
+    if (active.unresolved !== 0 || (conversations.length > 0 && active.live.some(({ session }) => session.sessionId !== body.parent.sessionId))) return refused
     const sessions = await resolveLiveProjectSessions([body.lease.scope.projectId!], { includeQuarantinedSessionId: body.parent.sessionId })
     if (sessions.live.some(({ session }) => hasOtherNativeChildWorkspace(session, request)
       || !session.hasOnlyQuarantineRequest(request))) return refused
     if (!(options.inspectConversation ?? inspectConversationQuarantine)(body.parent, predicate, { request })) return refused
     // Consumption cannot retrospectively prepare the irreversible relay operation.
     if (!predicate(body.parent.sessionId) || !store.operatorMaintenanceFor(body.lease.scope, body.operationId)
-      || !await store.prepareConversationQuarantine(body.operationId, body.lease, authorization, body.parent.sessionId, eligible)) return refused
+      || !await store.prepareConversationQuarantine(body.operationId, body.lease, authorization, body.parent.sessionId, eligible, conversations)) return refused
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       await Promise.race([(options.drain ?? retirePlannerWork)(request), new Promise<never>((_, reject) => {
@@ -111,7 +152,7 @@ export async function retireNeverAdmittedPlanner(options: PlannerAuthorityRetire
     if (!await current(body)) return refused
     const status = await store.consumePlannerRetirement(body.operationId, body.lease, authorization, completion, () =>
       eligible() && predicate(body.parent.sessionId) && store.operatorMaintenanceFor(body.lease.scope, body.operationId) !== null
-      && options.admission.listLeases().filter(row => row.scope.projectId === body.lease.scope.projectId).length === 1)
+      && store.matchesScopeLeases(body.lease.scope, [body.lease, ...conversations]), conversations)
     if (status !== 'refused') await reopen()
     return { status }
 
@@ -150,17 +191,19 @@ export async function prepareNeverAdmittedPlanner(options: PlannerAuthorityRetir
     const boot = await bounded(() => authority.attestBoot(challenge, AbortSignal.timeout(OBSERVATION_TIMEOUT_MS)), OBSERVATION_TIMEOUT_MS)
     if (!verifyHostBootObservation(boot, authority, challenge, body.bootId) || kernel() !== body.bootId) return refused
     const request = original(options, body)
-    if (!request) return refused
+    const conversations = conversationAuthority(options, body)
+    if (!request || !conversations) return refused
     const store = options.admission.maintenance, predicate = (sessionId: string) => store.isConversationQuarantined(sessionId)
-    const leases = options.admission.listLeases().filter(row => row.scope.projectId === body.lease.scope.projectId)
-    if (leases.length !== 1 || !isDeepStrictEqual(leases[0], body.lease)) return refused
+    if (!store.matchesScopeLeases(body.lease.scope, [body.lease, ...conversations])) return refused
     const sessions = await resolveLiveProjectSessions([body.lease.scope.projectId!])
     if (sessions.unresolved !== 0 || sessions.live.some(({ session }) => hasOtherNativeChildWorkspace(session, request)
-      || !session.hasOnlyQuarantineRequest(request))) return refused
+      || !session.hasOnlyQuarantineRequest(request)
+      || (conversations.length > 0 && session.sessionId !== body.parent.sessionId))) return refused
     if (!(options.inspectConversation ?? inspectConversationQuarantine)(body.parent, predicate, { request })) return refused
     if (!await store.prepareConversationQuarantine(body.operationId, body.lease, authorization, body.parent.sessionId,
       () => kernel() === body.bootId && original(options, body) !== undefined
-        && (options.inspectConversation ?? inspectConversationQuarantine)(body.parent, predicate, { request }))) return refused
+        && conversationAuthority(options, body) !== undefined
+        && (options.inspectConversation ?? inspectConversationQuarantine)(body.parent, predicate, { request }), conversations)) return refused
     await bounded(() => (options.drain ?? retirePlannerWork)(request), DRAIN_TIMEOUT_MS)
     return { status: 'prepared' }
   } catch { return refused }

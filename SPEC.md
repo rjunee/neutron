@@ -352,6 +352,18 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-10-08 — Include explicitly retired dead-producer logical conversation admissions in reset.
+
+An owner-authorized logical project-conversation reset may enumerate exact stale
+chat and acting-turn admissions whose producer epochs are proven closed by
+independently signed, already-consumed recovery records. This retires host queue
+ownership, without claiming those historical turns used the planner's native
+parent or that their native effects ceased. The canonical logical topic, complete
+current scope census, exact lease multiset, durable work-reference denial and
+atomic release are mandatory. Unlisted or ambiguous ownership refuses. This
+extends the quarantine decision below; automatic reconciliation and the existing
+restricted-profile policy remain unchanged.
+
 ### 2026-10-08 — Quarantine a never-provider-admitted planner conversation.
 
 An independently authenticated operator may retire an expired submitted planner

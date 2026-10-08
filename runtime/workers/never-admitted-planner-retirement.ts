@@ -42,6 +42,12 @@ export interface NeverAdmittedPlannerAuthority {
   dispatchDigest: string
   parent: NativeDispatchParent
   nativeAgentId: null
+  /** Dead host-queue authority, not an assertion about historical native dispatch. */
+  conversationLeases: Array<{
+    lease: Omit<HostTerminationLease, 'reason'> & { reason: 'conversation' }
+    retirementOperationId: string
+  }>
+  conversationReset?: { topicKey: string; ownerAuthorized: true; censusDigest: string }
   observation: {
     producer: string
     observedAt: number
@@ -88,6 +94,15 @@ function verifyBase(value: unknown, authority: NativeHostRecoveryAuthority, capa
       || capacity.hostId !== authority.hostId || capacity.instanceId !== authority.instanceId
       || !/^[a-f0-9-]{36}$/.test(b.operationId) || !text(b.bootId) || !digest(b.evidenceDigest)
       || !digest(b.requestDigest) || !digest(b.dispatchDigest) || b.nativeAgentId !== null
+      || !Array.isArray(b.conversationLeases)
+      || b.conversationLeases.some(entry => !entry || !text(entry.retirementOperationId)
+        || entry.lease?.reason !== 'conversation' || !entry.lease.scope
+        || !text(entry.lease.scope.ownerHandle) || !text(entry.lease.scope.projectId)
+        || !text(entry.lease.token) || !text(entry.lease.producer) || !text(entry.lease.workRef)
+        || !Number.isSafeInteger(entry.lease.generation) || entry.lease.generation < 0)
+      || (b.conversationLeases.length > 0 && (!b.conversationReset
+        || b.conversationReset.ownerAuthorized !== true || !text(b.conversationReset.topicKey)
+        || !digest(b.conversationReset.censusDigest)))
       || !l || l.reason !== 'liveChild' || !l.scope || !text(l.scope.ownerHandle)
       || !(l.scope.projectId === null || text(l.scope.projectId)) || !text(l.token) || !text(l.producer) || !text(l.workRef)
       || !Number.isSafeInteger(l.generation) || l.generation < 0

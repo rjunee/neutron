@@ -57,7 +57,7 @@ async function fixture(change: Partial<BoundedWorkRequest> = {}, phase: 'submiss
   const lease = admission.listLeases('liveChild')[0]!, operationId = randomUUID()
   const preparationBody: NeverAdmittedPlannerPreparation = { version: 1, kind: 'planner-conversation-quarantine-preparation', policy: 'never-admitted-conversation-v1',
     operationId, hostId: 'host', instanceId: 'install', bootId: 'kernel', evidenceDigest: 'a'.repeat(64), lease: { ...lease, reason: 'liveChild' },
-    requestDigest: hash(request), dispatchDigest: hash(readClaudeNativeDispatchReceipt(state, request)), parent, nativeAgentId: null,
+    requestDigest: hash(request), dispatchDigest: hash(readClaudeNativeDispatchReceipt(state, request)), parent, nativeAgentId: null, conversationLeases: [],
     observation: { producer: 'operator', observedAt: Date.now(), consumedInputDigest: 'b'.repeat(64), relaySourceDigest: 'c'.repeat(64),
       originalExecutor: { pid: process.pid + 1000000, bootId: 'kernel', death: 'observed', evidenceDigest: 'd'.repeat(64) } } }
   const preparation = root.signed(preparationBody)
@@ -270,6 +270,7 @@ test('actual consumer drains the retained parent workspace and detaches without 
 test('semantic mutations oppose authentication, dispatch identity, current quarantine, drain and disabled recovery', async () => {
   const source = (await readFile(new URL('../never-admitted-planner-retirement.ts', import.meta.url), 'utf8'))
     .replace(/'(@neutronai\/[^']+)'/g, (_match, specifier: string) => JSON.stringify(import.meta.resolve(specifier)))
+    .replace("'../owner-identity.ts'", JSON.stringify(new URL('../../owner-identity.ts', import.meta.url).href))
   const directory = await mkdtemp(join(tmpdir(), 'never-admitted-mutants-')); cleanup.push(() => rm(directory, { recursive: true, force: true }))
   const mutations = [
     { name: 'signature', from: '!verifyNeverAdmittedPlannerRetirement(raw, authority, capacity)', to: 'false' },
@@ -313,4 +314,170 @@ test('unresolved other parent refuses before any conversation fence', async () =
   expect(await prepareNeverAdmittedPlanner(f.options, f.preparation)).toEqual({ status: 'refused' })
   expect(f.admission.maintenance.isConversationQuarantined(f.body.parent.sessionId)).toBe(false)
   expect(f.admission.listLeases()).toEqual([f.lease])
+})
+
+
+async function logicalConversationFixture() {
+  const f = await fixture()
+  const previous = new ProjectAdmission({ db: f.db, ownerHandle: 'owner', bootId: 'closed-epoch' })
+  const admitted = await previous.forNativeChild('project').admit('old-run', 'old-plan')
+  if (admitted.status !== 'admitted') throw Error('old fixture admission')
+  const oldLease = previous.listLeases().find(row => row.token === admitted.lease.token)!
+  const operationId = randomUUID()
+  const old = f.root.signed({ version: 1, kind: 'planner-authority-retired', policy: 'expired-closed-planner-v1',
+    operationId, hostId: 'host', instanceId: 'install', bootId: 'kernel', evidenceDigest: 'a'.repeat(64),
+    lease: oldLease, requestDigest: 'b'.repeat(64), dispatchDigest: 'c'.repeat(64), parent: f.body.parent, nativeAgentId: 'old-child',
+    observation: { producer: 'operator', observedAt: Date.now(), profile: 'neutron-planner-v1', soleTool: 'mcp__neutron__planner_work',
+      invocationDigest: 'a'.repeat(64), nativeEnforcementDigest: 'b'.repeat(64), noPostDispatchToolCalls: true,
+      originalExecutor: f.body.observation.originalExecutor } })
+  const completion = JSON.stringify({ version: 1, kind: 'planner-authority-retirement-consumed', operationId,
+    authorizationDigest: hash(old), nativeLoop: 'unknown', outcome: 'unknown' })
+  expect(await previous.maintenance.preparePlannerRetirement(operationId, oldLease, JSON.stringify(old), () => true)).toBe(true)
+  expect(await previous.maintenance.consumePlannerRetirement(operationId, oldLease, JSON.stringify(old), completion, () => true)).toBe('released')
+  const topicKey = 'owner:app:owner:project'
+  await previous.admit('project', 'conversation', 'chat', `${topicKey}:1234567`)
+  await previous.admit('project', 'conversation', 'acting-turn', `${topicKey}:${randomUUID()}`)
+  const rows = previous.listLeases('conversation')
+  f.preparation.body.conversationLeases = rows.map(lease => ({ lease: { ...lease, reason: 'conversation' as const }, retirementOperationId: operationId }))
+  f.preparation.body.conversationReset = { topicKey, ownerAuthorized: true, censusDigest: 'f'.repeat(64) }
+  const seal = () => {
+    f.preparation = f.root.signed(f.preparation.body)
+    f.body = { ...f.body, conversationLeases: f.preparation.body.conversationLeases,
+      conversationReset: f.preparation.body.conversationReset!, preparation: f.preparation }
+  }
+  seal()
+  return { ...f, previous, rows, old, completion, operationId, seal,
+    preparation: () => f.preparation, receipt: () => f.root.signed(f.body) }
+}
+
+test('owner reset retires only enumerated dead-producer logical admissions and permanently denies their replay', async () => {
+  const f = await logicalConversationFixture()
+  const before = f.admission.maintenance.listPlannerRetirements().find(row => row.operationId === f.operationId)
+  const run = f.runs.get(f.run.id), attempt = f.attempts.get(f.key)
+  await f.admission.admit('other', 'conversation', 'chat', 'other-topic:123')
+  const sibling = f.admission.listLeases().find(row => row.scope.projectId === 'other')!
+  expect(await prepareNeverAdmittedPlanner(f.options, f.preparation())).toEqual({ status: 'prepared' })
+  for (const row of f.rows) {
+    expect(f.admission.maintenance.isConversationRetired(row.scope, row.workRef)).toBe(true)
+    expect(await f.admission.maintenance.release(row)).toBe(false)
+    expect(await f.admission.maintenance.releaseWork(row.scope, 'conversation', row.workRef)).toBe(0)
+    expect(await f.admission.maintenance.admitChild(row.scope, { reason: 'conversation', workRef: row.workRef },
+      'liveChild', 'native-child:new', 'late-child')).toEqual({ status: 'fenced' })
+  }
+  expect(await retireNeverAdmittedPlanner(f.options, f.receipt())).toEqual({ status: 'released' })
+  expect(f.admission.listLeases()).toEqual([sibling])
+  expect(f.admission.maintenance.listPlannerRetirements().find(row => row.operationId === f.operationId)).toEqual(before)
+  expect(f.runs.get(f.run.id)).toEqual(run); expect(f.attempts.get(f.key)).toEqual(attempt)
+  const restarted = new ProjectAdmission({ db: f.db, ownerHandle: 'owner', bootId: 'fresh-epoch' })
+  for (const row of f.rows) expect((await restarted.admit('project', 'conversation', 'chat', row.workRef)).status).toBe('fenced')
+  expect(await retireNeverAdmittedPlanner({ ...f.options, admission: restarted }, f.receipt())).toEqual({ status: 'already-retired' })
+  expect((await restarted.admit('project', 'conversation', 'chat', 'owner:app:owner:project:7654321')).status).toBe('admitted')
+})
+
+for (const defect of ['duplicate', 'omitted', 'changed-token', 'current-epoch', 'wrong-producer', 'wrong-topic', 'wrong-suffix',
+  'missing-reset', 'unsigned-closure', 'pending-closure', 'changed-completion', 'cross-scope-closure', 'cross-session-closure', 'alive-executor'] as const) {
+  test(`logical reset refuses ${defect} without clearing or fencing ownership`, async () => {
+    const f = await logicalConversationFixture(), body = f.preparation().body
+    const entry = body.conversationLeases[0]!
+    if (defect === 'duplicate') body.conversationLeases.push(entry)
+    if (defect === 'omitted') body.conversationLeases.pop()
+    if (defect === 'changed-token') entry.lease.token = randomUUID()
+    if (defect === 'current-epoch') entry.lease.producer = 'chat:original-gateway'
+    if (defect === 'wrong-producer') entry.lease.producer = 'build:closed-epoch'
+    if (defect === 'wrong-topic') entry.lease.workRef = 'owner:app:owner:other:1234567'
+    if (defect === 'wrong-suffix') entry.lease.workRef = 'owner:app:owner:project:not-a-time'
+    if (defect === 'missing-reset') delete body.conversationReset
+    if (defect === 'unsigned-closure') f.db.runSync('UPDATE planner_authority_retirements SET authorization = ? WHERE operation_id = ?',
+      [JSON.stringify({ ...f.old, signature: 'forged' }), f.operationId])
+    if (defect === 'pending-closure') f.db.runSync('UPDATE planner_authority_retirements SET completion = NULL WHERE operation_id = ?', [f.operationId])
+    if (defect === 'changed-completion') f.db.runSync('UPDATE planner_authority_retirements SET completion = ? WHERE operation_id = ?', ['{}', f.operationId])
+    if (defect === 'cross-scope-closure' || defect === 'cross-session-closure' || defect === 'alive-executor') {
+      const oldBody = structuredClone(f.old.body)
+      if (defect === 'cross-scope-closure') oldBody.lease.scope.projectId = 'other'
+      if (defect === 'cross-session-closure') oldBody.parent.sessionId = randomUUID()
+      if (defect === 'alive-executor') oldBody.observation.originalExecutor.pid = process.pid
+      const auth = f.root.signed(oldBody)
+      const completion = JSON.stringify({ ...JSON.parse(f.completion), authorizationDigest: hash(auth) })
+      f.db.runSync('UPDATE planner_authority_retirements SET authorization = ?, completion = ? WHERE operation_id = ?',
+        [JSON.stringify(auth), completion, f.operationId])
+    }
+    f.seal()
+    const before = f.admission.listLeases()
+    expect(await prepareNeverAdmittedPlanner(f.options, f.preparation())).toEqual({ status: 'refused' })
+    expect(f.admission.listLeases()).toEqual(before)
+    expect(f.admission.maintenance.isConversationQuarantined(f.body.parent.sessionId)).toBe(false)
+  })
+}
+
+test('logical reset holds all exact leases during failed drain and refuses intervening unlisted admission', async () => {
+  const f = await logicalConversationFixture()
+  expect(await prepareNeverAdmittedPlanner({ ...f.options, drain: async () => { throw Error('unknown operation drain') } }, f.preparation()))
+    .toEqual({ status: 'refused' })
+  expect(f.admission.listLeases()).toHaveLength(3)
+  expect(f.admission.maintenance.isConversationQuarantined(f.body.parent.sessionId)).toBe(true)
+  expect(await prepareNeverAdmittedPlanner(f.options, f.preparation())).toEqual({ status: 'prepared' })
+  expect(await retireNeverAdmittedPlanner(f.options, f.receipt())).toEqual({ status: 'released' })
+  const race = await logicalConversationFixture(), attestBoot = race.options.authority.attestBoot
+  let admitted = false
+  race.options.authority.attestBoot = async (...args) => {
+    if (!admitted) { admitted = true; await race.admission.admit('project', 'conversation', 'chat', 'owner:app:owner:project:99999') }
+    return attestBoot(...args)
+  }
+  expect(await prepareNeverAdmittedPlanner(race.options, race.preparation())).toEqual({ status: 'refused' })
+  expect(race.admission.listLeases()).toHaveLength(4)
+})
+
+test('logical reset refuses another positively identified live conversation', async () => {
+  const f = await logicalConversationFixture()
+  const { ReplSession } = await import('@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts')
+  const { pool, childByKey, supervisedBySessionKey } = await import('@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts')
+  const key = `cc-agent-other-${randomUUID()}`
+  const session = new ReplSession(key, 'other-generation', randomUUID(), `neutron-${'b'.repeat(32)}`, f.dir)
+  const child = { pid: process.pid, hasExited: () => false, write() { throw Error('No parent input') }, kill() { throw Error('No termination') },
+    exited: new Promise<null>(() => {}) }
+  session.attachChild(child); session.pooledAs = Promise.resolve(session)
+  pool.set(key, session.pooledAs); childByKey.set(key, child)
+  supervisedBySessionKey.set(key, { substrate_instance_id: key, user_id: 'owner', project_id: 'project', cwd: f.dir })
+  cleanup.push(() => { pool.delete(key); childByKey.delete(key); supervisedBySessionKey.delete(key) })
+  expect(session.hasOnlyQuarantineRequest(f.request)).toBe(true)
+  const before = f.admission.listLeases()
+  expect(await prepareNeverAdmittedPlanner(f.options, f.preparation())).toEqual({ status: 'refused' })
+  expect(f.admission.listLeases()).toEqual(before)
+  expect(f.admission.maintenance.isConversationQuarantined(f.body.parent.sessionId)).toBe(false)
+  pool.delete(key); childByKey.delete(key); supervisedBySessionKey.delete(key)
+  expect(await prepareNeverAdmittedPlanner(f.options, f.preparation())).toEqual({ status: 'prepared' })
+  pool.set(key, session.pooledAs); childByKey.set(key, child)
+  supervisedBySessionKey.set(key, { substrate_instance_id: key, user_id: 'owner', project_id: 'project', cwd: f.dir })
+  expect(await retireNeverAdmittedPlanner(f.options, f.receipt())).toEqual({ status: 'refused' })
+  expect(f.admission.listLeases()).toEqual(before)
+})
+
+test('logical reset mutations expose forged closure and retired-work replay through real consumers', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'conversation-retirement-mutants-'))
+  cleanup.push(() => rm(directory, { recursive: true, force: true }))
+  const source = (await readFile(new URL('../never-admitted-planner-retirement.ts', import.meta.url), 'utf8'))
+    .replace(/'(@neutronai\/[^']+)'/g, (_match, specifier: string) => JSON.stringify(import.meta.resolve(specifier)))
+    .replace("'../owner-identity.ts'", JSON.stringify(new URL('../../owner-identity.ts', import.meta.url).href))
+  const guard = '!verifyPlannerAuthorityRetirement(authorization, options.authority)'
+  expect(source.includes(guard)).toBe(true)
+  const closureFile = join(directory, 'closure.ts'); await writeFile(closureFile, source.replace(guard, 'false'))
+  const closure = await import(closureFile) as { prepareNeverAdmittedPlanner: typeof prepareNeverAdmittedPlanner }
+  const forged = await logicalConversationFixture()
+  const bad = { ...forged.old, signature: Buffer.alloc(64).toString('base64') }
+  forged.db.runSync('UPDATE planner_authority_retirements SET authorization = ?, completion = ? WHERE operation_id = ?',
+    [JSON.stringify(bad), JSON.stringify({ ...JSON.parse(forged.completion), authorizationDigest: hash(bad) }), forged.operationId])
+  expect(await prepareNeverAdmittedPlanner(forged.options, forged.preparation())).toEqual({ status: 'refused' })
+  expect(await closure.prepareNeverAdmittedPlanner(forged.options, forged.preparation())).toEqual({ status: 'prepared' })
+
+  const valid = await logicalConversationFixture()
+  expect(await prepareNeverAdmittedPlanner(valid.options, valid.preparation())).toEqual({ status: 'prepared' })
+  expect(await retireNeverAdmittedPlanner(valid.options, valid.receipt())).toEqual({ status: 'released' })
+  const storeSource = await readFile(new URL('../../../gateway/project-admission-store.ts', import.meta.url), 'utf8')
+  const replayGuard = "|| (reason === 'conversation' && this.isConversationRetired(scope, workRef))"
+  expect(storeSource.includes(replayGuard)).toBe(true)
+  const replayFile = join(directory, 'replay.ts'); await writeFile(replayFile, storeSource.replaceAll(replayGuard, ''))
+  const replay = await import(replayFile) as { ProjectAdmissionStore: typeof import('@neutronai/gateway/project-admission-store.ts').ProjectAdmissionStore }
+  const mutantStore = new replay.ProjectAdmissionStore(valid.db), row = valid.rows[0]!
+  expect((await valid.admission.maintenance.admit(row.scope, 'conversation', 'chat:new-epoch', row.workRef)).status).toBe('fenced')
+  expect((await mutantStore.admit(row.scope, 'conversation', 'chat:new-epoch', row.workRef)).status).toBe('admitted')
 })

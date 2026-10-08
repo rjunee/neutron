@@ -19,10 +19,18 @@ planner operations and constructors use the existing drain barrier.
 `open/wiring/never-admitted-planner-retirement.ts` delivers a two-phase operation.
 Before relay quarantine, authenticated preparation atomically holds project
 admission, tombstones exact workflow authority and records the conversation fence
-in migration 0169. Only the sole unchanged terminal planner lease qualifies.
+in migration 0169. The complete project lease set must match the terminal planner
+lease plus any explicitly listed stale logical conversation admissions. A nonempty
+list requires an independently signed owner reset of the canonical project topic,
+a complete current census with no other live or unresolved conversation, and
+reverified consumed old planner authorizations proving each admission producer
+epoch closed. The old receipt does not assert that a separate historical chat turn
+used its native parent. `conversation_admission_retirements` permanently fences
+each exact logical work reference across producer epochs and admission generations.
+Unlisted, current-epoch, changed, untrusted or ambiguous ownership refuses.
 Consumption requires those exact preparation bytes, the independently signed
 capacity proof, a fresh effective-fence response and completed host drains before
-atomically releasing the lease. Unknown native outcome, failed run, original
+atomically releasing only the unchanged exact prepared leases. Unknown native outcome, failed run, original
 request, journal and result artifacts remain unchanged. Partial recovery retains
 fences and ownership; exact completed retry is idempotent.
 
@@ -44,7 +52,11 @@ state and signed Unix capacity responses in
 `open/wiring/__tests__/never-admitted-planner-retirement.test.ts`. It includes
 actual queued planner operations, a real retained `ReplSession` workspace,
 forgery and identity refusals, concurrent unrelated admission, failed drains,
-idempotent restart fences, unchanged history and zero parent control calls.
+idempotent restart fences, unchanged history and zero parent control calls. Logical
+admission controls exercise signed closed-epoch evidence, canonical topics, complete
+lease sets, concurrent admissions, explicit other live conversations, and permanent
+work-reference replay refusal after restart. Closure-authentication and replay-guard
+mutants are checked through their actual consumers, alongside the valid reset.
 Semantic mutations remove authentication, dispatch identity, effective-quarantine
 checks and drains, or disable authorized recovery; each produces the opposing
 failure. Persistent lifecycle tests exercise both supported PTY containers, fresh

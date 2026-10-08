@@ -84,14 +84,20 @@ in `docs/spec-items/a-gateway-restart-keeps-the-project-repls.md`, under
 A distinct `never-admitted-conversation-v1` policy handles an expired original
 `submission-started` planner dispatch with no observed child identity. The owner
 route `/admin/prepare-planner-conversation-quarantine` first verifies independent
-operator authorization and the sole affected canonical lease, then atomically
+operator authorization and the complete exact affected lease set, then atomically
 holds project admission and records permanent workflow and conversation fences.
 It drains accepted planner operations before reporting preparation. A separate
 capacity authority must attest complete zero-admission history and durable
 conversation quarantine; a fresh signed challenge checks that fence at release.
 The existing retirement route consumes the exact prepared authorization and
-releases only its lease. Unknown native outcome and all historical evidence stay
-unchanged. Pending or failed recovery keeps the fences and lease.
+releases only its planner lease and any explicitly enumerated stale logical
+conversation admissions. Those additional admissions require an owner-authorized
+logical-topic reset, independently authenticated consumed closure of their producer
+epoch, and a current census with no other active or unresolved conversation. Their
+exact work references remain permanently fenced in `conversation_admission_retirements`;
+this does not assert a historical native-parent join for those chat turns. Unknown
+native outcome and all historical evidence stay unchanged. Pending or failed
+recovery keeps the fences and leases.
 
 The quarantined parent is detached without process termination, registry deletion
 or native input. Adoption, continuation, watchdog replacement and pending-input
