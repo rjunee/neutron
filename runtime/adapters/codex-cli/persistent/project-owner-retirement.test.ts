@@ -8,19 +8,23 @@ import { readCompletedOwnerRetirement as readReceiptEvidence } from './project-o
 
 test('recorded live process refuses retirement recovery; its proven exit permits the same record', async () => {
   const child = Bun.spawn(['sleep', '30'], { stdout: 'ignore', stderr: 'ignore' })
+  let childLive = true
+  const exited = child.exited.then(code => { childLive = false; return code })
   try {
     const identity = helperIdentity(child.pid)
     expect(() => assertOwnerProcessDead(identity)).toThrow('still live')
-    child.kill(); await child.exited
+    if (childLive) child.kill(); await exited
     expect(() => assertOwnerProcessDead(identity)).not.toThrow()
     expect(() => assertOwnerProcessDead({ ...identity, pid: 0 })).toThrow('incomplete')
     expect(() => assertOwnerProcessDead({ ...identity, boot: '' })).toThrow('incomplete')
-  } finally { child.kill(); await child.exited }
+  } finally { if (childLive) child.kill(); await exited }
 })
 
 test('completed generation preserves history and permits only its exact successor after all owners exit', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'owner-retirement-'))
   const child = Bun.spawn(['sleep', '30'], { stdout: 'ignore', stderr: 'ignore' })
+  let childLive = true
+  const exited = child.exited.then(code => { childLive = false; return code })
   try {
     const identity = helperIdentity(child.pid)
     mkdirSync(join(dir, 'sessions'))
@@ -37,7 +41,7 @@ test('completed generation preserves history and permits only its exact successo
     const path = join(dir, '.neutron-owner-retired.json')
     writeFileSync(path, JSON.stringify(receipt), { mode: 0o600 })
     expect(() => readCompletedOwnerRetirement(dir)).toThrow('still live')
-    child.kill(); await child.exited
+    if (childLive) child.kill(); await exited
     expect(readCompletedOwnerRetirement(dir)).toEqual(receipt)
     expect(readCompletedOwnerRetirement).toBe(readReceiptEvidence)
     // Each process-death assertion must stand alone; another dead process is
@@ -62,5 +66,5 @@ test('completed generation preserves history and permits only its exact successo
     expect(() => readCompletedOwnerRetirement(dir)).toThrow('corroborated')
     writeFileSync(path, JSON.stringify({ ...receipt, native: { ...receipt.native, signal: null } }))
     expect(() => readCompletedOwnerRetirement(dir)).toThrow('corroborated')
-  } finally { child.kill(); await child.exited; rmSync(dir, { recursive: true, force: true }) }
+  } finally { if (childLive) child.kill(); await exited; rmSync(dir, { recursive: true, force: true }) }
 })
