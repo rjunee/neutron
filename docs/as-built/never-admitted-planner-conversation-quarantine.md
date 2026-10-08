@@ -34,7 +34,10 @@ retained workspace may participate in preparation only when all occupied slots
 positively belong to the exact original request. Detachment still requires those
 slots to drain. Ordinary census excludes the quarantined history; the recovery
 consumer can inspect only the exact original identity for its final workspace
-drain. Unknown other parents remain refusal evidence.
+drain. Unknown other parents remain refusal evidence. Only an already supervised exact
+predecessor can transfer its registered owner options to a durable successor;
+raw unregistered constructors retain their original shutdown behavior, covered
+by the existing pane-handle persistence and exit-ownership controls.
 
 Validation exercises the authenticated HTTP surface with real canonical SQLite
 state and signed Unix capacity responses in

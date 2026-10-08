@@ -667,6 +667,7 @@ async function disposeEphemeralSession(session: ReplSession): Promise<void> {
  * purposes never share a transcript. A session-ful dispatch always pools.
  */
 export function createPersistentReplSubstrate(options: PersistentReplSubstrateOptions): Substrate {
+  const originalSessionKey = poolKeyFor(options)
   const inactivityDefaultMs = options.turnTimeoutMs ?? DEFAULT_TURN_INACTIVITY_MS
   const absoluteCeilingDefaultMs =
     options.turnAbsoluteCeilingMs ?? DEFAULT_TURN_ABSOLUTE_CEILING_MS
@@ -679,8 +680,15 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
       if (spec.session !== undefined) assertConversationAvailable(options, spec.session.id)
       // A long-lived substrate must observe quarantine committed after creation.
       const sessionKey = poolKeyFor(options)
-      if (options.replRegistryPath !== undefined && !supervisedBySessionKey.has(sessionKey)) {
-        supervisedBySessionKey.set(sessionKey, options)
+      if (sessionKey !== originalSessionKey && !supervisedBySessionKey.has(sessionKey)) {
+        // Only an already supervised owner can transfer its registration to the
+        // exact durable successor. A raw substrate with a registry is still
+        // unsupervised; constructing one must not change shutdown ownership.
+        const owner = supervisedBySessionKey.get(originalSessionKey)
+        if (owner !== undefined && owner.replRegistryPath === options.replRegistryPath
+          && availableConversationKey(originalSessionKey, owner) === sessionKey) {
+          supervisedBySessionKey.set(sessionKey, owner)
+        }
       }
       const channel = new EventChannel()
       let cancelled = false

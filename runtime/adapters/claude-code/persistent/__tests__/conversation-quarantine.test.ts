@@ -9,7 +9,7 @@ import { childByKey, committedDispatches, pendingSpawns, pool, supervisedBySessi
 import { beginBootAdoption, reconcileOwnRepl, resetBootAdoptionForTests } from '../boot-adoption.ts'
 import { getOrSpawnSession, injectMessage, resolveResumeDirective } from '../spawn.ts'
 import { getRecord, upsertRecord, type ReplRegistryRecord } from '../repl-registry.ts'
-import { respawnReplSession, runReplWatchdogTick } from '../supervision.ts'
+import { registerSupervisedSubstrate, respawnReplSession, runReplWatchdogTick } from '../supervision.ts'
 import { readStartupRepl, recoverStartupRepl } from '../startup-recovery.ts'
 import { drainPendingRespawns } from '../pending-respawn.ts'
 import { enqueuePendingRespawn } from '../pending-respawns-queue.ts'
@@ -80,6 +80,9 @@ for (const hostKind of ['detachable-pane', 'in-process-pty'] as const) {
     f.options.jsonlExistsProbe = () => true
     f.options.captureConfig = { maxAttempts: 1, attemptDelayMs: 1 }
     cleanup.push(() => { for (const c of transport.children) c.child.kill() })
+    // Production registers supervision separately; same-key registration can
+    // clone options while retaining attested scope, so object identity is not authority.
+    registerSupervisedSubstrate({ ...f.options })
     const substrate = createPersistentReplSubstrate(f.options)
     const spec = { prompt: 'original input stays in the original conversation', tools: [], model_preference: ['claude-opus'] }
     await drain(substrate.start(spec))
@@ -128,6 +131,7 @@ for (const hostKind of ['detachable-pane', 'in-process-pty'] as const) {
     await drain(substrate.start({ ...spec, prompt: 'new independent input' }))
     const fresh = await pool.get(freshKey)!
     expect(fresh.sessionId).not.toBe(old.sessionId)
+    expect(supervisedBySessionKey.get(freshKey)).toBe(supervisedBySessionKey.get(f.key))
     expect(argvs[1]).not.toContain('--resume')
     expect(argvs[1]![argvs[1]!.indexOf('--session-id') + 1]).toBe(fresh.sessionId)
     expect(transport.children[0]!.prompts).toEqual([spec.prompt])
