@@ -8,6 +8,7 @@ import { constants } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createHash } from 'node:crypto'
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { setTimeout as delay } from 'node:timers/promises'
 import { createProjectRunners, decodeProjectTrailer, type ProjectTrailerDecoder, type ProjectActingTurn } from '@neutronai/runtime/workers/project-runners.ts'
 import { createClaudeActingTurn } from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { CLAUDE_CONTINUATION_PROFILE, continueClaudeNativeChild, readClaudeContinuationResult, type ClaudeQuotaState } from '@neutronai/runtime/workers/claude-native-continuation.ts'
@@ -591,7 +592,20 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       const brief = await readFile(turn.request.brief.path, 'utf8')
       if (briefIntegrity(brief) !== turn.request.brief.integrity) throw Error('Planner brief integrity changed')
       plannerCapability = await bindPlannerWork({ session, request: turn.request, get deadline() { return turn.dispatchBudget?.deadline_ms ?? deadline }, signal: turn.signal, base: run.base_sha!, pr: hostContext.snapshot.pr, brief, context: hostContext,
-        current: () => !session.hasChildExited() && ownsNativeChildWorkspace(admitted, session, turn.request) && nativeChildCensusKnown(admitted),
+        current: async () => {
+          // Fresh sibling leases precede their local worktree measurements.
+          // Every planner operation waits for that census, not only initial bind.
+          // Lost own authority refuses immediately; unknown/foreign children
+          // cannot acquire proof merely by waiting under the original deadline.
+          while (!session.hasChildExited() && ownsNativeChildWorkspace(admitted, session, turn.request)) {
+            const remaining = (turn.dispatchBudget?.deadline_ms ?? deadline) - Date.now()
+            if (turn.signal.aborted || remaining <= 0) return false
+            if (nativeChildCensusKnown(admitted)) return true
+            try { await delay(Math.min(25, remaining), undefined, { signal: turn.signal }) }
+            catch { return false }
+          }
+          return false
+        },
         validate: envelope => ['completed', 'blocked'].includes(decodeProjectTrailer(JSON.stringify(envelope), turn.request, trailer).kind) })
     }
     enterActor()

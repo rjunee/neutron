@@ -48,7 +48,7 @@ const MAX_BYTES = 1024 * 1024
 export async function bindPlannerWork(input: {
   session: Session; request: BoundedWorkRequest; deadline: number; signal: AbortSignal
   base: string; pr: unknown; brief: string; context: unknown
-  current(): boolean
+  current(): boolean | Promise<boolean>
   validate(envelope: unknown): boolean
 }): Promise<string> {
   const request = structuredClone(input.request)
@@ -62,7 +62,11 @@ export async function bindPlannerWork(input: {
   const writes = new Map<string, string>()
   let chain: Promise<unknown> = Promise.resolve()
   const active = async () => {
-    if (terminal || input.signal.aborted || Date.now() >= input.deadline || !input.current()) throw Error('Planner operation grant expired or lost ownership')
+    if (terminal || input.signal.aborted || Date.now() >= input.deadline) throw Error('Planner operation grant expired or lost ownership')
+    const current = await input.current()
+    // Waiting for a sibling proof grants no fresh budget and cannot outlive
+    // cancellation, termination or loss of this operation's original authority.
+    if (terminal || input.signal.aborted || Date.now() >= input.deadline || !current) throw Error('Planner operation grant expired or lost ownership')
     const now = await lstat(root)
     if (now.dev !== rootStat.dev || now.ino !== rootStat.ino || await realpath(root) !== root) throw Error('Planner worktree identity changed')
   }

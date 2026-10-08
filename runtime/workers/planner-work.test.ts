@@ -8,7 +8,7 @@ import * as implementation from './planner-work.ts'
 
 const roots: string[] = []
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
-async function fixture(api = implementation) {
+async function fixture(api = implementation, authorization?: { current(): boolean | Promise<boolean>; deadline?(): number }) {
   const root = await mkdtemp(join(tmpdir(), 'planner-ops-')); roots.push(root)
   const cwd = join(root, 'worktree'), state = join(root, 'state')
   await mkdir(cwd); await mkdir(state)
@@ -23,8 +23,9 @@ async function fixture(api = implementation) {
     result: { path: join(state, 'result'), schema: 'plan-fixture' }, thread: null, budget: { wall_ms: 60_000 }, needs_approval_decision: false }
   const session = {}, cancel = new AbortController()
   let current = true
-  const capability = await api.bindPlannerWork({ session, request, base, pr: null, brief: 'Host brief', context: { request }, signal: cancel.signal, deadline: Date.now() + 60_000,
-    current: () => current, validate: envelope => (envelope as { kind: string }).kind === 'blocked'
+  const deadline = Date.now() + 60_000
+  const capability = await api.bindPlannerWork({ session, request, base, pr: null, brief: 'Host brief', context: { request }, signal: cancel.signal, get deadline() { return authorization?.deadline?.() ?? deadline },
+    current: () => authorization ? authorization.current() : current, validate: envelope => (envelope as { kind: string }).kind === 'blocked'
       || typeof (envelope as { result?: { payload?: { executionSpec?: string } } }).result?.payload?.executionSpec === 'string' })
   const call = (operation: string, fields: object = {}) => api.dispatchPlannerWork(session, { run_id: request.run_id, step_id: request.step_id, capability, operation, ...fields })
   return { root, cwd, state, base, request, session, capability, call, git, cancel, revoke: () => { current = false } }
@@ -140,5 +141,92 @@ test('semantic mutations expose executable diagnostics and lost legitimate prepa
     await writeFile(path, source.replace(mutation.from, mutation.to))
     const api = await import(path) as typeof implementation
     await mutation.check(await fixture(api))
+  }
+})
+
+
+const plannerBarrier = () => {
+  let release!: () => void
+  return { promise: new Promise<void>(resolve => { release = resolve }), release: () => release() }
+}
+
+test('planner binding and every operation await current host authorization', async () => {
+  let pause = plannerBarrier(), entered = plannerBarrier(), waiting = true
+  const authorization = { current: async () => { if (waiting) { entered.release(); await pause.promise }; return true } }
+  const preparing = fixture(implementation, authorization)
+  await entered.promise
+  expect(Bun.peek.status(preparing)).toBe('pending')
+  waiting = false; pause.release()
+  const f = await preparing
+  for (const operation of ['brief', 'read', 'write', 'publish'] as const) {
+    pause = plannerBarrier(); entered = plannerBarrier(); waiting = true
+    const fields = operation === 'read' ? { path: 'source.ts' }
+      : operation === 'write' ? { path: 'during-wait.ts', content: 'export const useful = true' }
+      : operation === 'publish' ? { blocked: 'Host-authorized result.' } : {}
+    const running = f.call(operation, fields)
+    await entered.promise
+    expect(Bun.peek.status(running)).toBe('pending')
+    if (operation === 'write') await expect(access(join(f.cwd, 'during-wait.ts'))).rejects.toThrow()
+    if (operation === 'publish') await expect(access(f.request.result.path)).rejects.toThrow()
+    waiting = false; pause.release()
+    await running
+  }
+  expect(await readFile(join(f.cwd, 'during-wait.ts'), 'utf8')).toContain('useful')
+  expect(JSON.parse(await readFile(f.request.result.path, 'utf8')).kind).toBe('blocked')
+})
+
+test.each(['false', 'cancelled', 'expired'] as const)('planner rechecks %s authorization after awaiting before writes or publication', async change => {
+  for (const operation of ['brief', 'write', 'publish'] as const) {
+    let waiting = false, allowed = true, deadline = Date.now() + 60_000
+    const pause = plannerBarrier(), entered = plannerBarrier()
+    const f = await fixture(implementation, { deadline: () => deadline,
+      current: async () => { if (waiting) { entered.release(); await pause.promise }; return allowed } })
+    waiting = true
+    const fields = operation === 'write' ? { path: 'refused.ts', content: 'must not escape' } : operation === 'publish' ? { blocked: 'must not publish' } : {}
+    const running = f.call(operation, fields)
+    await entered.promise
+    if (change === 'false') allowed = false
+    if (change === 'cancelled') f.cancel.abort()
+    if (change === 'expired') deadline = Date.now() - 1
+    pause.release()
+    await expect(running).rejects.toThrow('expired or lost ownership')
+    await expect(access(join(f.cwd, 'refused.ts'))).rejects.toThrow()
+    await expect(access(f.request.result.path)).rejects.toThrow()
+  }
+})
+
+test('planner async authorization semantic mutants cannot authorize false grants or discard legitimate waiting', async () => {
+  const source = await readFile(new URL('./planner-work.ts', import.meta.url), 'utf8')
+  const directory = await mkdtemp(join(tmpdir(), 'planner-current-mutants-')); roots.push(directory)
+  const anchor = 'const current = await input.current()'
+  expect(source.split(anchor)).toHaveLength(2)
+  const unsafe = join(directory, 'skip-await.ts')
+  await writeFile(unsafe, source.replace(anchor, 'const current = input.current()'))
+  const unsafeApi = await import(unsafe) as typeof implementation
+  // Positive opposite: the same false asynchronous host decision must refuse.
+  await expect(fixture(implementation, { current: async () => false })).rejects.toThrow('lost ownership')
+  const escaped = await fixture(unsafeApi, { current: async () => false })
+  expect(await escaped.call('write', { path: 'escaped.ts', content: 'unsafe mutant' })).toMatchObject({ written: 'escaped.ts' })
+  expect(await readFile(join(escaped.cwd, 'escaped.ts'), 'utf8')).toBe('unsafe mutant')
+  const deny = join(directory, 'deny-current.ts')
+  await writeFile(deny, source.replace(anchor, 'const current = false'))
+  const denyApi = await import(deny) as typeof implementation
+  const allowed = await fixture(implementation, { current: async () => true })
+  expect(await allowed.call('brief')).toMatchObject({ brief: 'Host brief' })
+  await expect(fixture(denyApi, { current: async () => true })).rejects.toThrow('lost ownership')
+  const recheck = "if (terminal || input.signal.aborted || Date.now() >= input.deadline || !current)"
+  expect(source.split(recheck)).toHaveLength(2)
+  const stale = join(directory, 'skip-post-await-deadline.ts')
+  await writeFile(stale, source.replace(recheck, 'if (!current)'))
+  const staleApi = await import(stale) as typeof implementation
+  for (const api of [implementation, staleApi]) {
+    let deadline = Date.now() + 60_000, expire = false
+    const f = await fixture(api, { deadline: () => deadline,
+      current: async () => { if (expire) deadline = Date.now() - 1; return true } })
+    expire = true
+    // The brief operation has no downstream Git timeout to hide the missing
+    // post-await authorization check. The original must refuse at active().
+    if (api === implementation) await expect(f.call('brief')).rejects.toThrow('lost ownership')
+    else expect(await f.call('brief')).toMatchObject({ brief: 'Host brief' })
   }
 })
