@@ -46,6 +46,37 @@ function scopeKey(scope: ProjectAdmissionScope): string {
 export class ProjectAdmissionStore {
   constructor(private readonly db: ProjectDb) {}
 
+  isConversationQuarantined(sessionId: string): boolean {
+    return Boolean(this.db.get('SELECT 1 FROM native_conversation_quarantines WHERE session_id = ?', [sessionId]));
+  }
+
+  /** Exact terminal work is the sole affected lease. The operator hold, work
+   * tombstone and conversation guard publish in one transaction before drain. */
+  async prepareConversationQuarantine(operationId: string, lease: AdmissionLeaseRow, authorization: string,
+    sessionId: string, eligible: () => boolean): Promise<boolean> {
+    if (!sessionId.trim() || !authorization.trim() || !/^[a-f0-9-]{36}$/.test(operationId)) return false;
+    return this.db.transaction(async tx => {
+      const key = scopeKey(lease.scope);
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      const prior = tx.get<{ session_id: string; operation_id: string; scope_key: string; authorization: string }>(
+        'SELECT * FROM native_conversation_quarantines WHERE session_id = ? OR operation_id = ?', [sessionId, operationId]);
+      if (prior) return prior.session_id === sessionId && prior.operation_id === operationId && prior.scope_key === key && prior.authorization === authorization
+        && this.operatorMaintenanceFor(lease.scope, operationId) !== null
+        && this.plannerLeaseEligible(tx, lease, eligible);
+      if (this.inspect(lease.scope)?.leases !== 1 || !this.plannerLeaseEligible(tx, lease, eligible)) return false;
+      if (this.isPlannerRetired(lease.scope, lease.workRef)) return false;
+      const hold = await this.holdOperatorMaintenanceInTransaction(tx, lease.scope, operationId);
+      if (!hold) return false;
+      tx.runSync(`INSERT INTO planner_authority_retirements
+        (operation_id, scope_key, generation, lease_token, reason, producer, work_ref, authorization)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [operationId, key, lease.generation, lease.token, lease.reason, lease.producer, lease.workRef, authorization]);
+      tx.runSync(`INSERT INTO native_conversation_quarantines (session_id, operation_id, scope_key, authorization)
+        VALUES (?, ?, ?, ?)`, [sessionId, operationId, key, authorization]);
+      return true;
+    });
+  }
+
   readNativeContinuation(lease: AdmissionLeaseRow): string | undefined {
     return this.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations WHERE lease_token = ? ORDER BY rowid DESC LIMIT 1', [lease.token])?.preparation;
   }

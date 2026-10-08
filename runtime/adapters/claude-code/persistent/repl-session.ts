@@ -17,7 +17,8 @@ import type { SessionSizeWatchdog } from './session-size-watchdog.ts'
 import { CHILD_KILL_GRACE_MS, ZERO_USAGE, defaultIsPidAlive } from './signatures.ts'
 import type { ActiveTurn } from './types.ts'
 import { defaultSinkTokenPath, loadOrCreateSinkToken } from './sink-coordinates.ts'
-import { independentNativeChildren, markNativeChildWorkspaceAmbiguous, nativeChildWorkspaceAmbiguous, nativeChildWorkspaceCompletion, sameNativeChildWorkspace, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
+import { independentNativeChildren, markNativeChildWorkspaceAmbiguous, nativeChildWorkspaceAmbiguous, nativeChildWorkspaceCompletion, ownsNativeChildWorkspace, sameNativeChildWorkspace, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
+import type { BoundedWorkRequest } from '../../../bounded-work.ts'
 import { nativeRelayRouteFingerprint } from '../../../workers/claude-capacity-client.ts'
 
 // ---------------------------------------------------------------------------
@@ -481,6 +482,8 @@ export class ReplSession {
    * complete a turn using output produced on a pane another gateway now owns.
    */
   fenced = false
+  /** Durable authority reader, shared by fresh and adopted sessions. */
+  isConversationQuarantined: ((sessionId: string) => boolean) | undefined
 
   onReply(text: string, turnId?: string): void {
     // FENCED SESSIONS ACCEPT NOTHING (r49). This is round forty-seven's "claim before you are
@@ -574,6 +577,22 @@ export class ReplSession {
 
   private readonly backgroundChildren = new Map<Promise<void>, NativeChildWorkspace | undefined>()
 
+  /** Preparation may retain only the exact request's positively bound background
+   * slots. Unknown readers, another request, queued input and active submission
+   * remain busy. Completion still requires zero slots after authority drain. */
+  hasOnlyQuarantineRequest(request: BoundedWorkRequest): boolean {
+    return this.activeTurn === undefined && !this.parentSlotActive && this.parentQueue.length === 0
+      && this.turnSlotHeld === this.backgroundChildren.size
+      && [...this.backgroundChildren.values()].every(workspace =>
+        workspace !== undefined && ownsNativeChildWorkspace(workspace, this, request))
+  }
+
+  private assertConversationAvailable(): void {
+    if (this.fenced || this.isConversationQuarantined?.(this.sessionId)) {
+      throw new Error('persistent-repl: conversation permanently quarantined')
+    }
+  }
+
   private drainParentQueue(): void {
     if (this.parentSlotActive || this.parentQueue.length === 0) return
     // Normal submissions remain FIFO. Only a continuation can overtake a head
@@ -601,6 +620,7 @@ export class ReplSession {
   }
 
   private async acquireTurnSlot(backgroundDispatch: ((yieldDispatch: () => void) => void) | undefined, workspace: NativeChildWorkspace | undefined, continuation: boolean): Promise<() => void> {
+    this.assertConversationAvailable()
     let parentReleased = false
     const release = () => {
       if (parentReleased) return
@@ -628,6 +648,11 @@ export class ReplSession {
         && (!backgroundDispatch || !independentNativeChildren(workspace, prior))) })
       this.drainParentQueue()
     })
+    try { this.assertConversationAvailable() } catch (error) {
+      this.turnSlotHeld -= 1
+      release()
+      throw error
+    }
     let released = false
     let finishReader!: () => void
     const reader = new Promise<void>(resolve => { finishReader = resolve })

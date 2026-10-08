@@ -169,3 +169,8 @@ export function retireNativeChildWorkspaceRequest(session: object, request: Boun
     record.finish()
   }
 }
+
+/** A conversation-wide quarantine may close only its exact prepared work. */
+export function hasOtherNativeChildWorkspace(session: object, request: BoundedWorkRequest): boolean {
+  return [...sessions.get(session) ?? []].some(record => !record.completed && !isDeepStrictEqual(record.request, request))
+}

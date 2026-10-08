@@ -42,6 +42,8 @@ export interface FindLatestSessionOpts {
    *  just failed to resume (and dropped us into the picker), so the recovery
    *  never "recovers" the very session that just failed. */
   excludeSessionId?: string
+  /** Durable deny authority. Unknown authority throws instead of choosing history. */
+  isConversationQuarantined?: ((sessionId: string) => boolean) | undefined
 }
 
 /**
@@ -75,6 +77,7 @@ export function findLatestResumableSession(
     const sessionId = name.slice(0, -'.jsonl'.length)
     if (!sessionId) continue
     if (opts.excludeSessionId !== undefined && sessionId === opts.excludeSessionId) continue
+    if (opts.isConversationQuarantined?.(sessionId)) continue
 
     const full = join(dir, name)
     let st: ReturnType<typeof statSync>

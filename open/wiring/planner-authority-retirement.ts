@@ -74,6 +74,10 @@ function original(options: PlannerAuthorityRetirementOptions, body: PlannerAutho
 export async function retirePlannerAuthority(options: PlannerAuthorityRetirementOptions, raw: unknown): Promise<{
   status: 'released' | 'already-retired' | 'refused'
 }> {
+  if (raw && typeof raw === 'object' && (raw as { body?: { policy?: unknown } }).body?.policy === 'never-admitted-conversation-v1') {
+    const { retireNeverAdmittedPlanner } = await import('./never-admitted-planner-retirement.ts')
+    return retireNeverAdmittedPlanner(options, raw)
+  }
   const refused = { status: 'refused' as const }
   try {
     const authority = options.authority

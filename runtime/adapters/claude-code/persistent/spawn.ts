@@ -1,4 +1,5 @@
 import { observeSession } from './observe-workers.ts'
+import { assertConversationAvailable } from './conversation-quarantine-guard.ts'
 import { describeWorkerObservation } from './worker-observation.ts'
 // persistent-repl-substrate.ts → spawn.ts
 // Session spawn / resume / turn-inject machinery + the respawn in-flight gate
@@ -173,6 +174,7 @@ async function spawnSession(
   // instead of cold-spawning a fresh `--session-id`. This is the wiring that
   // closes the S1 context-loss gap.
   const sessionId = resume?.sessionId ?? (options.idGen ?? randomUUID)()
+  assertConversationAvailable(options, sessionId)
   // 16 bytes, not 4 (adversarial security review 2026-07-20). This value names
   // the per-session config files below, and one of them carries the MCP sink
   // TOKEN in plaintext. 4 bytes is guessable/squattable by any same-uid process;
@@ -189,6 +191,7 @@ async function spawnSession(
   // the sink registration (the original reason this block sat before the spawn).
   const childGeneration = randomUUID()
   const session = new ReplSession(sessionKey, childGeneration, sessionId, channelName, cwd)
+  session.isConversationQuarantined = options.isConversationQuarantined
   // THE CREDENTIAL THIS CHILD WILL PRESENT — `HMAC(root token, childGeneration)`,
   // derived by the sink so the value baked here and the value the sink authorizes
   // cannot drift. It replaces the shared root token in every place the child is handed
@@ -600,6 +603,7 @@ async function spawnSession(
           argv, tools: toolSurface, cwd, env: launchEnv })
         : undefined
       disposableLifecycle?.checkpoint()
+      assertConversationAvailable(options, sessionId)
       child = await ptyHost.spawn(launch?.argv ?? argv, {
       cwd,
       env: launch?.env ?? launchEnv,
@@ -1210,6 +1214,7 @@ export function resolveResumeDirective(
   }
   const record = normaliseRecord(state.registry[sessionKey])
   if (record === undefined) return undefined
+  assertConversationAvailable(options, record.sessionId)
   const resolutionInput: { session_id?: string; has_session: boolean } = {
     has_session: record.has_session,
   }
@@ -1590,6 +1595,7 @@ export async function getOrSpawnSession(
    *  (see the stale-turn branch below). Callers pass nothing. */
   staleTurnReentries: number = 0,
 ): Promise<ReplSession> {
+  if (forceResume !== undefined) assertConversationAvailable(options, forceResume.sessionId)
   assertFailedSpawnReaped(sessionKey)
   // #539 — NOTHING MAY SPAWN ON A KEY WHOSE SURVIVING REPL HAS NOT BEEN RECONCILED.
   // Under the herdr host a gateway restart leaves the previous REPL running, so a
@@ -1678,6 +1684,7 @@ export async function getOrSpawnSession(
   let evictedForceFresh = false
   if (existing !== undefined) {
     const session = await existing
+    assertConversationAvailable(options, session.sessionId)
     if (terminatingWarmSessions.has(session)) {
       if (!session.hasChildExited()) throw new PaneOwnershipRefusedError('persistent-repl: previous warm owner has not exited')
       terminatingWarmSessions.delete(session)
@@ -1780,6 +1787,9 @@ export async function getOrSpawnSession(
         throw new PaneOwnershipRefusedError('persistent-repl: warm owner changed during profile resolution')
       }
       const freshMcpServers = session.mcpFingerprint === requestedMcpFingerprint
+      // Profile resolution awaited external configuration. Quarantine may have
+      // committed meanwhile; refuse before either reuse OR destructive eviction.
+      assertConversationAvailable(options, session.sessionId)
       // ABANDON-POISON guard (2026-06-18 warm-session hang fix): a session whose
       // prior turn was abandoned (caller timeout / substrate turn-timeout) is left
       // with a RUNAWAY turn still executing on the warm child + a desynced
@@ -1994,6 +2004,8 @@ export async function injectMessage(
   turnId: string,
   additional = false,
 ): Promise<void> {
+  if (session.fenced) throw new Error('persistent-repl: fenced conversation cannot accept input')
+  assertConversationAvailable(session, session.sessionId)
   const channelPort = session.channelPort
   if (channelPort === undefined) {
     throw new Error('persistent-repl: inject before the dev-channel bound a port')
@@ -2013,6 +2025,7 @@ export async function injectMessage(
     if (!retired.ok) throw new Error('persistent-repl: native failed-turn correlation retirement unavailable')
     if (session.failedNativeTurnId === failedTurnId) session.failedNativeTurnId = undefined
   }
+  assertConversationAvailable(session, session.sessionId)
   session.armNativeTurn(turnId)
   const resp = await fetch(`http://127.0.0.1:${channelPort}/message`, {
     method: 'POST',

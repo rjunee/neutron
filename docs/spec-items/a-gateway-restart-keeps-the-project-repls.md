@@ -620,6 +620,112 @@ independent activity and census guards remain authoritative.
       permanent-retirement guards are bypassed. Verify with bidirectional
       mutations in the dedicated integration tests and planner operation tests.
 
+### Operator quarantine of a never-provider-admitted planner conversation
+
+The owner-directed conversation quarantine policy (Decisions Log 2026-10-08)
+adds a separately versioned eligibility case, `never-admitted-conversation-v1`,
+for an exact expired planner request whose authenticated original dispatch ended
+at `submission-started`, without a native child identity. It does not change the
+child-bound restricted-profile retirement policy or whole-host termination.
+It retires host-issued workflow authority, not native execution: parent liveness,
+local hooks, other native effects and task outcome remain unknown. No completed
+result, actual child-profile selection or physical cessation is inferred.
+
+Eligibility requires the original signed request and dispatch, canonical terminal
+run and prepared/started native attempt, exact unchanged live-child lease, expired
+original signed deadline, and original parent process, session, generation and
+launch relay identity. The request is writable `plan`, `tools: edit`, network
+false. Retained evidence must bind the original one-shot consumed input to this
+request, its pinned native executable and original routing configuration. A
+missing child binding remains explicitly null. Parent-only metadata, deadline
+expiry, a missing worktree, an API-error transcript or an operator signature
+without complete custody evidence cannot establish eligibility.
+
+Before any relay quarantine, an independently signed application preparation
+binds the exact original lease, request, dispatch and conversation. The application
+checks the complete affected-work census and commits its project maintenance hold,
+conversation guard and exact-work tombstone together, then drains host grants.
+The operator verifies that preparation before invoking root-only relay quarantine.
+Final release authorization embeds that exact signed preparation and the capacity
+owner receipt; neither phase can substitute another operation or authorization.
+
+Before issuing release authority, the independent relay owner must persist an
+irreversible quarantine for the installation and original native conversation
+identity. The atomic boundary shares serialization with provider admission:
+no request may pass admission/forwarding while an absence check is stale. The
+owner must validate the complete current ledger and all linked historical
+archives for the exact original launch scope. Any provider-admission record,
+including unknown, rejected or zero-sequence admission, or any missing, corrupt,
+ambiguous or unaccounted history refuses authorization. A request sequence alone
+is not provider admission. Missing history is never treated as an empty history.
+The historical source and routing pins must establish that admission was durable
+before every possible provider forward under this original launch scope.
+
+Quarantine denies registration, ingress and forwarding for that conversation
+under every current or future relay scope, credential, token or generation,
+including after daemon restart. It aborts and drains all already accepted relay
+requests for the conversation; inability to establish the drain retains the
+fence and cannot produce a completion receipt. A refusal or crash after fencing
+must not reopen the conversation. The owner receipt binds operation, installation,
+conversation and original scope, full lease, signed request/dispatch digests,
+parent identity, custody/source evidence digests, and committed quarantine/drain
+proof. The application verifies against its independently configured operator
+key and verifies that the durable quarantine is still effective; bearer access
+alone cannot authorize recovery or nominate the verification key.
+
+This operation removes provider access for the entire affected conversation.
+Its affected-work census must account for all current ownership and queued work
+before preparation. Unrelated or ambiguous active work in that conversation
+refuses; other conversations, project sessions and leases are untouched. Operator
+execution requires authorization for this specific conversation consequence.
+No parent input, signal, process termination or host reboot is part of quarantine.
+
+Before releasing workflow ownership, persist the exact run/step retirement and
+conversation quarantine in the canonical application store. Apply their guards
+before admission, grant construction, host operations, continuation, adoption,
+boot recovery and any resumable-session lookup. Drain constructing and accepted
+planner host operations. Account for the original executor's operations through
+verified original-executor closure or a positively identified live-executor
+barrier, as well as the consuming executor's drain. An unknown original executor,
+partial drain, changed lease, pending whole-host termination preparation or
+conflicting maintenance fence retains ownership. Existing restriction and
+whole-host receipt versions retain their original meanings.
+
+Consume completion and remove only the unchanged exact lease atomically, retaining
+immutable preparation, quarantine and completion records. Consumption is
+idempotent and leaves native outcome, run/attempt history, dispatch, reservations
+and result artifacts unchanged. Quarantine remains even after lease consumption.
+Keep the original transcript as history, but never adopt, resume or copy its
+pending input into an active replacement conversation through canonical recovery.
+Any subsequent conversation must start with a fresh identity and no replay of
+quarantined input; opening it does not redispatch the retired workflow. Permanent
+run/step denial survives new tokens, generations, gateway restart and duplicate
+requests. Normal parent lifecycle and composer guards remain authoritative.
+
+- [ ] A complete zero-admission original scope can be quarantined and its exact
+      terminal planner lease consumed with parent process and unknown native
+      outcome preserved. A fresh conversation can perform new canonical work
+      without loading the quarantined input; unrelated sessions remain usable.
+- [ ] Any admission in current or archived history, missing/corrupt history,
+      mismatched routing/source/session/lease or forged authority refuses.
+      Positive historical-admission controls must fail an omission mutation.
+- [ ] Concurrent admission and quarantine have one ordering: an admission that
+      wins causes refusal; a quarantine that wins forbids provider forwarding.
+      A delayed forward or accepted host operation prevents completion until
+      drained. Unknown drains keep the durable fences and original lease.
+- [ ] Re-registering the same conversation with a new token or scope, daemon and
+      gateway restart, native adoption, continuation and replacement-session
+      replay are refused. A fresh unrelated conversation is the positive control.
+- [ ] Unrelated/ambiguous affected work, pending whole-host preparation, reused
+      process identity, stale completion and changed canonical lease refuse.
+      Duplicate consumption and interrupted recovery preserve sibling leases,
+      all history and the irreversible conversation/workflow fences.
+- [ ] Consuming integration and mutation controls exercise the actual relay
+      admission/forward boundary and canonical session recovery. Removing the
+      archive check, atomic fence, drain, signature/identity validation, replay
+      guard or exact lease transaction must fail an opposing control. Existing
+      child-bound retirement and automatic unknown reconciliation remain covered.
+
 ### Prepared whole-host termination of unresolved native work
 
 An independent host/operator authority may prepare physical recovery of an exact

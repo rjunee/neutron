@@ -1,4 +1,5 @@
 import { observeSession } from './observe-workers.ts'
+import { assertConversationAvailable, availableConversationKey } from './conversation-quarantine-guard.ts'
 import { hasUnresolvedNativeChild, hasUnresolvedNativeChildForChat } from './native-child-liveness.ts'
 import { describeWorkerObservation, unclassifiedObservation, type WorkerObservation } from './worker-observation.ts'
 // persistent-repl-substrate.ts → pool.ts
@@ -192,6 +193,7 @@ export async function replayPendingInbound(
   entry: PendingRespawnEntry,
 ): Promise<boolean> {
   if (entry.droppedInbound === undefined || entry.droppedInbound === '') return false
+  assertConversationAvailable(ownerOptions, entry.sessionId)
   const record =
     ownerOptions.replRegistryPath !== undefined
       ? getRecord(ownerOptions.replRegistryPath, entry.sessionKey)
@@ -302,6 +304,10 @@ export function logAbandonPoison(session: ReplSession, by: string, turnId: strin
  *  returns). Production always threads `credential_identity`, so the new shape
  *  is always taken on the live path. */
 export function poolKeyFor(options: PersistentReplSubstrateOptions): string {
+  return availableConversationKey(basePoolKeyFor(options), options)
+}
+
+function basePoolKeyFor(options: PersistentReplSubstrateOptions): string {
   if (
     options.user_id !== undefined ||
     options.project_id !== undefined ||
@@ -661,7 +667,6 @@ async function disposeEphemeralSession(session: ReplSession): Promise<void> {
  * purposes never share a transcript. A session-ful dispatch always pools.
  */
 export function createPersistentReplSubstrate(options: PersistentReplSubstrateOptions): Substrate {
-  const sessionKey = poolKeyFor(options)
   const inactivityDefaultMs = options.turnTimeoutMs ?? DEFAULT_TURN_INACTIVITY_MS
   const absoluteCeilingDefaultMs =
     options.turnAbsoluteCeilingMs ?? DEFAULT_TURN_ABSOLUTE_CEILING_MS
@@ -671,6 +676,12 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
 
   const substrate: Substrate = {
     start(spec: AgentSpec): SessionHandle {
+      if (spec.session !== undefined) assertConversationAvailable(options, spec.session.id)
+      // A long-lived substrate must observe quarantine committed after creation.
+      const sessionKey = poolKeyFor(options)
+      if (options.replRegistryPath !== undefined && !supervisedBySessionKey.has(sessionKey)) {
+        supervisedBySessionKey.set(sessionKey, options)
+      }
       const channel = new EventChannel()
       let cancelled = false
       let release: (() => void) | undefined

@@ -30,6 +30,7 @@ import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } 
 import { clearRespawnInFlight, gateFor, getOrSpawnSession } from './spawn.ts'
 import { drainPendingRespawns } from './pending-respawn.ts'
 import { isUnregisteredPoolScopeConsistent, poolKeyFor } from './pool.ts'
+import { assertConversationAvailable } from './conversation-quarantine-guard.ts'
 import { createLogger } from '@neutronai/logger'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
@@ -111,6 +112,8 @@ export function makeReplRespawnDeps(options: PersistentReplSubstrateOptions): Re
   const registryPath = options.replRegistryPath
   return {
     killChild: (sessionKey) => {
+      const record = registryPath === undefined ? undefined : getRecord(registryPath, sessionKey)
+      if (record !== undefined) assertConversationAvailable(options, record.sessionId)
       // Synchronous liveness decision via the handle mirror (the pool only holds
       // a Promise). When the child is ALIVE-but-wedged the pool still owns the
       // process, so we must kill it AND wait for its exit before the `--resume`
@@ -178,6 +181,7 @@ export function makeReplRespawnDeps(options: PersistentReplSubstrateOptions): Re
       pool.delete(sessionKey)
     },
     spawnResume: (record): SpawnReplOutcome => {
+      assertConversationAvailable(options, record.sessionId)
       // Consume the pending graceful-kill (if `killChild` found an alive child).
       const pendingKill = pendingChildKills.get(record.sessionKey)
       pendingChildKills.delete(record.sessionKey)
@@ -266,6 +270,9 @@ export function respawnReplSession(
     >(registryPath, (registry) => {
       const rec = registry[sessionKey]
       if (!rec) return { registry, result: { kind: 'no-record' } }
+      if (options.isConversationQuarantined?.(rec.sessionId)) {
+        return { registry, result: { kind: 'scope-refused' }, skipSave: true }
+      }
       // This must precede even the force/cap/in-flight writes, not merely the
       // eventual spawn: executeRespawn kills and evicts before it spawns.
       if (!registryConversationScopeMatches(rec, options)) {
@@ -532,6 +539,10 @@ export async function runReplWatchdogTick(
     if (retiringSessionKeys.has(sessionKey)) continue
     const record = registry[sessionKey]
     const keyOptions = supervisedBySessionKey.get(sessionKey)
+    if (record !== undefined && (keyOptions ?? options).isConversationQuarantined?.(record.sessionId)) {
+      results.push({ sessionKey, action: 'conversation-quarantined', respawned: false })
+      continue
+    }
     // A refused/unknown scope is not a dead child we own. Check before renewal,
     // probing, crash notification, or any durable annotation of that row.
     if (record !== undefined && (keyOptions !== undefined
@@ -724,6 +735,7 @@ export async function runCwdDriftWatchdogTick(
     if (retiringSessionKeys.has(sessionKey)) continue
     const record = registry[sessionKey]
     const owner = supervisedBySessionKey.get(sessionKey)
+    if (record !== undefined && (owner ?? options).isConversationQuarantined?.(record.sessionId)) continue
     if (record !== undefined && owner !== undefined && !registryConversationScopeMatches(record, owner)) continue
     const p = pool.get(sessionKey)
     if (p === undefined) continue

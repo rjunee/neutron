@@ -27,6 +27,7 @@ import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface AdminRespawnSurfaceInput {
   retirePlannerAuthority?: (request: unknown) => Promise<{ status: 'released' | 'already-retired' | 'refused' }>
+  preparePlannerConversationQuarantine?: (request: unknown) => Promise<{ status: 'prepared' | 'refused' }>
 
   reconcileTerminatedChat?: (request: unknown) => Promise<{ status: 'reconciled' } | { status: 'refused'; reason: string }>
   /** Expected operator token — request must present it in `X-Gateway-Token`. */
@@ -72,7 +73,7 @@ export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): Admi
   return {
     handler: async (req: Request): Promise<Response | null> => {
       const url = new URL(req.url)
-      if (url.pathname === '/admin/retire-planner-authority' && req.method === 'POST') {
+      if (['/admin/retire-planner-authority', '/admin/prepare-planner-conversation-quarantine'].includes(url.pathname) && req.method === 'POST') {
         // The owner token gates this surface; the consumer independently verifies
         // the pinned operator signature and exact workflow authority.
         const supplied = Buffer.from(req.headers.get('X-Gateway-Token') ?? '')
@@ -85,7 +86,8 @@ export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): Admi
         if (rateState.hits.length >= limit.maxRequests) return Response.json({ status: 'refused' }, { status: 429 })
         rateState.hits.push(now)
         try {
-          const result = await input.retirePlannerAuthority?.(await readCapAuthorization(req)) ?? { status: 'refused' }
+          const callback = url.pathname === '/admin/retire-planner-authority' ? input.retirePlannerAuthority : input.preparePlannerConversationQuarantine
+          const result = await callback?.(await readCapAuthorization(req)) ?? { status: 'refused' }
           return Response.json(result, { status: result.status === 'refused' ? 409 : 200 })
         } catch { return Response.json({ status: 'refused' }, { status: 409 }) }
       }

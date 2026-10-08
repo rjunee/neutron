@@ -81,6 +81,28 @@ reserved by pending whole-host recovery. The policy and acceptance controls are
 in `docs/spec-items/a-gateway-restart-keeps-the-project-repls.md`, under
 “Operator retirement of restricted planner authority.”
 
+A distinct `never-admitted-conversation-v1` policy handles an expired original
+`submission-started` planner dispatch with no observed child identity. The owner
+route `/admin/prepare-planner-conversation-quarantine` first verifies independent
+operator authorization and the sole affected canonical lease, then atomically
+holds project admission and records permanent workflow and conversation fences.
+It drains accepted planner operations before reporting preparation. A separate
+capacity authority must attest complete zero-admission history and durable
+conversation quarantine; a fresh signed challenge checks that fence at release.
+The existing retirement route consumes the exact prepared authorization and
+releases only its lease. Unknown native outcome and all historical evidence stay
+unchanged. Pending or failed recovery keeps the fences and lease.
+
+The quarantined parent is detached without process termination, registry deletion
+or native input. Adoption, continuation, watchdog replacement and pending-input
+replay refuse its identity. Canonical subsequent work resolves a fresh conversation
+and native session, preserving the old transcript and pane. Preparation refuses
+unrelated or ambiguous work; its only occupied-slot allowance positively matches
+the exact retained workspace. The private capacity authority also refuses any
+current or future relay registration for the quarantined conversation. See the
+same spec's “Operator quarantine of a never-provider-admitted planner conversation” criterion and the
+2026-10-08 decision in `SPEC.md`.
+
 ## The spine — how to reach the rest of this file
 
 Added 2026-08-31. This file is ~8,900 lines. Reading it end to end costs more than the orientation

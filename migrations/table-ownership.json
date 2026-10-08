@@ -204,6 +204,11 @@
       "owner": "trident/transcript-usage.ts",
       "writers": ["trident/transcript-usage.ts"],
       "notes": ["One attributed delta row per accepted cumulative token-count transcript line."]
+    },
+    "native_conversation_quarantines": {
+      "owner": "gateway/project-admission-store.ts",
+      "writers": ["gateway/project-admission-store.ts"],
+      "notes": ["Permanent conversation quarantine; history and unknown outcomes survive exact workflow retirement."]
     }
   }
 }

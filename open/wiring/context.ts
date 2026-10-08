@@ -176,6 +176,8 @@ export interface OpenWiringContext {
    * without it is indistinguishable from a legacy one. `undefined` = unknown scope.
    */
   admissionGenerationFor: (project_id: string | undefined) => Promise<number | undefined>
+  /** Canonical permanent conversation denial; independent of process liveness. */
+  isConversationQuarantined?: (sessionId: string) => boolean
   /**
    * O6 / #106 — the owner reconnect channel (`app:<owner>`) recorded on a dropped-
    * turn entry so the substrate's replay path can route a recovered reply to the

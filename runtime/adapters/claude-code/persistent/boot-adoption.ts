@@ -100,6 +100,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { assertConversationAvailable } from './conversation-quarantine-guard.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { registerLiveProcessSafe } from '@neutronai/tools/process-registry.ts'
 import type { LiveProcessHandle } from '@neutronai/tools/process-registry.ts'
@@ -421,6 +422,9 @@ export function beginBootAdoption(
   // legacy General alias must not inherit a previous caller's attribution.
   const scopeState = readRegistryState(registryPath)
   const scopeRecord = scopeState.kind === 'loaded' ? scopeState.registry[sessionKey] : undefined
+  if (scopeRecord !== undefined && options.isConversationQuarantined?.(scopeRecord.sessionId)) {
+    return Promise.resolve({ kind: 'undecided', sessionKey, reason: 'conversation permanently quarantined' })
+  }
   if (scopeRecord !== undefined && !registryConversationScopeMatches(scopeRecord, options)) {
     return Promise.resolve({ kind: 'undecided', sessionKey,
       reason: 'conversation scope is ambiguous or mismatched; owner-led recovery is required' })
@@ -833,6 +837,9 @@ export async function reconcileOwnRepl(
   }
   const record = state.kind === 'absent' ? undefined : normaliseRecord(state.registry[sessionKey])
   if (record === undefined) return { kind: 'no-handle', sessionKey }
+  if (options.isConversationQuarantined?.(record.sessionId)) {
+    return { kind: 'undecided', sessionKey, reason: 'conversation permanently quarantined' }
+  }
   if (!registryConversationScopeMatches(record, options)) {
     return { kind: 'undecided', sessionKey,
       reason: 'conversation scope is ambiguous or mismatched; owner-led recovery is required' }
@@ -932,6 +939,7 @@ async function reconcileRow(
   const claudeBasename = claudeBasenameFor(options)
   try {
     const inspection = await host.inspectHandle(handle)
+    assertConversationAvailable(options, record.sessionId)
     const verdict = classifyPaneForAdoption(
       inspection,
       { sessionId: record.sessionId, channelName: record.channelName },
@@ -962,6 +970,7 @@ async function reconcileRow(
           deps,
           record,
           claudeBasename,
+          options,
         )
         return outcomeOfClose(close, sessionKey, 'closed-foreign-owner', verdict.reason)
       }
@@ -1164,6 +1173,7 @@ async function closeAndClear(
   /** The row, so identity can be RE-ESTABLISHED at the moment of the close. */
   record: ReplRegistryRecord,
   claudeBasename: string,
+  options: PersistentReplSubstrateOptions,
 ): Promise<CloseOutcome> {
   const log = deps.log ?? defaultLog
   // RE-CHECK AT THE MOMENT OF THE ACT, because everything between the first inspection
@@ -1258,6 +1268,11 @@ async function closeAndClear(
         reason: 'the row could not be re-read under the lock immediately before the close',
       }
     }
+  }
+  try {
+    assertConversationAvailable(options, record.sessionId)
+  } catch {
+    return { kind: 'unverified', reason: 'conversation quarantine prevents closing the parent' }
   }
   try {
     await host.closeHandle(handle)
@@ -2406,6 +2421,7 @@ async function adoptRow(
       deps,
       record,
       claudeBasenameFor(options),
+      options,
     )
     const reason = 'the row carries no child_generation, so this child\'s sink credential cannot be reproduced'
     return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
@@ -2421,6 +2437,7 @@ async function adoptRow(
       deps,
       record,
       claudeBasenameFor(options),
+      options,
     )
     const reason =
       port === undefined || port <= 0
@@ -2428,6 +2445,8 @@ async function adoptRow(
         : `the dev-channel on port ${port} did not answer /health for session ${record.sessionId.slice(0, 8)}`
     return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
   }
+
+  assertConversationAvailable(options, record.sessionId)
 
   // ── The child is established. Rebuild around it, in the same order `spawnSession`
   //    builds around a fresh one, and for the same reasons. ──────────────────────
@@ -2455,6 +2474,7 @@ async function adoptRow(
       deps,
       record,
       claudeBasenameFor(options),
+      options,
     )
     const reason = `this verification took longer than the ${BOOT_ADOPTION_BUDGET_MS}ms evidence bound, so what it established is no longer current`
     return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
@@ -2475,6 +2495,7 @@ async function adoptRow(
   // after it: a straggler reply from the old gateway's last turn cannot be accepted
   // as the answer to a new one.
   const session = new ReplSession(sessionKey, generation, record.sessionId, record.channelName, record.cwd)
+  session.isConversationQuarantined = options.isConversationQuarantined
   session.adopted = true
   session.projectId = options.project_id
   session.bindToolProjectScope(options)
@@ -2492,6 +2513,7 @@ async function adoptRow(
       deps,
       record,
       claudeBasenameFor(options),
+      options,
     )
     const reason = 'the row carries no usable spawn-time reuse properties, so the first turn would evict this session anyway'
     return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
@@ -2581,6 +2603,7 @@ async function adoptRow(
       deps,
       record,
       claudeBasenameFor(options),
+      options,
     )
     return outcomeOfClose(close, sessionKey, 'closed-unadoptable', reason)
   }
@@ -2888,6 +2911,9 @@ async function adoptRow(
     claimantPid: deps.claimantPid ?? process.pid,
     deps,
     publish: async () => {
+      try { assertConversationAvailable(options, record.sessionId) } catch {
+        return releaseWithReason('conversation quarantine prevents adoption', child)
+      }
       // THE PUBLISH-SIDE CHECK. The row claim is an await, so the shutdown can arrive
       // inside it; publishing into a pool that has already been drained would reinstall
       // this key behind the teardown's back.
@@ -2926,6 +2952,9 @@ async function adoptRow(
           }),
         ])
         if (baselineTimer !== undefined) clearTimeout(baselineTimer)
+      }
+      try { assertConversationAvailable(options, record.sessionId) } catch {
+        return releaseWithReason('conversation quarantine prevents adoption', child)
       }
       if (signal.abandoned) {
         if (signal.cause === 'shutdown') return release('while awaiting the baseline', child)

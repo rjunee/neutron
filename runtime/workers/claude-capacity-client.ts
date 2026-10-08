@@ -159,6 +159,21 @@ export async function registerClaudeNativeRelay(pin: ClaudeCapacityPin, parent: 
   return { scopeToken, registration: envelope }
 }
 
+/** Read-only freshness proof for an independently authorized permanent fence. */
+export async function verifyCurrentConversationQuarantine(pin: ClaudeCapacityPin, proof: {
+  operationId: string; parentSessionId: string; originalScopeDigest: string
+}, quarantineDigest: string, signal: AbortSignal, deadline: number): Promise<boolean> {
+  try {
+    const challenge = randomBytes(24).toString('base64url')
+    const envelope = await exchange(pin, { version: 2, kind: 'claude-native-conversation-quarantine-status',
+      instanceId: pin.instanceId, challenge, ...proof }, signal, deadline) as { body: Record<string, unknown> }
+    const expected = { version: 1, kind: 'claude-native-conversation-quarantine-status', hostId: pin.hostId,
+      instanceId: pin.instanceId, challenge, ...proof, quarantineDigest, effective: true }
+    return exactKeys(envelope.body, Object.keys(expected))
+      && Object.entries(expected).every(([key, value]) => envelope.body[key] === value)
+  } catch { return false }
+}
+
 export async function connectClaudeCapacity(pin: ClaudeCapacityPin, input: ClaudeCapacityInput): Promise<ClaudeCapacityOutcome> {
   try {
     if (!validPin(pin) || !verifiedScope(pin, input.relay) || !text(input.leaseId) || !text(input.childId) || !digest(input.eventDigest)

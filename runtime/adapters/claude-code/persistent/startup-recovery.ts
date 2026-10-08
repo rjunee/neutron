@@ -1,4 +1,5 @@
 import { statSync } from 'node:fs'
+import { assertConversationAvailable } from './conversation-quarantine-guard.ts'
 import { isDeepStrictEqual } from 'node:util'
 import { beginBootAdoption, type BootAdoptionDeps } from './boot-adoption.ts'
 import { disownPane, readRegistryState, registryConversationScopeMatches, type ReplRegistryRecord } from './repl-registry.ts'
@@ -23,6 +24,7 @@ export function readStartupRepl(options: PersistentReplSubstrateOptions, session
     throw new Error('startup recovery cannot establish durable registry identity')
   }
   const row = state.kind === 'loaded' ? state.registry[sessionKey] : undefined
+  if (row !== undefined) assertConversationAvailable(options, row.sessionId)
   if (row !== undefined && !registryConversationScopeMatches(row, options)) {
     throw new Error('startup recovery conversation scope is ambiguous or mismatched')
   }
