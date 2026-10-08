@@ -68,7 +68,7 @@ import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/c
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { projectInstallAvailableBytes, projectSuiteIdentityMeasurement } from '../wiring/project-build-dependencies.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
-import { appendFile, chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { access, appendFile, chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -1859,6 +1859,245 @@ test('a native session without the registered planner profile refuses before chi
   expect(outcome).toMatchObject({ kind: 'blocked', phase: 'plan', on: 'Worker refused: capability-unsupported' })
   expect(f.world.dispatches).toEqual([])
 })
+
+// Own fixture database admissions precede independently measured linked worktrees.
+// Hold only the second measurement; no census result, identity or guard is stubbed.
+const plannerCensusBarrier = () => {
+  let release!: () => void
+  return { promise: new Promise<void>(resolve => { release = resolve }), release: () => release() }
+}
+async function plannerCensusFixture(options: { simultaneous?: boolean; budgetMs?: number } = {}) {
+  const children = plannerCensusBarrier(), bothChildren = plannerCensusBarrier(), firstChild = plannerCensusBarrier()
+  const bothAdmitted = plannerCensusBarrier(), secondMeasurement = plannerCensusBarrier(), measurement = plannerCensusBarrier()
+  const started: BoundedWorkRequest[] = [], capabilities = new Map<string, string>()
+  const f = await fixture({ nativeChild: async request => {
+    started.push(request)
+    if (started.length === 1) firstChild.release()
+    if (started.length === 2) bothChildren.release()
+    await children.promise
+  } })
+  const admission = f.context.nativeChildAdmission
+  let admissions = 0
+  f.context.nativeChildAdmission = { ...admission, admit: async (...args) => {
+    const child = await admission.admit(...args)
+    if (child.status === 'admitted') {
+      admissions++
+      if (admissions === 2) bothAdmitted.release()
+      if (options.simultaneous) await bothAdmitted.promise
+    }
+    return child
+  } }
+  const one = await f.prepare()
+  const second = await f.store.create({ slug: 'second-planner-card', project_slug: 'project', repo_path: f.repo, task: 'Independent fresh planning.' })
+  await f.store.update(second.id, { merge_mode: 'pr', base_sha: f.baseSha })
+  const two = await prepareProjectBuild({ ...f.input, run: f.store.get(second.id)! }, f.context, new AbortController().signal)
+  f.register()
+  const hosts = [await createProjectBuildHost(one), await createProjectBuildHost(two)]
+  const ids = [f.row.id, second.id]
+  const requests: BoundedWorkRequest[] = hosts.map((host, index) => ({ ...host.workers.plan.request,
+    run_id: ids[index]!, step_id: `${ids[index]}:plan:0`, role: 'plan', needs_approval_decision: false,
+    budget: { wall_ms: options.budgetMs ?? 10_000 } }))
+  for (let index = 0; index < 2; index++) {
+    const measured = await hosts[index]!.deps.measure()
+    if (measured.kind !== 'known') throw Error('Planner fixture snapshot unavailable')
+    await hosts[index]!.deps.prepareWork(requests[index]!, { snapshot: measured.value, previous: null, findings: [] })
+  }
+  const session = f.session as ReplSession
+  const submit = session.child.submitLine!.bind(session.child)
+  session.child.submitLine = async line => {
+    const spec = JSON.parse(line.slice(line.indexOf('{')))
+    const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
+    const prompt = String(args.prompt)
+    const request: BoundedWorkRequest = JSON.parse(prompt.split('\n').find(row => row.startsWith('Request (data): '))!.slice('Request (data): '.length))
+    const capability = prompt.split('\n').find(row => row.startsWith('Planner capability (secret; pass only to planner_work): '))?.split(': ').at(-1)
+    if (capability) capabilities.set(request.run_id, capability)
+    await submit(line)
+  }
+  const runHost = f.context.runHost
+  f.context.runHost = async (argv, cwd, env, timeout) => {
+    if (argv.includes('--absolute-git-dir') && cwd === requests[1]!.cwd) {
+      secondMeasurement.release()
+      await measurement.promise
+    }
+    return runHost(argv, cwd, env, timeout)
+  }
+  const controllers = [new AbortController(), new AbortController()]
+  const running: ReturnType<(typeof hosts)[number]['workers']['plan']['runner']['run']>[] = []
+  const call = (index: number) => {
+    const promise = hosts[index]!.workers.plan.runner.run(requests[index]!, 'in-repl', controllers[index]!.signal)
+    running.push(promise)
+    return promise
+  }
+  const operation = (operation: string, fields: object = {}) => dispatchPlannerWork(session, {
+    run_id: requests[0]!.run_id, step_id: requests[0]!.step_id, capability: capabilities.get(requests[0]!.run_id), operation, ...fields })
+  const finish = async () => {
+    measurement.release(); children.release()
+    await Promise.all(running)
+    // Unknown leaves the original submitted child's slot and lease intact.
+    // Settle our fake child, then use the actual original-request recovery
+    // path to validate its late result; never reset slots or release by hand.
+    for (const request of started) {
+      if (!f.admission.listLeases('liveChild').some(row => row.workRef === JSON.stringify([request.run_id, request.step_id]))) continue
+      await until(async () => { try { return JSON.parse(await readFile(request.result.path, 'utf8')).kind === 'blocked' ? true : undefined } catch { return undefined } }, 500, 5)
+      const index = requests.findIndex(candidate => candidate.run_id === request.run_id)
+      const count = started.length
+      expect((await hosts[index]!.workers.plan.runner.recover!(requests[index]!, 'in-repl', new AbortController().signal)).kind).toBe('blocked')
+      expect(started).toHaveLength(count)
+    }
+  }
+  return { f, session, requests, started, controllers, call, operation, finish, firstChild, bothChildren, secondMeasurement, measurement, admission }
+}
+
+test('fresh concurrent planners wait for both original durable admissions to gain local census proof', async () => {
+  const r = await plannerCensusFixture({ simultaneous: true })
+  try {
+    const first = r.call(0), second = r.call(1)
+    await r.secondMeasurement.promise
+    expect(r.f.admission.listLeases('liveChild')).toHaveLength(2)
+    expect(r.started).toHaveLength(0)
+    r.measurement.release()
+    await until(() => r.started.length === 2 ? true : undefined, 500, 5)
+    expect(r.started.map(request => request.run_id).sort()).toEqual(r.requests.map(request => request.run_id).sort())
+    expect(r.session.turnSlotHeld).toBe(2)
+    expect(Bun.peek.status(first)).toBe('pending')
+    expect(Bun.peek.status(second)).toBe('pending')
+  } finally { await r.finish() }
+  expect(r.f.admission.listLeases('liveChild')).toEqual([])
+}, 20_000)
+
+test('an active planner operation waits for a newly admitted sibling without losing its original grant', async () => {
+  const r = await plannerCensusFixture()
+  try {
+    r.call(0); await r.firstChild.promise
+    r.call(1); await r.secondMeasurement.promise
+    expect(r.f.admission.listLeases('liveChild')).toHaveLength(2)
+    const operation = r.operation('write', { path: 'during-sibling.ts', content: 'export const useful = true' })
+    operation.catch(() => {})
+    await expect(access(join(r.requests[0]!.cwd, 'during-sibling.ts'))).rejects.toThrow()
+    expect(Bun.peek.status(operation)).toBe('pending')
+    r.measurement.release()
+    expect(await operation).toMatchObject({ written: 'during-sibling.ts', committed: false })
+    await r.bothChildren.promise
+    expect(await readFile(join(r.requests[0]!.cwd, 'during-sibling.ts'), 'utf8')).toContain('useful')
+  } finally { await r.finish() }
+  expect(r.f.admission.listLeases('liveChild')).toEqual([])
+}, 20_000)
+
+test.each(['cancelled', 'expired'] as const)('fresh planner census waiting never dispatches after its original grant is %s', async change => {
+  const r = await plannerCensusFixture({ simultaneous: true, budgetMs: 2_000 })
+  try {
+    const first = r.call(0)
+    r.call(1)
+    await r.secondMeasurement.promise
+    expect(r.f.admission.listLeases('liveChild')).toHaveLength(2)
+    expect(r.started).toHaveLength(0)
+    if (change === 'cancelled') r.controllers[0]!.abort()
+    expect((await first).kind).toBe('unknown')
+    expect(r.started).toHaveLength(0)
+    // Only this never-submitted caller may release. Its sibling remains owned
+    // until its own signed refusal or completion, not this caller's timeout.
+    await until(() => !r.f.admission.listLeases('liveChild').some(row => row.workRef === JSON.stringify([r.requests[0]!.run_id, r.requests[0]!.step_id])) ? true : undefined, 500, 5)
+    await expect(access(r.requests[0]!.result.path)).rejects.toThrow()
+  } finally {
+    r.controllers.forEach(controller => controller.abort())
+    await r.finish()
+  }
+}, 15_000)
+
+test.each([
+  ['write', 'cancelled'], ['publish', 'cancelled'],
+  ['write', 'expired'], ['publish', 'expired'],
+] as const)('active planner %s cannot escape sibling census waiting after its grant is %s', async (operation, change) => {
+  const r = await plannerCensusFixture({ budgetMs: 2_000 })
+  try {
+    const first = r.call(0); await r.firstChild.promise
+    r.call(1); await r.secondMeasurement.promise
+    const fields = operation === 'write' ? { path: 'refused-during-wait.ts', content: 'must not escape' }
+      : { blocked: 'Must not publish after losing the original grant.' }
+    const pending = r.operation(operation, fields)
+    pending.catch(() => {})
+    expect(Bun.peek.status(pending)).toBe('pending')
+    if (change === 'cancelled') r.controllers[0]!.abort()
+    await expect(pending).rejects.toThrow('expired or lost ownership')
+    expect((await first).kind).toBe('unknown')
+    expect(r.started).toHaveLength(1)
+    await expect(access(join(r.requests[0]!.cwd, 'refused-during-wait.ts'))).rejects.toThrow()
+    await expect(access(r.requests[0]!.result.path)).rejects.toThrow()
+    // A dispatched child remains held: denying a later planner operation is
+    // not evidence that the original model child completed.
+    expect(r.f.admission.listLeases('liveChild').some(row => row.workRef === JSON.stringify([r.requests[0]!.run_id, r.requests[0]!.step_id]))).toBe(true)
+  } finally {
+    r.controllers.forEach(controller => controller.abort())
+    await r.finish()
+  }
+}, 15_000)
+
+test('planner census waiting refuses lost own session before sibling measurement is released', async () => {
+  const r = await plannerCensusFixture()
+  const hasChildExited = r.session.hasChildExited
+  try {
+    r.call(0); await r.firstChild.promise
+    r.call(1); await r.secondMeasurement.promise
+    const pending = r.operation('write', { path: 'lost-session.ts', content: 'must not escape' })
+    pending.catch(() => {})
+    r.session.hasChildExited = () => true
+    await expect(pending).rejects.toThrow('expired or lost ownership')
+    expect(r.started).toHaveLength(1)
+    await expect(access(join(r.requests[0]!.cwd, 'lost-session.ts'))).rejects.toThrow()
+    await expect(access(r.requests[0]!.result.path)).rejects.toThrow()
+  } finally {
+    r.session.hasChildExited = hasChildExited
+    r.controllers.forEach(controller => controller.abort())
+    await r.finish()
+  }
+}, 15_000)
+
+test('planner census waiting never promotes a retained foreign admission into local proof', async () => {
+  const r = await plannerCensusFixture({ simultaneous: true, budgetMs: 2_000 })
+  // Real durable admission without any local worktree measurement or launch.
+  const foreign = await r.admission.admit('retained-foreign-run', 'retained-foreign-step')
+  expect(foreign.status).toBe('admitted')
+  if (foreign.status !== 'admitted') throw Error('Foreign fixture admission unavailable')
+  const original = r.f.admission.listLeases('liveChild').find(row => row.token === foreign.lease.token)
+  try {
+    const first = r.call(0), second = r.call(1)
+    await r.secondMeasurement.promise
+    r.measurement.release()
+    expect((await first).kind).toBe('unknown')
+    expect((await second).kind).toBe('unknown')
+    expect(r.started).toHaveLength(0)
+    expect(r.f.admission.listLeases('liveChild').find(row => row.token === foreign.lease.token)).toEqual(original)
+    for (const request of r.requests) await expect(access(request.result.path)).rejects.toThrow()
+  } finally {
+    r.controllers.forEach(controller => controller.abort())
+    await r.finish()
+  }
+  // The fixture database's afterEach cleanup owns disposal; the production
+  // path never releases this foreign child's durable lease.
+}, 15_000)
+
+test('active planner census refuses a retained foreign admission before writes or publication', async () => {
+  const r = await plannerCensusFixture({ budgetMs: 2_000 })
+  try {
+    const first = r.call(0); await r.firstChild.promise
+    const foreign = await r.admission.admit('retained-foreign-run', 'retained-foreign-step')
+    expect(foreign.status).toBe('admitted')
+    if (foreign.status !== 'admitted') throw Error('Foreign fixture admission unavailable')
+    const original = r.f.admission.listLeases('liveChild').find(row => row.token === foreign.lease.token)
+    expect(r.f.admission.listLeases('liveChild')).toHaveLength(2)
+    // Await the operation's semantic outcome while foreign proof is absent.
+    // A momentary file-absence check alone cannot expose a guard bypass.
+    await expect(r.operation('write', { path: 'foreign-refused.ts', content: 'must not escape' })).rejects.toThrow('expired or lost ownership')
+    expect((await first).kind).toBe('unknown')
+    expect(r.started).toHaveLength(1)
+    await expect(access(join(r.requests[0]!.cwd, 'foreign-refused.ts'))).rejects.toThrow()
+    await expect(access(r.requests[0]!.result.path)).rejects.toThrow()
+    expect(r.f.admission.listLeases('liveChild').find(row => row.token === foreign.lease.token)).toEqual(original)
+  } finally {
+    r.controllers.forEach(controller => controller.abort())
+    await r.finish()
+  }
+}, 15_000)
 
 test.each(['independent', 'simultaneous', 'aliased'] as const)('native writable children consume host workspace admission: %s', async layout => {
   let release!: () => void, firstStarted!: () => void, bothStarted!: () => void

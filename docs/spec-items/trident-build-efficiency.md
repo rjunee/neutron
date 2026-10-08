@@ -137,6 +137,19 @@ barrier at `trident/build-run.ts:691-697`.
   preserve standalone and synthesis vetoes, and assert that unavailable admission
   still prevents dispatch. Parallelizing only the panel loop cannot satisfy this.
 
+  A newly admitted sibling's asynchronous workspace measurement must not revoke
+  an otherwise valid planner grant. Initial binding and later planner operations
+  wait for the complete measured census within their existing deadline and
+  cancellation signal, without adding execution time. Lost ownership or a departed
+  parent still refuses; elapsed time alone cannot authorize an unrepresented,
+  foreign or duplicate owner. After an asynchronous authorization check, expiry
+  and cancellation must still prevent operations. Verify initial and already-bound
+  planners against a barrier-held sibling measurement in
+  `open/__tests__/project-build-e2e.test.ts`, including two live independent children,
+  and refusal controls in `runtime/workers/planner-work.test.ts`. A bypassed census,
+  a removed wait or an unchecked asynchronous refusal must fail its opposing
+  control. Preserve same-branch and aliased-workspace serialization.
+
 - [ ] **Recurring work keeps the intended placement and conversation.**
   Same-provider calls use native project subagents. Recurring cross-provider
   plan/build/fix calls reuse an observed thread with durable ownership scoped to
