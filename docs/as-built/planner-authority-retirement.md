@@ -27,5 +27,24 @@ actual Open composition with zero native starts and semantic mutations for
 authentication, dispatch identity, drain and disabled legitimate recovery.
 Store validation passed 20 cases, including restart persistence, replacement
 admission refusal, reservation exclusion, concurrent eligibility and transaction
-rollback. Schema and ownership checks passed 19 cases. Full consolidated checks,
-deployment and live operator recovery remain pending at this candidate.
+rollback. Schema and ownership checks passed 19 cases.
+
+The complete shared-host gate at `807d57dd78b778ea4a28285d5d48007960bbc7cc`
+passed all 51 typechecks and executed all 1,797 discovered test files. It failed
+four fixture cases: three explicit migration lists omitted ordinal 168, and one
+process fixture repeated cleanup after its child exited. The lists now include
+the new ordinal; both related process fixtures capture the exit promise once and
+skip termination after observed exit, retaining their live/dead assertions.
+
+At `e18b493efe6387b6ea5c739483177f79c971be14`, all 51 typechecks and both
+original affected 100-file batches passed. The three edited fixture suites also
+passed their focused 29 cases. This is affected proof, not a final-head local
+full-suite pass. The final publication commit adds this validation record only;
+complete CI for that exact head remains required before merge.
+
+Layering checks passed. Local whole-tree privacy scanning reported the existing
+baseline denylist findings and untracked linked-checkout metadata; it did not
+establish a clean tree scan. Commit/PR preflight and exact-head CI purity remain
+required. Independent native and bounded cross-model reviews approved the
+implementation; final record review, deployment and live operator recovery remain
+pending at the time of this record.
