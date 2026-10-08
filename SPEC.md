@@ -221,7 +221,11 @@ An independently authenticated operator may permanently retire exact restricted
 planner workflow authority while preserving unknown native-loop liveness and
 outcome. This scoped recovery preserves active work and parent lifecycle guards
 (Decisions Log 2026-10-08, restricted planner authority retirement;
-[`restart recovery contract`](docs/spec-items/a-gateway-restart-keeps-the-project-repls.md#operator-retirement-of-restricted-planner-authority)).
+[`restart recovery contract`](docs/spec-items/a-gateway-restart-keeps-the-project-repls.md#operator-retirement-of-restricted-planner-authority)). A distinct operator
+policy permits zero-provider-admission recovery only after permanent quarantine
+of the original conversation and exact host-authority drain. Quarantined history
+remains readable, but canonical recovery starts any later conversation fresh,
+without replay (Decisions Log 2026-10-08, conversation quarantine).
 
 A key fenced after loss of ownership evidence remains refused until a gateway
 restart performs fresh reconciliation, even if registry writes recover meanwhile
@@ -347,6 +351,34 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-10-08 — Include explicitly retired dead-producer logical conversation admissions in reset.
+
+An owner-authorized logical project-conversation reset may enumerate exact stale
+chat and acting-turn admissions whose producer epochs are proven closed by
+independently signed, already-consumed recovery records. This retires host queue
+ownership, without claiming those historical turns used the planner's native
+parent or that their native effects ceased. The canonical logical topic, complete
+current scope census, exact lease multiset, durable work-reference denial and
+atomic release are mandatory. Unlisted or ambiguous ownership refuses. This
+extends the quarantine decision below; automatic reconciliation and the existing
+restricted-profile policy remain unchanged.
+
+### 2026-10-08 — Quarantine a never-provider-admitted planner conversation.
+
+An independently authenticated operator may retire an expired submitted planner
+request without inventing a child identity or stopping its parent, when complete
+original relay custody proves zero provider admissions and the relay owner
+atomically quarantines and drains the entire original conversation. Quarantine
+survives new scopes and restarts; canonical recovery must never resume or copy
+its pending input into an active replacement. Any later conversation starts fresh.
+This disables provider access for the affected conversation and requires specific
+operator authorization; unrelated or ambiguous active work refuses. Exact host
+workflow authority is permanently fenced and drained before lease consumption.
+Native liveness, hooks, other native effects and outcome remain unknown. This is
+a separate versioned evidence case, not a weakening of actual-profile retirement
+or whole-host termination. The [restart recovery contract](docs/spec-items/a-gateway-restart-keeps-the-project-repls.md#operator-quarantine-of-a-never-provider-admitted-planner-conversation)
+owns eligibility and bidirectional controls.
 
 ### 2026-10-08 — Operator retirement of restricted planner workflow authority.
 

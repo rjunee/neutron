@@ -572,6 +572,11 @@ export function runOutputScan(
   options: PersistentReplSubstrateOptions,
   now: number,
 ): void {
+  // A retained quarantined child may still emit PTY output. Neither substrate
+  // may answer its interactive prompts after host authority was withdrawn.
+  try {
+    if (session.fenced || options.isConversationQuarantined?.(session.sessionId)) return
+  } catch { return }
   for (const fired of session.scanner.scan(session.ring.text(), now)) {
     if (fired.id === WEDGED_PROMPT_DETECTOR_ID) {
       dispatchWedgeRecovery(session, child, options)
@@ -666,7 +671,8 @@ function dispatchResumePickerRecovery(
     // REPL was spawned under: if it's the stale id that dropped us into the
     // picker, we must not "recover" the very session that just failed to resume.
     findLatestSession: () =>
-      findLatestResumableSession(cwd, projectsDir, { excludeSessionId: session.sessionId }),
+      findLatestResumableSession(cwd, projectsDir, { excludeSessionId: session.sessionId,
+        isConversationQuarantined: options.isConversationQuarantined }),
     // This detector fires during SPAWN, BEFORE start() assigns activeTurn, so a
     // direct `activeTurn?.channel.push` would be a silent no-op and DROP the
     // required recovered/lost notice (Codex P2). Route through `pushNotice`, which
@@ -688,6 +694,7 @@ function dispatchResumePickerRecovery(
     //     flag-aware registry write covers the reverse ordering (recovery finishing
     //     before that write); together every ordering converges on the recovered id.
     requestResume: (recoveredSessionId) => {
+      if (options.isConversationQuarantined?.(recoveredSessionId)) throw new Error('conversation permanently quarantined')
       session.pendingResumeSessionId = recoveredSessionId
       session.poisoned = true
       if (options.replRegistryPath !== undefined) {

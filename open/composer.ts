@@ -1293,6 +1293,7 @@ export function buildOpenGraphComposer(
     const ownerTopicRoots = [webTopicId(OWNER_USER_ID), appWsTopicId(OWNER_USER_ID)]
     const projectScopeLifecycle = createProjectScopeLifecycle({
       admission: projectAdmission,
+      isConversationQuarantined: sessionId => projectAdmission.maintenance.isConversationQuarantined(sessionId),
       liveness: () => livenessHolder.surface,
       // Read-only awake evidence beyond the leases: pending tool approvals (no
       // producer admits an `approval` lease yet) and the owner's foreground activity
@@ -1369,6 +1370,7 @@ export function buildOpenGraphComposer(
       // shares that pool value today, and so shares this answer.
       admissionGenerationFor: (id) =>
         projectAdmission.generationFor(id === undefined || id === 'general' ? null : id),
+      isConversationQuarantined: sessionId => projectAdmission.maintenance.isConversationQuarantined(sessionId),
     }
     const {
       llmCallSubstrate,
@@ -4430,6 +4432,14 @@ export function buildOpenGraphComposer(
     // the per-boot app token keeps this force-respawn endpoint privileged.
     const replRegistryPath = deriveReplSupervisionPaths(owner_home).replRegistryPath
     const adminRespawnSurface = createAdminRespawnSurface({
+      preparePlannerConversationQuarantine: async raw => {
+        const { prepareNeverAdmittedPlanner } = await import('./wiring/never-admitted-planner-retirement.ts')
+        return prepareNeverAdmittedPlanner({ authority: options.nativeHostRecoveryAuthority,
+          stateRoot: projectBuildStateRoot, admission: projectAdmission,
+          runs: new TridentRunStore(db), attempts: new TridentAttemptLedger(db),
+          projectIdForRun: run => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null, listProjectIds,
+        }, raw)
+      },
       retirePlannerAuthority: async raw => {
         const { retirePlannerAuthority } = await import('./wiring/planner-authority-retirement.ts')
         return retirePlannerAuthority({ authority: options.nativeHostRecoveryAuthority,

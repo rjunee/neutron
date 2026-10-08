@@ -292,6 +292,9 @@ export interface PersistentReplSubstrateOptions {
    *  a throw or rejection is `undefined` plus one stderr line, never a failed spawn.
    *  Omitted or `undefined` → the row carries no stamp (legacy-unknown). */
   admissionGeneration?: () => Promise<number | undefined>
+  /** Canonical durable conversation denial. A failed read must throw, never
+   * answer false. Checked before adoption, resume, replay and dispatch. */
+  isConversationQuarantined?: (sessionId: string) => boolean
   /** Rate-limit / overload BANNER notice sink (master-table row #10). Fired on the
    *  rising edge when the output scanner sees a `temporary` (429/529/overload/502)
    *  or `usage-cap` (subscription window) banner in the ring — NOTIFY-ONLY, no

@@ -21,6 +21,7 @@ async function fixture() {
   await a.db.exec(readFileSync(new URL('../migrations/0158_project_admission_fences.sql', import.meta.url), 'utf8'));
   await a.db.exec(readFileSync(new URL('../migrations/0161_native_host_terminations.sql', import.meta.url), 'utf8'));
   await a.db.exec(readFileSync(new URL('../migrations/0168_planner_authority_retirements.sql', import.meta.url), 'utf8'));
+  await a.db.exec(readFileSync(new URL('../migrations/0169_native_conversation_quarantines.sql', import.meta.url), 'utf8'));
   await a.store.register(scope);
   return { a, b: open(), open };
 }

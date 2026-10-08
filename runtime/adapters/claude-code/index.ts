@@ -230,6 +230,8 @@ export interface ClaudeCodeSubstrateOptions {
   hostsLiveWork?: (childGeneration: string) => number
   /** #1237 — see `PersistentReplSubstrateOptions.admissionGeneration`. */
   admissionGeneration?: () => Promise<number | undefined>
+  /** Canonical durable conversation quarantine reader; unavailable reads throw. */
+  isConversationQuarantined?: (sessionId: string) => boolean
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** Notice-family DI seam (row #16) — fired ONCE (edge) when the model-update
@@ -438,7 +440,7 @@ export function resolveReplCwdAndHome(input: {
  * each candidate against the caller's exact dimensions before returning its
  * opaque credential component. Runtime resume still owns the session/profile. */
 export function recordedClaudeConversationIdentities(options: Pick<ClaudeCodeSubstrateOptions,
-  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'conversationProjectId'>,
+  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'conversationProjectId' | 'isConversationQuarantined'>,
 ): string[] {
   if (options.conversationProjectId === undefined) throw new Error('Recorded conversation requires an exact scope')
   const { home } = resolveReplCwdAndHome({ cwd: options.cwd, env: process.env })
@@ -455,8 +457,10 @@ export function recordedClaudeConversationIdentities(options: Pick<ClaudeCodeSub
   const identities: string[] = []
   for (const [key, row] of Object.entries(state.registry)) {
     if (!ownsDimensions(key)) continue
+    if (options.isConversationQuarantined?.(row.sessionId)) continue
     const credentialId = key.split(SESSION_KEY_SEP)[3]
-    const expected = credentialId === undefined ? undefined : poolKeyFor({ ...options, credential_identity: credentialId })
+    const expected = credentialId === undefined ? undefined : poolKeyFor({ ...options,
+      replRegistryPath: deriveReplSupervisionPaths(home).replRegistryPath, credential_identity: credentialId })
     // General and the literal project "general" share a pool project dimension,
     // but have distinct explicit scope suffixes. Positively different scopes do
     // not block each other; an unrecorded or contradictory scope is unknown.
@@ -473,12 +477,12 @@ export function recordedClaudeConversationIdentities(options: Pick<ClaudeCodeSub
 
 /** Exact lookup from trusted identity fields; durable session keys remain opaque. */
 export function existingClaudeRepl(options: Pick<ClaudeCodeSubstrateOptions,
-  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'conversationProjectId' | 'credential_identity'>,
+  'substrate_instance_id' | 'cwd' | 'user_id' | 'project_id' | 'conversationProjectId' | 'credential_identity' | 'isConversationQuarantined'>,
 ): { registryPath: string; sessionKey: string } | undefined {
   const { home } = resolveReplCwdAndHome({ cwd: options.cwd, env: process.env })
   if (home === undefined) return undefined
   const registryPath = deriveReplSupervisionPaths(home).replRegistryPath
-  const sessionKey = poolKeyFor(options)
+  const sessionKey = poolKeyFor({ ...options, replRegistryPath: registryPath })
   const state = readRegistryState(registryPath)
   if (state.kind === 'unreadable' ||
       (state.kind === 'loaded' && state.droppedKeys.includes(sessionKey))) {
@@ -660,6 +664,7 @@ function prepareClaudeCodeOptions(options: ClaudeCodeSubstrateOptions) {
   if (options.onChildCrash !== undefined) p.onChildCrash = options.onChildCrash
   if (options.hostsLiveWork !== undefined) p.hostsLiveWork = options.hostsLiveWork
   if (options.admissionGeneration !== undefined) p.admissionGeneration = options.admissionGeneration
+  if (options.isConversationQuarantined !== undefined) p.isConversationQuarantined = options.isConversationQuarantined
   if (options.onSizeAlert !== undefined) p.onSizeAlert = options.onSizeAlert
   if (options.onRateLimitBanner !== undefined) p.onRateLimitBanner = options.onRateLimitBanner
   if (options.onModelUpdate !== undefined) p.onModelUpdate = options.onModelUpdate

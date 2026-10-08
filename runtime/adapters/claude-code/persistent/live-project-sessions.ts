@@ -29,10 +29,25 @@ import type { PersistentReplSubstrateOptions } from './types.ts'
 /** The live-chat substrate family — the only project PARENT sessions. */
 export const PROJECT_PARENT_INSTANCE_PREFIX = 'cc-agent-'
 
+/** Only a positively identified, durably quarantined conversation leaves the
+ * active-parent census. Missing/corrupt rows and pending or mismatched owners
+ * retain their existing unknown classification. */
+function quarantinedCandidate(sessionKey: string, options: PersistentReplSubstrateOptions, includeSessionId?: string): boolean {
+  if (options.isConversationQuarantined === undefined || options.replRegistryPath === undefined) return false
+  const state = readRegistryState(options.replRegistryPath)
+  if (state.kind !== 'loaded' || state.droppedKeys.includes(sessionKey)) return false
+  const row = state.registry[sessionKey]
+  if (row === undefined || row.sessionId === includeSessionId || !options.isConversationQuarantined(row.sessionId)) return false
+  const entry = pool.get(sessionKey)
+  if (entry === undefined) return true
+  return Bun.peek.status(entry) === 'fulfilled' && (Bun.peek(entry) as ReplSession).sessionId === row.sessionId
+}
+
 /** The supervised `cc-agent-*` sessions scoped to one project id (pool value). */
 export function liveProjectSessions(projectId: string): Array<[string, PersistentReplSubstrateOptions]> {
-  return [...supervisedBySessionKey].filter(([, options]) =>
-    options.project_id === projectId && options.substrate_instance_id.startsWith(PROJECT_PARENT_INSTANCE_PREFIX))
+  return [...supervisedBySessionKey].filter(([key, options]) =>
+    options.project_id === projectId && options.substrate_instance_id.startsWith(PROJECT_PARENT_INSTANCE_PREFIX) &&
+    !quarantinedCandidate(key, options))
 }
 
 export interface ResolvedProjectSession {
@@ -59,6 +74,9 @@ export interface ResolvedProjectSessions {
 export async function resolveLiveProjectSessions(
   poolProjectIds: ReadonlyArray<string | undefined>,
   filter: {
+    /** Recovery only: observe retained original wrappers to drain their exact
+     * workspace authority. Never enables adoption, dispatch or continuation. */
+    includeQuarantinedSessionId?: string
     /** #1226 — drop a candidate whose RECORDED conversation scope is positively a
      *  different one (null is General; the literal `general` project is its own). An
      *  unrecorded scope is kept: it cannot be attributed, so it is never dropped. */
@@ -71,6 +89,7 @@ export async function resolveLiveProjectSessions(
     poolProjectIds.includes(options.project_id) && options.substrate_instance_id.startsWith(PROJECT_PARENT_INSTANCE_PREFIX) &&
     (exact === undefined || options.conversationProjectId === undefined || options.conversationProjectId === exact))
   for (const [sessionKey, options] of candidates) {
+    if (quarantinedCandidate(sessionKey, options, filter.includeQuarantinedSessionId)) continue
     const pending = pool.get(sessionKey)
     if (pending === undefined || Bun.peek.status(pending) !== 'fulfilled') {
       // No pool entry at all is a supervised row whose child is gone; still not absence.
@@ -110,12 +129,14 @@ export interface AsleepConversation {
 export function readAsleepConversations(
   registryPath: string,
   conversationProjectId: string | null,
+  isConversationQuarantined?: (sessionId: string) => boolean,
 ): { kind: 'answered'; rows: AsleepConversation[] } | { kind: 'unreadable'; reason: string } {
   const state = readRegistryState(registryPath)
   if (state.kind === 'absent') return { kind: 'answered', rows: [] }
   if (state.kind === 'unreadable') return { kind: 'unreadable', reason: state.reason }
   const rows: AsleepConversation[] = []
   for (const [sessionKey, row] of Object.entries(state.registry)) {
+    if (isConversationQuarantined?.(row.sessionId)) continue
     if (!sessionKey.startsWith(PROJECT_PARENT_INSTANCE_PREFIX) || typeof row.asleep_at !== 'number') continue
     if (!row.has_session || !row.sessionId || row.pid !== undefined || row.pane_handle !== undefined ||
         row.adoption_claim_by !== undefined) continue

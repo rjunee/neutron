@@ -134,6 +134,7 @@ export interface ProjectScopeLifecycleDeps {
   /** The durable REPL registry (production: the instance's supervision registry). The
    * wake pin and `isAsleep` read the scope's asleep rows from it. */
   registryPath?: string
+  isConversationQuarantined?: (sessionId: string) => boolean
   /** Override of the durable asleep-row reader (tests). */
   asleepConversations?: (scope: string | null) => ReturnType<typeof readAsleepConversations>
   /** Pending tool approvals (read-only, SYNCHRONOUS: re-read right before a sleep's
@@ -482,7 +483,7 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
   /** The scope's durable asleep conversations, newest first; unknown on an unreadable registry. */
   function asleepRows(scope: string | null): AsleepConversation[] | undefined {
     const read = deps.asleepConversations ?? (deps.registryPath === undefined
-      ? undefined : (s: string | null) => readAsleepConversations(deps.registryPath!, s))
+      ? undefined : (s: string | null) => readAsleepConversations(deps.registryPath!, s, deps.isConversationQuarantined))
     if (read === undefined) return []
     try {
       const answer = read(scope)

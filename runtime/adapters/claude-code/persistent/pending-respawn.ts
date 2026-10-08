@@ -54,6 +54,10 @@ export async function drainPendingRespawns(
     resumable?: boolean
   }> = []
   for (const { entry, delayMs } of plan) {
+    if (options.isConversationQuarantined?.(entry.sessionId)) {
+      results.push({ sessionKey: entry.sessionKey, replayed: false, skipped: 'conversation-quarantined' })
+      continue
+    }
     // Resolve the OWNING substrate's options by the entry's pool key. Unregistered
     // → retain on disk (don't replay with the wrong env) and report the skip.
     const owner = supervisedBySessionKey.get(entry.sessionKey)
@@ -104,6 +108,10 @@ export async function drainPendingRespawns(
     const currentEntry = currentEntries.find((e) => e.sessionKey === entry.sessionKey)
     if (currentEntry === undefined) {
       results.push({ sessionKey: entry.sessionKey, replayed: false, skipped: 'already-drained' })
+      continue
+    }
+    if (owner.isConversationQuarantined?.(currentEntry.sessionId)) {
+      results.push({ sessionKey: entry.sessionKey, replayed: false, skipped: 'conversation-quarantined' })
       continue
     }
     const record = owner.replRegistryPath === undefined ? undefined : getRecord(owner.replRegistryPath, entry.sessionKey)

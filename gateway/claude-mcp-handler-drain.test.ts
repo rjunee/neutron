@@ -15,7 +15,7 @@ async function fixture() {
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const db = ProjectDb.open(join(dir, 'db'))
   cleanups.push(() => db.close())
-  for (const file of ['0158_project_admission_fences.sql', '0161_native_host_terminations.sql', '0165_claude_mcp_handler_drain.sql', '0168_planner_authority_retirements.sql']) {
+  for (const file of ['0158_project_admission_fences.sql', '0161_native_host_terminations.sql', '0165_claude_mcp_handler_drain.sql', '0168_planner_authority_retirements.sql', '0169_native_conversation_quarantines.sql']) {
     await db.exec(readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8'))
   }
   await new ProjectAdmissionStore(db).register({ ownerHandle: 'owner', projectId: 'project' })

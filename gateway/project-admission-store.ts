@@ -1,4 +1,5 @@
 import type { ProjectDb } from '@neutronai/persistence/index.ts';
+import { isDeepStrictEqual } from 'node:util';
 
 export interface ProjectAdmissionScope { ownerHandle: string; projectId: string | null }
 export type AdmissionReason = 'conversation' | 'queuedDispatch' | 'build' | 'approval' | 'liveChild';
@@ -45,6 +46,66 @@ function scopeKey(scope: ProjectAdmissionScope): string {
  */
 export class ProjectAdmissionStore {
   constructor(private readonly db: ProjectDb) {}
+
+  isConversationQuarantined(sessionId: string): boolean {
+    return Boolean(this.db.get('SELECT 1 FROM native_conversation_quarantines WHERE session_id = ?', [sessionId]));
+  }
+
+  isConversationRetired(scope: ProjectAdmissionScope, workRef: string): boolean {
+    return Boolean(this.db.get('SELECT 1 FROM conversation_admission_retirements WHERE scope_key = ? AND work_ref = ?', [scopeKey(scope), workRef]));
+  }
+
+  matchesScopeLeases(scope: ProjectAdmissionScope, leases: readonly AdmissionLeaseRow[]): boolean {
+    const key = scopeKey(scope);
+    const expected = leases.map(row => ({ token: row.token, scope_key: scopeKey(row.scope), generation: row.generation,
+      reason: row.reason, producer: row.producer, work_ref: row.workRef })).sort((a, b) => a.token.localeCompare(b.token));
+    const actual = this.db.all<LeaseDbRow>('SELECT token, scope_key, generation, reason, producer, work_ref FROM project_admission_leases WHERE scope_key = ?', [key])
+      .sort((a, b) => a.token.localeCompare(b.token));
+    return expected.every(row => row.scope_key === key) && isDeepStrictEqual(actual, expected);
+  }
+
+  private conversationRetirementsMatch(operationId: string, leases: readonly AdmissionLeaseRow[]): boolean {
+    const rows = this.db.all<LeaseDbRow>(`SELECT lease_token AS token, scope_key, generation, 'conversation' AS reason,
+      producer, work_ref FROM conversation_admission_retirements WHERE operation_id = ?`, [operationId]);
+    return isDeepStrictEqual(rows.sort((a, b) => a.token.localeCompare(b.token)), leases.map(row => ({ token: row.token,
+      scope_key: scopeKey(row.scope), generation: row.generation, reason: row.reason, producer: row.producer, work_ref: row.workRef }))
+      .sort((a, b) => a.token.localeCompare(b.token)));
+  }
+
+  /** Exact terminal work and explicitly authorized logical conversation leases
+   * are the complete affected scope. The operator hold, work tombstones and
+   * conversation guard publish in one transaction before drain. */
+  async prepareConversationQuarantine(operationId: string, lease: AdmissionLeaseRow, authorization: string,
+    sessionId: string, eligible: () => boolean, conversations: readonly AdmissionLeaseRow[] = []): Promise<boolean> {
+    if (!sessionId.trim() || !authorization.trim() || !/^[a-f0-9-]{36}$/.test(operationId)) return false;
+    return this.db.transaction(async tx => {
+      const key = scopeKey(lease.scope);
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      if (conversations.some(row => row.reason !== 'conversation')
+        || !this.matchesScopeLeases(lease.scope, [lease, ...conversations])) return false;
+      const prior = tx.get<{ session_id: string; operation_id: string; scope_key: string; authorization: string }>(
+        'SELECT * FROM native_conversation_quarantines WHERE session_id = ? OR operation_id = ?', [sessionId, operationId]);
+      if (prior) return prior.session_id === sessionId && prior.operation_id === operationId && prior.scope_key === key && prior.authorization === authorization
+        && this.operatorMaintenanceFor(lease.scope, operationId) !== null
+        && this.conversationRetirementsMatch(operationId, conversations)
+        && this.plannerLeaseEligible(tx, lease, eligible);
+      if (!this.plannerLeaseEligible(tx, lease, eligible)) return false;
+      if (this.isPlannerRetired(lease.scope, lease.workRef)) return false;
+      if (conversations.some(row => this.isConversationRetired(row.scope, row.workRef))) return false;
+      const hold = await this.holdOperatorMaintenanceInTransaction(tx, lease.scope, operationId);
+      if (!hold) return false;
+      tx.runSync(`INSERT INTO planner_authority_retirements
+        (operation_id, scope_key, generation, lease_token, reason, producer, work_ref, authorization)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [operationId, key, lease.generation, lease.token, lease.reason, lease.producer, lease.workRef, authorization]);
+      tx.runSync(`INSERT INTO native_conversation_quarantines (session_id, operation_id, scope_key, authorization)
+        VALUES (?, ?, ?, ?)`, [sessionId, operationId, key, authorization]);
+      for (const row of conversations) tx.runSync(`INSERT INTO conversation_admission_retirements
+        (operation_id, scope_key, generation, lease_token, producer, work_ref) VALUES (?, ?, ?, ?, ?, ?)`,
+      [operationId, key, row.generation, row.token, row.producer, row.workRef]);
+      return true;
+    });
+  }
 
   readNativeContinuation(lease: AdmissionLeaseRow): string | undefined {
     return this.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations WHERE lease_token = ? ORDER BY rowid DESC LIMIT 1', [lease.token])?.preparation;
@@ -97,7 +158,8 @@ export class ProjectAdmissionStore {
       const row = tx.get<FenceRow>('SELECT generation, phase, maintenance_token FROM project_admission_fences WHERE scope_key = ?', [key]);
       if (!row) return { status: 'unknown' as const };
       if (this.hasPreparedHostTermination(scope)) return { status: 'fenced' as const };
-      if (row.phase !== 'open' || (reason === 'liveChild' && this.isPlannerRetired(scope, workRef))) return { status: 'fenced' as const };
+      if (row.phase !== 'open' || (reason === 'liveChild' && this.isPlannerRetired(scope, workRef))
+        || (reason === 'conversation' && this.isConversationRetired(scope, workRef))) return { status: 'fenced' as const };
       const token = crypto.randomUUID();
       tx.runSync(`INSERT INTO project_admission_leases (token, scope_key, generation, reason, producer, work_ref)
         VALUES (?, ?, ?, ?, ?, ?)`, [token, key, row.generation, reason, producer, workRef]);
@@ -133,6 +195,8 @@ export class ProjectAdmissionStore {
       if (!row) return { status: 'unknown' as const };
       if (this.hasPreparedHostTermination(scope)) return { status: 'unknown' as const };
       if (reason === 'liveChild' && this.isPlannerRetired(scope, workRef)) return { status: 'fenced' as const };
+      if ((parent.reason === 'conversation' && this.isConversationRetired(scope, parent.workRef))
+        || (reason === 'conversation' && this.isConversationRetired(scope, workRef))) return { status: 'fenced' as const };
       const owner = tx.get<{ generation: number }>(`SELECT generation FROM project_admission_leases
         WHERE scope_key = ? AND reason = ? AND work_ref = ? ORDER BY rowid LIMIT 1`, [key, parent.reason, parent.workRef]);
       if (!owner) return { status: 'no-parent' as const };
@@ -152,7 +216,9 @@ export class ProjectAdmissionStore {
       AND NOT EXISTS (SELECT 1 FROM native_host_terminations
         WHERE lease_token = project_admission_leases.token AND termination IS NULL)
       AND NOT EXISTS (SELECT 1 FROM planner_authority_retirements
-        WHERE lease_token = project_admission_leases.token AND completion IS NULL)`,
+        WHERE lease_token = project_admission_leases.token AND completion IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM conversation_admission_retirements
+        WHERE lease_token = project_admission_leases.token)`,
     [scopeKey(lease.scope), lease.generation, lease.token]).changes === 1);
   }
 
@@ -264,20 +330,27 @@ export class ProjectAdmissionStore {
 
   /** Completion and exact lease deletion commit together; no run/result is changed. */
   async consumePlannerRetirement(operationId: string, lease: AdmissionLeaseRow, authorization: string, completion: string,
-    eligible: () => boolean): Promise<PlannerRetirementConsumption> {
+    eligible: () => boolean, conversations: readonly AdmissionLeaseRow[] = []): Promise<PlannerRetirementConsumption> {
     if (!completion.trim()) return 'refused';
     return this.db.transaction(async tx => {
       const key = scopeKey(lease.scope);
       await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
       const row = tx.get<PlannerRetirementDbRow>(`SELECT *, lease_token AS token FROM planner_authority_retirements WHERE operation_id = ?`, [operationId]);
       if (!row || !this.plannerRetirementMatches(row, lease, authorization)
+        || !this.conversationRetirementsMatch(operationId, conversations)
         || tx.get('SELECT 1 FROM native_host_terminations WHERE lease_token = ?', [lease.token])) return 'refused';
       if (row.completion !== null) return row.completion === completion
-        && !tx.get('SELECT 1 FROM project_admission_leases WHERE token = ?', [lease.token]) ? 'already-retired' : 'refused';
+        && [lease, ...conversations].every(item => !tx.get('SELECT 1 FROM project_admission_leases WHERE token = ?', [item.token])) ? 'already-retired' : 'refused';
       if (!this.plannerLeaseEligible(tx, lease, eligible)) return 'refused';
+      if (conversations.length > 0 && !this.matchesScopeLeases(lease.scope, [lease, ...conversations])) return 'refused';
       const released = tx.runSync(`DELETE FROM project_admission_leases WHERE scope_key = ? AND generation = ? AND token = ?
         AND reason = 'liveChild' AND producer = ? AND work_ref = ?`, [key, lease.generation, lease.token, lease.producer, lease.workRef]).changes;
       if (released !== 1) throw new Error('Planner retirement lease could not commit');
+      for (const item of conversations) {
+        if (tx.runSync(`DELETE FROM project_admission_leases WHERE scope_key = ? AND generation = ? AND token = ?
+          AND reason = 'conversation' AND producer = ? AND work_ref = ?`,
+        [key, item.generation, item.token, item.producer, item.workRef]).changes !== 1) throw new Error('Conversation retirement could not commit');
+      }
       const recorded = tx.runSync(`UPDATE planner_authority_retirements SET completion = ? WHERE operation_id = ?
         AND authorization = ? AND completion IS NULL`, [completion, operationId, authorization]).changes;
       if (recorded !== 1) throw new Error('Planner retirement evidence could not commit');
@@ -419,7 +492,9 @@ export class ProjectAdmissionStore {
       AND NOT EXISTS (SELECT 1 FROM native_host_terminations
         WHERE lease_token = project_admission_leases.token AND termination IS NULL)
       AND NOT EXISTS (SELECT 1 FROM planner_authority_retirements
-        WHERE lease_token = project_admission_leases.token AND completion IS NULL)`, [key, reason, workRef]).changes);
+        WHERE lease_token = project_admission_leases.token AND completion IS NULL)
+      AND NOT EXISTS (SELECT 1 FROM conversation_admission_retirements
+        WHERE lease_token = project_admission_leases.token)`, [key, reason, workRef]).changes);
   }
 
   /** Every durable lease (optionally of one reason), scope decoded. Read-only;

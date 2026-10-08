@@ -145,6 +145,7 @@ export async function replaceQuiescentPooledSession(
 
   const options = supervisedBySessionKey.get(key)
   if (options === undefined || retiringSessionKeys.has(key)) return { status: 'refused', reason: 'unsupervised' }
+  if (options.isConversationQuarantined?.(expected.sessionId)) return { status: 'refused', reason: 'unsupervised' }
   const entry = pool.get(key)
   const resolved = fulfilledSession(entry)
   if (resolved === 'absent') return { status: 'refused', reason: 'absent' }

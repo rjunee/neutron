@@ -853,6 +853,17 @@ CREATE TABLE "connected_members" (
                            CHECK (status IN ('pending', 'active', 'revoked'))
 ) STRICT
 
+[table] conversation_admission_retirements (tbl=conversation_admission_retirements)
+CREATE TABLE conversation_admission_retirements (
+  operation_id TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  lease_token TEXT UNIQUE NOT NULL,
+  producer TEXT NOT NULL,
+  work_ref TEXT NOT NULL,
+  PRIMARY KEY (scope_key, work_ref)
+)
+
 [table] core_global_installations (tbl=core_global_installations)
 CREATE TABLE core_global_installations (
     core_slug                   TEXT NOT NULL,
@@ -1120,6 +1131,16 @@ CREATE TABLE max_subs_unimplemented (
     -- classes and writes raw SQL, the row never lands.
     placeholder TEXT NOT NULL CHECK (1 = 0)
 ) STRICT
+
+[table] native_conversation_quarantines (tbl=native_conversation_quarantines)
+CREATE TABLE native_conversation_quarantines (
+  session_id TEXT PRIMARY KEY NOT NULL,
+  operation_id TEXT UNIQUE NOT NULL,
+  scope_key TEXT NOT NULL,
+  authorization TEXT NOT NULL,
+  CHECK (length(session_id) > 0),
+  CHECK (length(authorization) > 0)
+)
 
 [table] native_host_terminations (tbl=native_host_terminations)
 CREATE TABLE native_host_terminations (

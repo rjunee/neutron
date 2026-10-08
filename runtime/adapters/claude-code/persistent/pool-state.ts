@@ -628,6 +628,7 @@ export class ReplSink {
           const result = await bridge.claudeHandlerAdmission.dispatch(identity, callId,
             JSON.stringify([toolName, body['args'] ?? {}]),
             () => this.byCredential.get(credential) === session && replToolBridgeRef.current === bridge
+              && !session.fenced && !session.isConversationQuarantined?.(session.sessionId)
               && session.toolBridgeActive && session.sessionId === identity.sessionId
               && session.childGeneration === identity.childGeneration
               && session.toolProjectId === identity.projectId
