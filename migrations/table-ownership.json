@@ -23,6 +23,10 @@
         "Its write is limited to the refusal column of the matching run, card and board."
       ]
     },
+    "planner_authority_retirements": {
+      "owner": "gateway/project-admission-store.ts",
+      "writers": ["gateway/project-admission-store.ts"]
+    },
     "native_host_terminations": {
       "owner": "gateway/project-admission-store.ts",
       "writers": ["gateway/project-admission-store.ts"]

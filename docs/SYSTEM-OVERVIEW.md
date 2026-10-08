@@ -68,6 +68,19 @@ and physical-exit evidence plus the newly served process's protected target tree
 entrypoint, listener and health identity; pending/unknown replay refuses. See
 `docs/spec-items/project-herdr-workspaces.md` for the operator contract.
 
+## Retiring expired planner authority
+
+The authenticated `/admin/retire-planner-authority` operation also requires a
+decision signed by the independently pinned host operator. It binds an original
+restricted planner dispatch and exact lease to retained operational evidence.
+The host permanently fences that run and step, drains its accepted planner
+operations, and records retirement while releasing only the original lease.
+The failed run and unknown native outcome remain unchanged; the operation sends
+no native input and does not terminate or replace a parent. It refuses a token
+reserved by pending whole-host recovery. The policy and acceptance controls are
+in `docs/spec-items/a-gateway-restart-keeps-the-project-repls.md`, under
+“Operator retirement of restricted planner authority.”
+
 ## The spine — how to reach the rest of this file
 
 Added 2026-08-31. This file is ~8,900 lines. Reading it end to end costs more than the orientation

@@ -1,3 +1,4 @@
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { execFile } from 'node:child_process'
 import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
@@ -28,16 +29,48 @@ export const PLANNER_TOOL_SCHEMA = {
 
 type Session = object
 type Operation = (args: unknown) => Promise<unknown>
-const bindings = new WeakMap<Session, Map<string, { capability: string; operation: Operation }>>()
+interface GrantControl { session: Session; request: BoundedWorkRequest; retired: boolean; ready: Promise<void>; initialized(): void; chain: Promise<unknown> }
+const bindings = new WeakMap<Session, Map<string, { capability: string; operation: Operation; control: GrantControl }>>()
+const constructingAndLive = new Map<string, Set<GrantControl>>()
+const retiredRequests = new Set<string>()
+const requestKey = (request: BoundedWorkRequest) => JSON.stringify(request)
+const forgetControl = (control: GrantControl) => {
+  const identity = requestKey(control.request), grants = constructingAndLive.get(identity)
+  grants?.delete(control)
+  if (grants?.size === 0) constructingAndLive.delete(identity)
+}
+
+/** Process-local barrier includes grants still being constructed. The durable
+ * scope/run/step tombstone must precede this call and guards future processes. */
+export async function retirePlannerWork(request: BoundedWorkRequest): Promise<void> {
+  const identity = requestKey(request)
+  retiredRequests.add(identity)
+  const grants = [...constructingAndLive.get(identity) ?? []]
+  for (const control of grants) control.retired = true
+  await Promise.all(grants.map(async control => {
+    await control.ready
+    await control.chain
+    const owned = bindings.get(control.session)
+    if (owned?.get(key(request.run_id, request.step_id))?.control === control) owned.delete(key(request.run_id, request.step_id))
+    forgetControl(control)
+  }))
+}
+
 const key = (run: string, step: string) => JSON.stringify([run, step])
 export async function dispatchPlannerWork(session: Session, args: unknown): Promise<unknown> {
   if (!record(args) || typeof args.run_id !== 'string' || typeof args.step_id !== 'string') throw Error('Planner operation identity required')
   const grant = bindings.get(session)?.get(key(args.run_id, args.step_id))
-  if (!grant || typeof args.capability !== 'string' || args.capability !== grant.capability) throw Error('Planner has no current host operation grant')
+  if (!grant || grant.control.retired || typeof args.capability !== 'string' || args.capability !== grant.capability) throw Error('Planner has no current host operation grant')
   return grant.operation(args)
 }
 export function releasePlannerWork(session: Session, request: BoundedWorkRequest): void {
-  bindings.get(session)?.delete(key(request.run_id, request.step_id))
+  const owned = bindings.get(session)
+  const grant = owned?.get(key(request.run_id, request.step_id))
+  if (grant) {
+    grant.control.retired = true
+    fireAndForget('planner-work.release-grant', grant.control.chain.finally(() => forgetControl(grant.control)))
+    owned!.delete(key(request.run_id, request.step_id))
+  }
 }
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 const digest = (text: string) => createHash('sha256').update(text).digest('hex')
@@ -45,13 +78,26 @@ const MAX_BYTES = 1024 * 1024
 
 /** Constructed only by the admitted native dispatch owner, never from tool arguments.
  * Expiry revokes operations, NOT the durable child lease or its unknown outcome. */
-export async function bindPlannerWork(input: {
+interface PlannerWorkInput {
   session: Session; request: BoundedWorkRequest; deadline: number; signal: AbortSignal
   base: string; pr: unknown; brief: string; context: unknown
   current(): boolean | Promise<boolean>
   validate(envelope: unknown): boolean
-}): Promise<string> {
-  const request = structuredClone(input.request)
+}
+export async function bindPlannerWork(input: PlannerWorkInput): Promise<string> {
+  const request = structuredClone(input.request), identity = requestKey(request)
+  if (retiredRequests.has(identity)) throw Error('Planner authority retired')
+  let initialized!: () => void
+  const ready = new Promise<void>(resolve => { initialized = resolve })
+  const control: GrantControl = { session: input.session, request, retired: false, ready, initialized, chain: Promise.resolve() }
+  const grants = constructingAndLive.get(identity) ?? new Set<GrantControl>()
+  grants.add(control); constructingAndLive.set(identity, grants)
+  try { return await constructPlannerWork({ ...input, request, get deadline() { return input.deadline } }, control) }
+  catch (error) { forgetControl(control); throw error }
+  finally { control.initialized() }
+}
+async function constructPlannerWork(input: PlannerWorkInput, control: GrantControl): Promise<string> {
+  const request = input.request
   if (!requiresPlannerWork(request) || !request.writable || request.network || !/^[0-9a-f]{40,64}$/.test(input.base)) throw Error('Invalid planner grant')
   const root = await realpath(request.cwd)
   const rootStat = await lstat(root)
@@ -60,13 +106,12 @@ export async function bindPlannerWork(input: {
   if (resultDir !== dirname(request.result.path) || resultDir === root || resultDir.startsWith(root + '/')) throw Error('Planner result must be host-owned outside its writable tree')
   let terminal = false
   const writes = new Map<string, string>()
-  let chain: Promise<unknown> = Promise.resolve()
   const active = async () => {
-    if (terminal || input.signal.aborted || Date.now() >= input.deadline) throw Error('Planner operation grant expired or lost ownership')
+    if (control.retired || terminal || input.signal.aborted || Date.now() >= input.deadline) throw Error('Planner operation grant expired or lost ownership')
     const current = await input.current()
     // Waiting for a sibling proof grants no fresh budget and cannot outlive
     // cancellation, termination or loss of this operation's original authority.
-    if (terminal || input.signal.aborted || Date.now() >= input.deadline || !current) throw Error('Planner operation grant expired or lost ownership')
+    if (control.retired || terminal || input.signal.aborted || Date.now() >= input.deadline || !current) throw Error('Planner operation grant expired or lost ownership')
     const now = await lstat(root)
     if (now.dev !== rootStat.dev || now.ino !== rootStat.ino || await realpath(root) !== root) throw Error('Planner worktree identity changed')
   }
@@ -192,10 +237,14 @@ export async function bindPlannerWork(input: {
     terminal = true
     return { published: true, head, preparation: measured.preparation }
   }
-  const serialize: Operation = args => { const result = chain.then(() => perform(args)); chain = result.catch(() => {}); return result }
-  const owned = bindings.get(input.session) ?? new Map<string, { capability: string; operation: Operation }>()
+  const serialize: Operation = args => { const result = control.chain.then(() => perform(args)); control.chain = result.catch(() => {}); return result }
+  // Async construction may overlap retirement; no capability is installed from
+  // a stale authorization result, even when its filesystem/Git preparation passed.
+  await active()
+  if (control.retired || retiredRequests.has(requestKey(request))) throw Error('Planner authority retired')
+  const owned = bindings.get(input.session) ?? new Map<string, { capability: string; operation: Operation; control: GrantControl }>()
   if (owned.has(key(request.run_id, request.step_id))) throw Error('Planner operation grant already bound')
   const capability = randomBytes(32).toString('hex')
-  owned.set(key(request.run_id, request.step_id), { capability, operation: serialize }); bindings.set(input.session, owned)
+  owned.set(key(request.run_id, request.step_id), { capability, operation: serialize, control }); bindings.set(input.session, owned)
   return capability
 }

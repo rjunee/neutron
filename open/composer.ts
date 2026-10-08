@@ -4430,6 +4430,15 @@ export function buildOpenGraphComposer(
     // the per-boot app token keeps this force-respawn endpoint privileged.
     const replRegistryPath = deriveReplSupervisionPaths(owner_home).replRegistryPath
     const adminRespawnSurface = createAdminRespawnSurface({
+      retirePlannerAuthority: async raw => {
+        const { retirePlannerAuthority } = await import('./wiring/planner-authority-retirement.ts')
+        return retirePlannerAuthority({ authority: options.nativeHostRecoveryAuthority,
+          stateRoot: projectBuildStateRoot, admission: projectAdmission,
+          runs: new TridentRunStore(db), attempts: new TridentAttemptLedger(db),
+          projectIdForRun: run => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+          listProjectIds,
+        }, raw)
+      },
       reconcileTerminatedChat: async raw => {
         const { reconcileTerminatedProjectChat } = await import('./wiring/reconcile-host-terminated-chat.ts')
         return reconcileTerminatedProjectChat(raw, { admission: projectAdmission, projectIds: listProjectIds,

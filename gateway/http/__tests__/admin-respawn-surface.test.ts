@@ -149,3 +149,24 @@ describe('POST /admin/respawn-session — mounted through the compose chain', ()
     expect(await res.text()).toBe('default')
   })
 })
+
+
+test('planner retirement requires owner authentication, bounds the receipt and never invokes parent control', async () => {
+  const seen: unknown[] = []
+  const surface = createAdminRespawnSurface({ gatewayToken: 'owner-secret',
+    respawn: () => { throw Error('parent control forbidden') },
+    retirePlannerAuthority: async value => { seen.push(value); return { status: (value as { signature?: string }).signature === 'operator' ? 'released' : 'refused' } },
+    rateLimit: { windowMs: 60000, maxRequests: 3 } })
+  const handler = composeHttpHandler({ adminRespawn: surface, defaultHandler })
+  const call = (value: unknown, token = 'owner-secret') => handler.fetch(new Request('http://x/admin/retire-planner-authority', {
+    method: 'POST', headers: { 'X-Gateway-Token': token }, body: JSON.stringify(value),
+  }), {} as never)
+  expect((await call({ signature: 'operator' }, 'foreign')).status).toBe(403)
+  expect(seen).toHaveLength(0)
+  expect((await call({ padding: 'x'.repeat(65536) })).status).toBe(409)
+  expect(seen).toHaveLength(0)
+  expect((await call({})).status).toBe(409)
+  expect((await call({ signature: 'operator' })).status).toBe(200)
+  expect((await call({ signature: 'operator' })).status).toBe(429)
+  expect(seen).toHaveLength(2)
+})

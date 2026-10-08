@@ -545,6 +545,81 @@ death: the persistent project REPL can remain alive after its native task ends.
       retains its existing validator behavior. Verify: the same suite and
       `bun test open/__tests__/project-build-e2e.test.ts`.
 
+### Operator retirement of restricted planner authority
+
+The owner-directed recovery policy (Decisions Log 2026-10-08) permits an
+independent, pinned operator authority to retire an exact restricted planner's
+workflow authority without rebooting the host or terminating its parent. Its
+signed decision kind is `planner-authority-retired`. This establishes permanent
+loss of that work's host authority; native-loop liveness and task outcome remain
+unknown. Automatic parent task notifications may still arrive. The decision is
+neither a completed/blocked result nor proof of native-task exit, parent idleness,
+or containment of every native effect.
+
+Eligibility requires a canonical terminal run, its original prepared/started
+native dispatch attempt, and an original signed child-bound dispatch agreeing
+with the full stored lease and request. The request must be a writable `plan`
+with `tools: edit` and no network, using the restricted `neutron-planner-v1`
+profile whose sole model tool is `mcp__neutron__planner_work`. The signed
+operator decision binds the canonical installation and scope, full lease
+identity, original dispatch/request digests, original parent and native child,
+policy version, and retained evidence-bundle digest. Existing protected operator
+trust configuration supplies the verification key; request data cannot choose it.
+
+The original dispatch authenticates the requested profile, not the native
+runtime's actual selection. A named operator observation must corroborate actual
+selection using retained original invocation, parent/session and deployed native
+tool-enforcement evidence. Record the producer, observation time and evidence
+digests as operational corroboration, without relabelling unsigned transcript
+bytes as an original signed observation. Deadline expiry, vanished worktrees,
+gateway death, provider prose or an operator signature without this corroboration
+do not independently establish eligibility.
+
+Before release, persist an immutable retirement record for the exact
+installation/scope/run/step and prevent new authority for that identity. Enforce
+the retirement at child admission, planner grant binding, continuation and host
+operation execution, including after restart or a change of token/generation.
+Establish a barrier against concurrent grant creation and new calls, revoke
+matching current grants, and drain already-accepted host operations before
+consuming the retirement. The operator's recorded observation of the original
+gateway's death establishes loss of its process-local grant and must account for
+its accepted operations. The live consumer authenticates that operator judgment
+and drains its own grant registry. An unreadable or incomplete barrier/drain
+observation retains ownership. A failed or interrupted retirement remains fenced
+and is retryable under the same exact authority; it cannot reopen the work.
+
+Record consumption and delete only the unchanged full lease in one transaction.
+Repeated consumption is idempotent. Never change the run or attempt outcome,
+fabricate a result, remove the original dispatch/reservation, or redispatch the
+retired work. Refuse any lease reserved by a pending whole-host termination
+preparation: this policy cannot supersede, cancel or consume that preparation.
+Unrelated leases, active workflows and existing maintenance fences survive.
+Release matching workspace authority with an explicit retirement reason, without
+claiming native completion. Recovery sends no parent control or ordinary native
+input and grants no permission to close, replace or reconfigure a parent; its
+independent activity and census guards remain authoritative.
+
+- [ ] An authenticated eligible retirement releases only its exact lease after
+      the authority barrier and drain, preserving all outcome and result evidence.
+      The same flow succeeds with native-loop liveness unknown and the parent
+      alive; no parent input or termination occurs. Verify: dedicated planner
+      authority retirement integration tests and
+      `bun test open/__tests__/project-build-e2e.test.ts`.
+- [ ] Forged or foreign authority, changed request/lease/parent/child, missing
+      profile corroboration, nonplanner work, nonterminal runs, pending host
+      termination preparation and unknown grant/drain state retain ownership.
+      Deadline expiry or a missing worktree alone never releases a lease.
+- [ ] Retirement races with grant creation and an accepted operation cannot
+      release before draining or admit a later operation. Rebinding, continuation,
+      fresh-token admission and restart cannot restore the retired run/step.
+      Atomic failure and retry preserve the immutable record and exact lease;
+      duplicate consumption cannot affect a sibling lease or active workflow.
+- [ ] Ordinary automatic reconciliation continues retaining unknown children.
+      Positive controls fail if retirement is disabled; negative controls fail
+      when authentication, identity, pending-preparation, barrier/drain or
+      permanent-retirement guards are bypassed. Verify with bidirectional
+      mutations in the dedicated integration tests and planner operation tests.
+
 ### Prepared whole-host termination of unresolved native work
 
 An independent host/operator authority may prepare physical recovery of an exact

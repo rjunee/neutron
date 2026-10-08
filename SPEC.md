@@ -217,6 +217,12 @@ lazy: until constructed, their panes are neither reconciled nor reaped — the s
 options for (`unregistered-skip`) rather than actuating it under another
 substrate's identity.
 
+An independently authenticated operator may permanently retire exact restricted
+planner workflow authority while preserving unknown native-loop liveness and
+outcome. This scoped recovery preserves active work and parent lifecycle guards
+(Decisions Log 2026-10-08, restricted planner authority retirement;
+[`restart recovery contract`](docs/spec-items/a-gateway-restart-keeps-the-project-repls.md#operator-retirement-of-restricted-planner-authority)).
+
 A key fenced after loss of ownership evidence remains refused until a gateway
 restart performs fresh reconciliation, even if registry writes recover meanwhile
 (Decisions Log 2026-09-14, "fence duration").
@@ -341,6 +347,20 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-10-08 — Operator retirement of restricted planner workflow authority.
+
+Owner-directed recovery must preserve live work without a host reboot. An
+independent pinned operator may authenticate the retirement of an exact restricted
+planner's host authority, with permanent scope/run/step fencing and verified
+grant drain before its workflow lease is released. Original signed dispatch
+authority and operator-corroborated native profile selection retain their distinct
+provenance. Native-loop liveness and task outcome remain unknown; automatic
+parent notifications may still arrive. This authorizes no parent control or
+ordinary native input and does not relax parent lifecycle guards or automatic
+unknown-child reconciliation. Pending whole-host termination preparations remain
+reserved and are ineligible. The normative conditions and acceptance controls
+live in the [restart recovery contract](docs/spec-items/a-gateway-restart-keeps-the-project-repls.md#operator-retirement-of-restricted-planner-authority).
 
 ### 2026-10-06 — Codex account exclusion identifies the physical directory object.
 
