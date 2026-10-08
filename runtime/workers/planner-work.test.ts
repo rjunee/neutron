@@ -246,7 +246,7 @@ test('planner retirement drains an accepted operation and prevents later calls w
   await expect(f.call('brief')).rejects.toThrow('no current')
   expect(await sibling.call('brief')).toMatchObject({ brief: 'Host brief' })
   pause.release()
-  expect((await rejection).message).toContain('expired or lost ownership'); await retirement
+  expect(await rejection).toMatchObject({ message: expect.stringContaining('expired or lost ownership') }); await retirement
   await expect(access(join(f.cwd, 'late.ts'))).rejects.toThrow()
   await expect(implementation.bindPlannerWork({ session: {}, request: f.request, base: f.base, deadline: Date.now() + 10000,
     signal: new AbortController().signal, pr: null, brief: '', context: {}, current: () => true, validate: () => true })).rejects.toThrow('retired')

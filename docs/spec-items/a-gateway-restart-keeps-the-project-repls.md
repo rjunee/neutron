@@ -581,9 +581,10 @@ the retirement at child admission, planner grant binding, continuation and host
 operation execution, including after restart or a change of token/generation.
 Establish a barrier against concurrent grant creation and new calls, revoke
 matching current grants, and drain already-accepted host operations before
-consuming the retirement. Verified loss of the original gateway establishes loss
-of its process-local grant; the recorded operational evidence must account for
-the original accepted operations. An unreadable or incomplete barrier/drain
+consuming the retirement. The operator's recorded observation of the original
+gateway's death establishes loss of its process-local grant and must account for
+its accepted operations. The live consumer authenticates that operator judgment
+and drains its own grant registry. An unreadable or incomplete barrier/drain
 observation retains ownership. A failed or interrupted retirement remains fenced
 and is retryable under the same exact authority; it cannot reopen the work.
 

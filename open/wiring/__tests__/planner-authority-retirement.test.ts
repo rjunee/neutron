@@ -21,7 +21,7 @@ import { currentBootId } from '@neutronai/runtime/adapters/claude-code/persisten
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
-async function fixture(change?: (request: BoundedWorkRequest) => void, boot = 'kernel', profile = PLANNER_PROFILE) {
+async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequest, boot = 'kernel', profile = PLANNER_PROFILE) {
   const dir = await mkdtemp(join(tmpdir(), 'planner-retirement-')); cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const path = join(dir, 'project.db'); seedMigratedDb(path)
   const db = ProjectDb.open(path); cleanup.push(() => db.close())
@@ -31,10 +31,10 @@ async function fixture(change?: (request: BoundedWorkRequest) => void, boot = 'k
   await runs.update(run.id, { phase: 'failed' })
   const stateRoot = join(dir, '.trident', 'project-builds'), state = join(stateRoot, encodeURIComponent(run.id))
   await mkdir(state, { recursive: true })
-  const request: BoundedWorkRequest = { run_id: run.id, step_id: `${run.id}:plan:0`, role: 'plan', model_id: 'model', effort: null,
+  let request: BoundedWorkRequest = { run_id: run.id, step_id: `${run.id}:plan:0`, role: 'plan', model_id: 'model', effort: null,
     cwd: join(dir, 'missing-worktree'), writable: true, network: false, tools: 'edit', brief: { path: join(state, 'brief'), integrity: 'original' },
     result: { path: join(state, 'plan.result'), schema: 'project-plan-v2' }, thread: null, budget: { wall_ms: 100 }, needs_approval_decision: false }
-  change?.(request)
+  request = change?.(request) ?? request
   const attempts = new TridentAttemptLedger(db), key = { run_id: run.id, step_id: request.step_id, attempt_id: 'dispatch' }
   await attempts.admit({ ...key, phase: 'decomposition', task_id: 'task', head_sha: 'a'.repeat(40), role: request.role, review_seat: null,
     provider: 'anthropic', requested_model: 'model', resolved_model: 'model', placement: 'in-repl', queued_at: 1 })
@@ -103,9 +103,10 @@ test.each(['forged', 'scope', 'token', 'request', 'dispatch', 'parent', 'child',
 
 test.each(['nonplanner', 'network', 'tools', 'live', 'finished', 'host-preparation'] as const)('refuses ineligible %s work', async change => {
   const f = await fixture(request => {
-    if (change === 'nonplanner') request.role = 'build'
-    if (change === 'network') request.network = true
-    if (change === 'tools') request.tools = 'edit-and-run'
+    if (change === 'nonplanner') return { ...request, role: 'build' }
+    if (change === 'network') return { ...request, network: true }
+    if (change === 'tools') return { ...request, tools: 'edit-and-run' }
+    return request
   })
   if (change === 'live') await f.runs.update(f.run.id, { phase: 'forge-init' })
   if (change === 'finished') f.db.runSync("UPDATE code_trident_attempts SET outcome = 'completed' WHERE run_id = ?", [f.run.id])
