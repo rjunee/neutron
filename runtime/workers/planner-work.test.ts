@@ -121,7 +121,7 @@ test('concurrent requests on one native MCP session require their own secret and
 })
 
 test('semantic mutations expose executable diagnostics and lost legitimate preparation', async () => {
-  const source = await readFile(new URL('./planner-work.ts', import.meta.url), 'utf8')
+  const source = (await readFile(new URL('./planner-work.ts', import.meta.url), 'utf8')).replace(/'(@neutronai\/[^']+)'/g, (_match, specifier: string) => JSON.stringify(import.meta.resolve(specifier)))
   const directory = await mkdtemp(join(tmpdir(), 'planner-mutants-')); roots.push(directory)
   const mutations = [
     { name: 'executable-diagnostic', from: 'else new Bun.Transpiler({ loader: loader! }).scan(source)', to: 'else await import(path)',
@@ -196,7 +196,7 @@ test.each(['false', 'cancelled', 'expired'] as const)('planner rechecks %s autho
 })
 
 test('planner async authorization semantic mutants cannot authorize false grants or discard legitimate waiting', async () => {
-  const source = await readFile(new URL('./planner-work.ts', import.meta.url), 'utf8')
+  const source = (await readFile(new URL('./planner-work.ts', import.meta.url), 'utf8')).replace(/'(@neutronai\/[^']+)'/g, (_match, specifier: string) => JSON.stringify(import.meta.resolve(specifier)))
   const directory = await mkdtemp(join(tmpdir(), 'planner-current-mutants-')); roots.push(directory)
   const anchor = 'const current = await input.current()'
   expect(source.split(anchor)).toHaveLength(2)
@@ -214,7 +214,7 @@ test('planner async authorization semantic mutants cannot authorize false grants
   const allowed = await fixture(implementation, { current: async () => true })
   expect(await allowed.call('brief')).toMatchObject({ brief: 'Host brief' })
   await expect(fixture(denyApi, { current: async () => true })).rejects.toThrow('lost ownership')
-  const recheck = "if (terminal || input.signal.aborted || Date.now() >= input.deadline || !current)"
+  const recheck = "if (control.retired || terminal || input.signal.aborted || Date.now() >= input.deadline || !current)"
   expect(source.split(recheck)).toHaveLength(2)
   const stale = join(directory, 'skip-post-await-deadline.ts')
   await writeFile(stale, source.replace(recheck, 'if (!current)'))
@@ -229,4 +229,40 @@ test('planner async authorization semantic mutants cannot authorize false grants
     if (api === implementation) await expect(f.call('brief')).rejects.toThrow('lost ownership')
     else expect(await f.call('brief')).toMatchObject({ brief: 'Host brief' })
   }
+})
+
+
+test('planner retirement drains an accepted operation and prevents later calls while preserving siblings', async () => {
+  let waiting = false
+  const entered = plannerBarrier(), pause = plannerBarrier()
+  const f = await fixture(implementation, { current: async () => { if (waiting) { entered.release(); await pause.promise }; return true } })
+  const sibling = await fixture()
+  waiting = true
+  const operation = f.call('write', { path: 'late.ts', content: 'must not write after retirement' })
+  const rejection = operation.catch(error => error)
+  await entered.promise
+  const retirement = implementation.retirePlannerWork(f.request)
+  expect(Bun.peek.status(retirement)).toBe('pending')
+  await expect(f.call('brief')).rejects.toThrow('no current')
+  expect(await sibling.call('brief')).toMatchObject({ brief: 'Host brief' })
+  pause.release()
+  expect((await rejection).message).toContain('expired or lost ownership'); await retirement
+  await expect(access(join(f.cwd, 'late.ts'))).rejects.toThrow()
+  await expect(implementation.bindPlannerWork({ session: {}, request: f.request, base: f.base, deadline: Date.now() + 10000,
+    signal: new AbortController().signal, pr: null, brief: '', context: {}, current: () => true, validate: () => true })).rejects.toThrow('retired')
+})
+
+test('retirement includes constructing grants and refuses a late capability installation', async () => {
+  const f = await fixture()
+  const request = { ...f.request, step_id: 'constructing-step' }
+  const entered = plannerBarrier(), pause = plannerBarrier()
+  const binding = implementation.bindPlannerWork({ session: {}, request, base: f.base, deadline: Date.now() + 10000,
+    signal: new AbortController().signal, pr: null, brief: '', context: {}, validate: () => true,
+    current: async () => { entered.release(); await pause.promise; return true } })
+  const rejection = binding.catch(error => error)
+  await entered.promise
+  const retirement = implementation.retirePlannerWork(request)
+  expect(Bun.peek.status(retirement)).toBe('pending')
+  pause.release(); expect((await rejection).message).toContain('expired or lost ownership'); await retirement
+  expect(await f.call('brief')).toMatchObject({ brief: 'Host brief' })
 })

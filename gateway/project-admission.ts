@@ -33,6 +33,8 @@ export type AdmissionProducer = 'chat' | 'acting-turn' | 'work-board' | 'hold-dr
  * token-bound `release` is reserved for refusal before child dispatch.
  */
 export interface NativeChildAdmission {
+  /** Permanent operator retirement, including a prepared operation. */
+  isRetired?(runId: string, stepId: string): boolean
   admit(runId: string, stepId: string): Promise<AdmittedWork | AdmissionRefusal>
   complete(runId: string, stepId: string): Promise<number>
   /** Ends only this process's pre-dispatch exemption, not the durable lease. */
@@ -182,6 +184,7 @@ export class ProjectAdmission {
    */
   forNativeChild(projectId: string | null): NativeChildAdmission {
     return {
+      isRetired: (runId, stepId) => this.store.isPlannerRetired(this.scopeFor(projectId), JSON.stringify([runId, stepId])),
       continuation: (request, receipt) => {
         const rows = this.listLeases('liveChild').filter(row => row.scope.projectId === projectId
           && row.workRef === JSON.stringify([request.run_id, request.step_id]));
@@ -231,6 +234,7 @@ export class ProjectAdmission {
           return this.admittedWork(joined.lease);
         }
         if (joined.status === 'unknown') return { status: 'unknown' };
+        if (joined.status === 'fenced') return { status: 'fenced', phase: null };
         const admitted = await this.admit(projectId, 'liveChild', 'native-child', JSON.stringify([runId, stepId]));
         if (admitted.status === 'admitted') this.preparingNativeChildTokens.add(admitted.lease.token);
         return admitted;

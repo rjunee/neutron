@@ -1223,6 +1223,23 @@ CREATE TABLE persona_drafts (
     git_sha TEXT
 ) STRICT
 
+[table] planner_authority_retirements (tbl=planner_authority_retirements)
+CREATE TABLE planner_authority_retirements (
+  scope_key TEXT NOT NULL,
+  work_ref TEXT NOT NULL,
+  operation_id TEXT NOT NULL UNIQUE,
+  lease_token TEXT NOT NULL UNIQUE,
+  generation INTEGER NOT NULL,
+  reason TEXT NOT NULL CHECK (reason = 'liveChild'),
+  producer TEXT NOT NULL,
+  authorization TEXT NOT NULL,
+  completion TEXT,
+  PRIMARY KEY (scope_key, work_ref),
+  CHECK (length(operation_id) > 0),
+  CHECK (length(lease_token) > 0),
+  CHECK (length(authorization) > 0)
+)
+
 [table] proactive_brief_log (tbl=proactive_brief_log)
 CREATE TABLE proactive_brief_log (
     -- Owner-local YYYY-MM-DD the brief was posted for (resolved from

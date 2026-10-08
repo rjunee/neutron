@@ -158,3 +158,14 @@ export function completeNativeChildWorkspaceRequest(session: object, request: Bo
     record.finish()
   }
 }
+
+/** Retires workflow workspace authority after an authenticated permanent fence
+ * and durable lease consumption. This records no native task outcome. */
+export function retireNativeChildWorkspaceRequest(session: object, request: BoundedWorkRequest): void {
+  for (const record of sessions.get(session) ?? []) {
+    if (!isDeepStrictEqual(record.request, request)) continue
+    sessions.get(session)?.delete(record)
+    record.completed = true // Internal authority is closed; not a task result.
+    record.finish()
+  }
+}

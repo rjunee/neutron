@@ -593,13 +593,14 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       if (briefIntegrity(brief) !== turn.request.brief.integrity) throw Error('Planner brief integrity changed')
       plannerCapability = await bindPlannerWork({ session, request: turn.request, get deadline() { return turn.dispatchBudget?.deadline_ms ?? deadline }, signal: turn.signal, base: run.base_sha!, pr: hostContext.snapshot.pr, brief, context: hostContext,
         current: async () => {
+          if (context.nativeChildAdmission.isRetired?.(turn.request.run_id, turn.request.step_id)) return false
           // Fresh sibling leases precede their local worktree measurements.
           // Every planner operation waits for that census, not only initial bind.
           // Lost own authority refuses immediately; unknown/foreign children
           // cannot acquire proof merely by waiting under the original deadline.
           while (!session.hasChildExited() && ownsNativeChildWorkspace(admitted, session, turn.request)) {
             const remaining = (turn.dispatchBudget?.deadline_ms ?? deadline) - Date.now()
-            if (turn.signal.aborted || remaining <= 0) return false
+            if (turn.signal.aborted || remaining <= 0 || context.nativeChildAdmission.isRetired?.(turn.request.run_id, turn.request.step_id)) return false
             if (nativeChildCensusKnown(admitted)) return true
             try { await delay(Math.min(25, remaining), undefined, { signal: turn.signal }) }
             catch { return false }
