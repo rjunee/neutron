@@ -32,6 +32,7 @@ async function retireTransport() {
     assert.ok(ready.locks > 0, 'The native fixture must actually hold its account lock')
     transport.close()
     const exit = await transport.exited
+    assert.ok(exit, 'The real transport must provide native exit evidence')
     assert.equal(exit.pid, ready.pid)
     return {
       transport: new WeakRef(transport), close: new WeakRef(transport.close),

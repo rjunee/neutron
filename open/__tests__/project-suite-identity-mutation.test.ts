@@ -93,7 +93,7 @@ test('byte identity mutations preserve hardlink siblings and catch changed bytes
     const parse = 'try { observations = JSON.parse(result.stdout) } catch { return null }'
     expect(prepared.split(parse)).toHaveLength(2)
     for (const [replacement, failed, assertion] of [
-      ['observations = JSON.parse(result.stdout)', 'manifest-free suite identity', 'error: Received value must be a string: null'],
+      ['try { observations = JSON.parse(result.stdout) } catch { return digest(result.stdout) }', 'manifest resolution refuses', 'error: expect(received).toBeNull()'],
       ['try { observations = JSON.parse(result.stdout) } catch { observations = [] }', 'manifest resolution refuses', 'error: expect(received).toBeNull()'],
     ]) {
       await writeFile(subject, prepared.replace(parse, replacement!))

@@ -304,7 +304,12 @@ describe('executeBoundReview', () => {
     expect(host.calls.some((cmd) => cmd.join(' ').includes(`worktree remove ${worktree}`))).toBe(true)
   })
 
-  test('the production adapter reuses the existing panel in an isolated one-round resume', async () => {
+  test.each([
+    ['valid findings', Buffer.from('[{"severity":"minor","title":"adapter finding"}]').toString('hex'), [{ severity: 'minor', title: 'adapter finding' }]],
+    ['BLOB storage class', '5b315d', []],
+    ['malformed bytes', '5b7b227469746c65223a2280227d5d', []],
+    ['literal replacement character', '5b7b227469746c65223a22efbfbd227d5d', [{ title: '�' }]],
+  ] as const)('the production adapter reuses the existing panel in an isolated one-round resume: %s', async (_name, hex, findings) => {
     const worktree = scratch('adapter')
     const host = recordingHost({ worktree, gate: 'absent' })
     const firedInputs: InnerLoopInput[] = []
@@ -321,13 +326,13 @@ describe('executeBoundReview', () => {
             `UPDATE code_trident_runs
                 SET inner_checkpoint = 'argus-approved',
                     inner_checkpoint_head = ?,
-                    inner_checkpoint_findings = ?,
+                    inner_checkpoint_findings = ${_name === 'BLOB storage class' ? '?' : 'CAST(? AS TEXT)'},
                     inner_result = ?,
                     subagent_status = 'completed'
               WHERE id = ?`,
             [
               HEAD,
-              JSON.stringify([{ severity: 'minor', title: 'adapter finding' }]),
+              Buffer.from(hex, 'hex'),
               JSON.stringify({
                 ok: true,
                 verdict: 'APPROVE',
@@ -349,7 +354,7 @@ describe('executeBoundReview', () => {
       sleep: async () => {},
     })
 
-    expect(result).toMatchObject({ status: 'success', reviewed_sha: HEAD })
+    expect(result).toMatchObject({ status: 'success', reviewed_sha: HEAD, findings: [...findings] })
     expect(firedInputs).toHaveLength(1)
     const input = firedInputs[0]!
     expect(input.max_rounds).toBe(1)

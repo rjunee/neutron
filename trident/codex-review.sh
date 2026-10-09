@@ -215,7 +215,22 @@ start_stage_heartbeat() {
   # bridge parses; a single stray line from the ticker would be read as part of the
   # verdict. Stderr is kept so a failing stamp is still diagnosable.
   (
-    while sleep "$REVIEW_HEARTBEAT_SECS"; do
+    # Own and reap the timer too: an orphan sleep would retain this review's
+    # stderr pipe until the next heartbeat and delay the caller's completion.
+    heartbeat_sleep_pid=''
+    stop_heartbeat_sleep() {
+      [ -n "$heartbeat_sleep_pid" ] || return 0
+      kill "$heartbeat_sleep_pid" 2>/dev/null || true
+      wait "$heartbeat_sleep_pid" 2>/dev/null || true
+    }
+    trap 'stop_heartbeat_sleep' EXIT
+    trap 'exit 143' TERM
+    trap 'exit 130' INT
+    while :; do
+      sleep "$REVIEW_HEARTBEAT_SECS" &
+      heartbeat_sleep_pid=$!
+      wait "$heartbeat_sleep_pid" || exit 0
+      heartbeat_sleep_pid=''
       kill -0 "$REVIEW_MAIN_PID" 2>/dev/null || exit 0
       stamp_stage codex-review-alive
     done

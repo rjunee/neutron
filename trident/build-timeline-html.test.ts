@@ -217,7 +217,8 @@ test('a filter refresh requested during a fetch is replayed with the latest quer
   location.search = '?search=latest'
   await runInContext('refresh()', context)
   finishFirst({ ok: true, text: async () => 'old results' })
-  for (let i = 0; i < 10; i++) await Promise.resolve()
+  const deadline = performance.now() + 1000
+  while (elements.get('timeline')?.innerHTML !== 'fresh query results' && performance.now() < deadline) await Bun.sleep(1)
   expect(requests).toEqual(['/timeline', '/timeline?search=latest'])
   expect(elements.get('timeline')!.innerHTML).toBe('fresh query results')
 })

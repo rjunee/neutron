@@ -23,6 +23,7 @@ import {
   type TridentWorkflowFirer,
 } from './inner-loop.ts'
 import type { TridentRun } from './store.ts'
+import { CHECKPOINT_FINDINGS_READ_SQL, decodeStoredCheckpointFindings } from './checkpoint-findings.ts'
 
 type ReviewVerdict = 'APPROVE' | 'REQUEST_CHANGES'
 
@@ -91,7 +92,7 @@ export type BoundReviewOutcome =
 interface PanelRow {
   inner_result: string | null
   inner_checkpoint_head: string | null
-  inner_checkpoint_findings: string | null
+  inner_checkpoint_findings: Uint8Array | null
 }
 
 interface BoundPrView {
@@ -299,7 +300,7 @@ async function runExistingReviewPanel(
     try {
       for (;;) {
         const row = db.get<PanelRow, [string]>(
-          `SELECT inner_result, inner_checkpoint_head, inner_checkpoint_findings
+          `SELECT inner_result, inner_checkpoint_head, ${CHECKPOINT_FINDINGS_READ_SQL}
              FROM code_trident_runs WHERE id = ?`,
           [id],
         )
@@ -312,7 +313,7 @@ async function runExistingReviewPanel(
           return {
             ok: result.ok,
             verdict: result.verdict,
-            findings: parseCheckpointFindings(row.inner_checkpoint_findings),
+            findings: parseCheckpointFindings(decodeStoredCheckpointFindings(row.inner_checkpoint_findings)),
             reviewed_sha:
               typeof row.inner_checkpoint_head === 'string' && SHA.test(row.inner_checkpoint_head)
                 ? row.inner_checkpoint_head

@@ -22,7 +22,7 @@ import { TridentAttemptLedger } from './attempt-ledger.ts'
 import { isDeployRestartKillReason, isUndeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
-import { parseCheckpointFindings } from './checkpoint-findings.ts'
+import { CHECKPOINT_FINDINGS_READ_SQL, decodeStoredCheckpointFindings, parseCheckpointFindings } from './checkpoint-findings.ts'
 import { resultCarriesEscalation } from './escalation-evidence.ts'
 import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
@@ -580,7 +580,7 @@ interface TridentRunDbRow {
   workflow_run_id: string | null
   inner_checkpoint: string | null
   inner_checkpoint_head: string | null
-  inner_checkpoint_findings: string | null
+  inner_checkpoint_findings: Uint8Array | null
   inner_verdict: TridentVerdict | null
   inner_result: string | null
   started_at: string
@@ -606,6 +606,8 @@ export const COLS =
   'started_at, last_advanced_at, harvested_at, crash_recoveries, infra_retries, ' +
   'reviewed_head, bound_pr, fenced_paths, base_sha, base_behind, parent_run_id, wave_task_id, ' +
   'claimed_paths'
+
+const READ_COLS = COLS.replace('inner_checkpoint_findings', CHECKPOINT_FINDINGS_READ_SQL)
 
 // `base_behind` deliberately backfills through its database NULL default; all
 // inserted columns still derive their placeholders here. A hand-miscounted `?`
@@ -1259,7 +1261,7 @@ export class TridentRunStore {
   private liveBranchOrSlugHolder(input: CreateTridentRunInput): TridentRun | null {
     const rows = this.db
       .prepare<TridentRunDbRow, [string, string, string]>(
-        `SELECT ${COLS}
+        `SELECT ${READ_COLS}
            FROM code_trident_runs
           WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
             AND (branch = ? OR (project_slug = ? AND slug = ?))
@@ -1276,7 +1278,7 @@ export class TridentRunStore {
   get(id: string): TridentRun | null {
     const row = this.db
       .prepare<TridentRunDbRow, [string]>(
-        `SELECT ${COLS} FROM code_trident_runs WHERE id = ?`,
+        `SELECT ${READ_COLS} FROM code_trident_runs WHERE id = ?`,
       )
       .get(id)
     return row === null ? null : rowToRun(row)
@@ -1533,7 +1535,7 @@ export class TridentRunStore {
   getBySlug(project_slug: string, slug: string): TridentRun | null {
     const row = this.db
       .prepare<TridentRunDbRow, [string, string]>(
-        `SELECT ${COLS} FROM code_trident_runs WHERE project_slug = ? AND slug = ?`,
+        `SELECT ${READ_COLS} FROM code_trident_runs WHERE project_slug = ? AND slug = ?`,
       )
       .get(project_slug, slug)
     return row === null ? null : rowToRun(row)
@@ -1560,7 +1562,7 @@ export class TridentRunStore {
   latestTerminalBySlug(project_slug: string, slug: string): TridentRun | null {
     const row = this.db
       .prepare<TridentRunDbRow, [string, string]>(
-        `SELECT ${COLS} FROM code_trident_runs
+        `SELECT ${READ_COLS} FROM code_trident_runs
           WHERE project_slug = ? AND slug = ? AND phase IN ${TERMINAL_PHASE_SQL}
           ORDER BY started_at DESC, id DESC
           LIMIT 1`,
@@ -1606,7 +1608,7 @@ export class TridentRunStore {
     if (exact !== null) return exact
     const rows = this.db
       .prepare<TridentRunDbRow, [string, string, string]>(
-        `SELECT ${COLS} FROM code_trident_runs
+        `SELECT ${READ_COLS} FROM code_trident_runs
           WHERE id LIKE ? ESCAPE '\\' OR slug = ?
           ORDER BY CASE WHEN slug = ? THEN 0 ELSE 1 END, last_advanced_at DESC
           LIMIT 2`,
@@ -1634,7 +1636,7 @@ export class TridentRunStore {
   latestByProjectScope(project_slug: string): TridentRun | null {
     const row = this.db
       .prepare<TridentRunDbRow, [string]>(
-        `SELECT ${COLS}
+        `SELECT ${READ_COLS}
            FROM code_trident_runs
           WHERE project_slug = ?
             -- Wave members are internal machinery: the parent is project-facing,
@@ -1651,7 +1653,7 @@ export class TridentRunStore {
   listChildren(parentId: string): TridentRun[] {
     return this.db
       .prepare<TridentRunDbRow, [string]>(
-        `SELECT ${COLS}
+        `SELECT ${READ_COLS}
            FROM code_trident_runs
           WHERE parent_run_id = ?
           ORDER BY started_at ASC, id ASC`,
@@ -1674,7 +1676,7 @@ export class TridentRunStore {
   listNonTerminalByRepo(repo_path: string): TridentRun[] {
     return this.db
       .prepare<TridentRunDbRow, [string]>(
-        `SELECT ${COLS}
+        `SELECT ${READ_COLS}
            FROM code_trident_runs
           WHERE repo_path = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
           ORDER BY started_at ASC`,
@@ -1686,7 +1688,7 @@ export class TridentRunStore {
   listNonTerminal(limit: number = 50): TridentRun[] {
     return this.db
       .prepare<TridentRunDbRow, [number]>(
-        `SELECT ${COLS}
+        `SELECT ${READ_COLS}
            FROM code_trident_runs
           WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
           ORDER BY last_advanced_at ASC
@@ -1739,7 +1741,7 @@ export class TridentRunStore {
   listFailedPrRuns(limit: number = 50): TridentRun[] {
     return this.db
       .prepare<TridentRunDbRow, [number]>(
-        `SELECT ${COLS}
+        `SELECT ${READ_COLS}
            FROM code_trident_runs
           WHERE phase = 'failed'
             AND merge_mode = 'pr'
@@ -1768,7 +1770,7 @@ export class TridentRunStore {
   listRunningLaunchers(): TridentRun[] {
     return this.db
       .prepare<TridentRunDbRow, []>(
-        `SELECT ${COLS}
+        `SELECT ${READ_COLS}
            FROM code_trident_runs
           WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
             AND subagent_status = 'running'
@@ -2000,7 +2002,7 @@ export class TridentRunStore {
   ): TridentRun[] {
     if (!Number.isInteger(limit) || limit < 0) throw new RangeError('Invalid pending wake limit')
     return this.db.prepare<TridentRunDbRow, [string, string, number]>(
-      `SELECT ${COLS} FROM code_trident_runs
+      `SELECT ${READ_COLS} FROM code_trident_runs
        WHERE phase IN ${TERMINAL_PHASE_SQL} AND agent_waked_at IS NULL
          AND chat_id <> ''
        ORDER BY CASE WHEN (last_advanced_at, id) > (?, ?) THEN 0 ELSE 1 END,
@@ -2167,7 +2169,7 @@ export class TridentRunStore {
             Pick<TridentRunDbRow, 'inner_verdict' | 'inner_checkpoint_findings' | 'inner_result'>,
             [string]
           >(
-            `SELECT inner_verdict, inner_checkpoint_findings, inner_result FROM code_trident_runs WHERE id = ?`,
+            `SELECT inner_verdict, ${CHECKPOINT_FINDINGS_READ_SQL}, inner_result FROM code_trident_runs WHERE id = ?`,
           )
           .get(id)
         if (row !== null) {
@@ -2176,7 +2178,7 @@ export class TridentRunStore {
             : row.inner_verdict
           const effectiveFindings = patch.inner_checkpoint_findings !== undefined
             ? patch.inner_checkpoint_findings
-            : row.inner_checkpoint_findings
+            : decodeStoredCheckpointFindings(row.inner_checkpoint_findings)
           // T1's production discriminator cannot reach this state. The guard makes
           // findings-free rejection structurally unwritable by in-process writers.
           // checkpoint.sh is out-of-process SQL and never runs THIS check — it
@@ -2541,8 +2543,8 @@ export class TridentRunStore {
         const incoming = parseCheckpointFindings(run.inner_checkpoint_findings)
         if (incoming.length === 0) {
           const stored = tx
-            .prepare<{ inner_checkpoint_findings: string | null; inner_result: string | null }, [string]>(
-              'SELECT inner_checkpoint_findings, inner_result FROM code_trident_runs WHERE id = ?',
+            .prepare<{ inner_checkpoint_findings: Uint8Array | null; inner_result: string | null }, [string]>(
+              `SELECT ${CHECKPOINT_FINDINGS_READ_SQL}, inner_result FROM code_trident_runs WHERE id = ?`,
             )
             .get(run.id)
           const escalated =
@@ -2552,7 +2554,7 @@ export class TridentRunStore {
             if (run.inner_checkpoint_findings !== null) {
               throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
             }
-            if (stored !== null && parseCheckpointFindings(stored.inner_checkpoint_findings).length === 0) {
+            if (stored !== null && parseCheckpointFindings(decodeStoredCheckpointFindings(stored.inner_checkpoint_findings)).length === 0) {
               throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
             }
           }
@@ -2699,7 +2701,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     workflow_run_id: row.workflow_run_id,
     inner_checkpoint: row.inner_checkpoint,
     inner_checkpoint_head: row.inner_checkpoint_head,
-    inner_checkpoint_findings: row.inner_checkpoint_findings,
+    inner_checkpoint_findings: decodeStoredCheckpointFindings(row.inner_checkpoint_findings),
     inner_verdict: row.inner_verdict,
     inner_result: row.inner_result,
     started_at: row.started_at,

@@ -5,7 +5,7 @@ status: open
 priority: P0
 cutover: true
 sections: 1
-criteria: 4
+criteria: 6
 contract_items: 0
 ---
 
@@ -46,3 +46,15 @@ account-lock or host-suite gates to accommodate the defective runtime.
   successful isolated reproduction or CI run alone is not deployed acceptance.
   Verify: the deployment's runtime-identity and preservation receipts, followed
   by the actual Trident host gate and unattended workflow outcome under #545.
+
+- [ ] Stored TEXT findings use strict UTF-8 decoding before parsing. Other storage
+  classes remain empty evidence. Malformed bytes
+  remain empty evidence; valid replacement characters, emoji and noncharacters
+  survive, leading BOM remains rejected, and reads do not alter persisted bytes.
+  The store guards and isolated panel reader share this boundary.
+  Verify: `trident/store.test.ts`, `trident/review-run.test.ts`, and the unchanged
+  historical SQL executed by `trident/as-built-disposition-sql.test.ts`.
+- [ ] A completed review stops and reaps its heartbeat timer, so the timer cannot
+  retain the review's output pipes until the next heartbeat. Signal exits retain
+  their non-success verdict and the ticker emits only during a live review.
+  Verify: `trident/codex-review.test.ts`.

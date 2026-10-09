@@ -39,7 +39,7 @@ import { Database } from 'bun:sqlite'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { terminalRunDisposition } from './run-disposition.ts'
-import { parseCheckpointFindings } from './checkpoint-findings.ts'
+import { decodeStoredCheckpointFindings, parseCheckpointFindings } from './checkpoint-findings.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 import type { TridentPhase, TridentVerdict } from './store.ts'
 
@@ -91,25 +91,19 @@ interface Row {
    * Findings given as RAW BYTES (hex), for the shapes a JS string cannot hold — a
    * malformed UTF-8 sequence is the r3 blocker and it has no `findings` spelling at
    * all. The row is inserted as a SQL literal (see `corpusDb`) and the classifier
-   * side is fed `readerValue()`, i.e. what the driver actually hands production.
+   * side is fed `readerValue()`, i.e. what the production byte decoder returns.
    */
   findingsHex?: string
 }
 
-/**
- * WHAT bun:sqlite's DRIVER DELIVERS for a column holding these bytes — which is the
- * value `parseCheckpointFindings` is handed in production, and the whole of the r3
- * blocker: for bytes that are not well-formed UTF-8 the driver returns the EMPTY
- * STRING, so the classifier sees no findings while SQLite's JSON functions, reading
- * the same bytes, see a perfectly good one-element array. Round-tripped through the
- * driver rather than asserted, so this file never states a second opinion about what
- * the reader does.
- */
+/** Exercise the same strict byte decoder as production; driver-level TEXT
+ * decoding may replace malformed bytes with U+FFFD instead of rejecting them. */
 function readerValue(hex: string): string {
   const db = new Database(':memory:')
   db.run('CREATE TABLE v (x TEXT)')
   db.run(`INSERT INTO v (x) VALUES (CAST(x'${hex}' AS TEXT))`)
-  const out = (db.query('SELECT x FROM v').get() as { x: string }).x
+  const raw = (db.query('SELECT CAST(x AS BLOB) AS x FROM v').get() as { x: Uint8Array }).x
+  const out = decodeStoredCheckpointFindings(raw)!
   db.close()
   return out
 }
@@ -158,7 +152,7 @@ const CORPUS: ReadonlyArray<readonly [string, Row]> = [
   // MALFORMED UTF-8, the unguarded sibling of the two shapes above (Argus r3,
   // blocker, reproduced). SQLite's JSON parser accepts any byte >= 0x20 inside a
   // string literal, so these bytes are json_valid = 1, an array, one element long —
-  // a REAL rejection to the counting SQL — while bun:sqlite's driver returns the
+  // a REAL rejection to the counting SQL — while the production byte decoder returns the
   // EMPTY STRING for the same column and `parseCheckpointFindings` therefore answers
   // []. One row, two answers, in the direction that matters: the SQL crediting a
   // reason to a rejection that states none. Three shapes, because they fail three
@@ -438,15 +432,9 @@ describe("the as-built record's published counts are the classifier, executed", 
     db.close()
   })
 
-  test('MALFORMED UTF-8 findings are EMPTY to the reader and to the documented count alike', () => {
-    // Argus r3 blocker, reproduced: `[{"title":"<0x80>"}]` is json_valid = 1, an array
-    // and one element long to SQLite, so the counting SQL scored it a REAL rejection —
-    // while bun:sqlite's driver, which every reader of this column goes through,
-    // returns '' for a value that is not well-formed UTF-8, so
-    // `parseCheckpointFindings` answered []. The row this card exists to make
-    // impossible — a rejection that states no reason — was being counted as one that
-    // does. The corpus could not reach the shape before: `findings` is a JS string and
-    // no JS string holds these bytes, which is why `findingsHex` exists.
+  test('MALFORMED UTF-8 findings are EMPTY to the strict reader and to the documented count alike', () => {
+    // SQLite's JSON functions accept these malformed bytes as array contents.
+    // The production decoder must still reject them before the findings parser.
     const MALFORMED = [
       'LEGACY rejection, findings holding an orphan continuation byte',
       'LEGACY rejection, findings holding a truncated 3-byte sequence',
@@ -470,8 +458,7 @@ describe("the as-built record's published counts are the classifier, executed", 
       // non-empty array — otherwise there is nothing here for the clause to guard.
       expect(r.bytes).toBe(entry[1]!.findingsHex!.toUpperCase())
       expect([r.jv, r.jal]).toEqual([1, 1])
-      // …and the driver really does empty them, so the classifier reads the row as a
-      // rejection carrying no reason.
+      // The production byte decoder rejects them without changing stored bytes.
       expect(readerValue(entry[1]!.findingsHex!)).toBe('')
       expect(parseCheckpointFindings(rowOf(entry[1]!).inner_checkpoint_findings)).toEqual([])
       expect(terminalRunDisposition(rowOf(entry[1]!))).toBe('reviewed-rejected')

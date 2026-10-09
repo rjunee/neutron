@@ -33,6 +33,40 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
+describe('stored findings retain strict byte semantics across runtime versions', () => {
+  test('the migrated schema refuses BLOB storage class findings before any reader can accept them', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'blob-findings', project_slug: 'bytes', repo_path: '/repo', task: 'verify storage type' })
+    await expect(db.run('UPDATE code_trident_runs SET inner_checkpoint_findings = ? WHERE id = ?',
+      [Buffer.from('[1]'), run.id])).rejects.toThrow('cannot store BLOB value in TEXT column')
+    expect(store.get(run.id)?.inner_checkpoint_findings).toBeNull()
+  })
+  test.each([
+    ['orphan byte', '5b7b227469746c65223a2280227d5d', '', false],
+    ['truncated sequence', '5b7b227469746c65223a22e282227d5d', '', false],
+    ['surrogate sequence', '5b7b227469746c65223a22eda080227d5d', '', false],
+    ['leading BOM', 'efbbbf5b315d', '\uFEFF[1]', false],
+    ['literal replacement character', '5b7b227469746c65223a22efbfbd227d5d', '[{"title":"�"}]', true],
+    ['valid emoji', '5b7b227469746c65223a22f09f9880227d5d', '[{"title":"😀"}]', true],
+    ['valid noncharacter', '5b7b227469746c65223a22efbfbf227d5d', '[{"title":"\uFFFF"}]', true],
+  ] as const)('%s survives reads without laundering invalid review evidence', async (_name, hex, text, valid) => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'raw-findings', project_slug: 'bytes', repo_path: '/repo', task: 'verify findings' })
+    await db.run('UPDATE code_trident_runs SET inner_checkpoint_findings = CAST(? AS TEXT) WHERE id = ?',
+      [Buffer.from(hex, 'hex'), run.id])
+    expect(store.get(run.id)?.inner_checkpoint_findings).toBe(text)
+    expect(store.listNonTerminal().find(row => row.id === run.id)?.inner_checkpoint_findings).toBe(text)
+    const update = store.update(run.id, { inner_verdict: 'REQUEST_CHANGES' })
+    if (valid) await update
+    else await expect(update).rejects.toThrow(TridentEmptyFindingsRejectionError)
+    const save = store.saveIfActive({ ...store.get(run.id)!, inner_verdict: 'REQUEST_CHANGES', inner_checkpoint_findings: null })
+    if (valid) expect(await save).toBe(true)
+    else await expect(save).rejects.toThrow(TridentEmptyFindingsRejectionError)
+    expect(db.get<{ bytes: string }, [string]>(
+      'SELECT hex(CAST(inner_checkpoint_findings AS BLOB)) AS bytes FROM code_trident_runs WHERE id = ?', [run.id])?.bytes).toBe(hex.toUpperCase())
+  })
+})
+
 describe('earlier card publication provenance', () => {
   for (const fault of ['none', 'observed-only', 'local-owner', 'later-start', 'later-ledger',
     'missing-anchor', 'wrong-anchor', 'foreign-card', 'foreign-project', 'owner-project',

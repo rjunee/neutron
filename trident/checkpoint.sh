@@ -219,8 +219,8 @@ literal_of() {
 # FILE perfectly well, and SQLite's JSON parser accepts any byte >= 0x20 inside a
 # string literal — so `[{"t":"<0x80>"}]` in the findings file was `json_valid` = 1, an
 # array, non-empty, and this CASE recorded `REQUEST_CHANGES` with it. Every reader of
-# that column then goes through bun:sqlite, whose driver returns the EMPTY STRING for a
-# value that is not well-formed UTF-8: `parseCheckpointFindings` is handed "" and
+# that column then goes through the strict stored-findings byte decoder, which
+# returns the EMPTY STRING for a value that is not well-formed UTF-8: `parseCheckpointFindings` is handed "" and
 # answers [], so the row reads back as precisely the REQUEST_CHANGES-with-no-findings
 # shape this script exists to make unwritable. The `NOT EXISTS` scan closes it by
 # asking the only question SQLite can answer about bytes — it splits text into
@@ -233,7 +233,7 @@ literal_of() {
 # rather than left to demote findings the parser reads perfectly well. Measured over
 # 32 byte shapes on BOTH engines this project runs (sqlite3 CLI 3.45.1 and bun:sqlite
 # 3.51.2) the clause agrees row for row with `new TextDecoder('utf-8', {fatal: true})`,
-# which is exactly the boundary bun's driver enforces; the same clause is in the
+# which is exactly the boundary the stored-findings decoder enforces; the same clause is in the
 # canonical counting SQL in this card's as-built record, so the three copies answer alike ON
 # THE VALUES THEY ALL WALK. That parity is SCOPED, and the scope is this script's
 # alone (Argus r5): the other two copies — the documented counting statements and
