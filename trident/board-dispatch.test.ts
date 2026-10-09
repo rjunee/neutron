@@ -713,6 +713,48 @@ describe('branch liveness refusal (branch_live)', () => {
     }
   }
 
+  test('a salvage reservation queues the card before remote reads and release permits dispatch', async () => {
+    const repoDir = makeCommittedRepo('repo-salvage-held')
+    const holds = new DispatchHoldStore(db)
+    const reservation = await store.reserveBranch({ repo_path: repoDir, branch: BRANCH,
+      run_id: 'salvage-owner', purpose: 'salvage' })
+    expect(reservation).not.toBeNull()
+    let probes = 0
+    const deps = livenessDeps(repoDir, { holds, resolveMergeMode: async () => 'pr',
+      landedProbe: async () => { probes++; return null } })
+    try {
+      const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, deps)
+      expect(result.ok).toBe(false)
+      if (result.ok) throw new Error('salvage did not exclude admission')
+      expect(result.code).toBe('branch_live')
+      expect(result.message).toContain('reserved by an admission or salvage operation')
+      expect(holds.getByItem('proj-1', 'ready')).not.toBeNull()
+      expect(probes).toBe(0)
+    } finally { await store.releaseBranch(reservation!) }
+    expect((await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, deps)).ok).toBe(true)
+    expect(probes).toBe(1)
+    expect(holds.getByItem('proj-1', 'ready')).toBeNull()
+  })
+
+  test('admission reserves before its remote probe and hands exclusion to the committed run', async () => {
+    const repoDir = makeCommittedRepo('repo-admission-held')
+    const old = await store.create({ slug: 'old-attempt', project_slug: 'proj-1',
+      repo_path: repoDir, branch: BRANCH, task: TASK, phase: 'failed', merge_mode: 'pr' })
+    let entered!: () => void; let finish!: () => void
+    const started = new Promise<void>(resolve => { entered = resolve })
+    const resume = new Promise<void>(resolve => { finish = resolve })
+    const pending = dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { resolveMergeMode: async () => 'pr',
+        landedProbe: async () => { entered(); await resume; return null } }))
+    let calls = 0
+    const salvage = () => store.withSalvageReservation(old, async () => { calls++; return old })
+    try { await started; expect(await salvage()).toBeNull() }
+    finally { finish() }
+    expect((await pending).ok).toBe(true)
+    expect(await salvage()).toBeNull()
+    expect(calls).toBe(0)
+  })
+
   test('a live worktree lock on the card branch REFUSES dispatch via the REAL default probe, creating no run', async () => {
     const repoDir = makeCommittedRepo('repo-live')
     // No `start` in the reason → signal-0 alone decides, and this process is alive.
@@ -1279,6 +1321,8 @@ describe('branch liveness refusal (branch_live)', () => {
     // (4b) therefore read a free branch — the row did not exist yet — and only
     // the catch can still see the fact.
     const racingStore = {
+      reserveBranch: store.reserveBranch.bind(store),
+      releaseBranch: store.releaseBranch.bind(store),
       listNonTerminalByRepo: (path: string) => store.listNonTerminalByRepo(path),
       get: (id: string) => store.get(id),
       // Forwarded like the two above: the salvage-seed gate reads it on every
@@ -1334,6 +1378,8 @@ describe('branch liveness refusal (branch_live)', () => {
     const repoDir = makeCommittedRepo('repo-busy-no-holder')
     const holds = new DispatchHoldStore(db)
     const bustedStore = {
+      reserveBranch: store.reserveBranch.bind(store),
+      releaseBranch: store.releaseBranch.bind(store),
       listNonTerminalByRepo: (path: string) => store.listNonTerminalByRepo(path),
       get: (id: string) => store.get(id),
       // Forwarded like the two above: the salvage-seed gate reads it on every
@@ -1404,6 +1450,8 @@ describe('branch liveness refusal (branch_live)', () => {
     })
     addLockedWorktree(repoDir, 'wt-decision-read-throws', `claude agent test (pid ${process.pid})`)
     const blindStore = {
+      reserveBranch: store.reserveBranch.bind(store),
+      releaseBranch: store.releaseBranch.bind(store),
       listNonTerminalByRepo: (path: string) => store.listNonTerminalByRepo(path),
       get: () => {
         throw new Error('database is locked')

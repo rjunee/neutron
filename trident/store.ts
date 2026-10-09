@@ -17,6 +17,7 @@
  */
 
 import { createLogger } from '@neutronai/logger'
+import { canonicalRepositoryPath, reserveBranch, releaseBranch, ownsBranchReservation, type BranchReservation } from './branch-reservation.ts'
 import { TridentAttemptLedger } from './attempt-ledger.ts'
 import { isDeployRestartKillReason, isUndeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import type { Topic } from '@neutronai/channels/types.ts'
@@ -1100,70 +1101,116 @@ export class TridentRunStore {
    * project already has under this slug (what the index enforces — reachable
    * when the same card is dispatched against a different `repo_path`).
    */
+  reserveBranch(input: Omit<BranchReservation, 'token'>): Promise<BranchReservation | null> {
+    return reserveBranch(this.db, input)
+  }
+
+  releaseBranch(reservation: BranchReservation): Promise<void> {
+    return releaseBranch(this.db, reservation)
+  }
+
+  /** Excludes admission across connections; only bounded Git identity reads
+   * run inside the claim transaction with the full census. Unknown refuses. */
+  async withSalvageReservation(
+    run: TridentRun, body: () => Promise<TridentRun | null>,
+  ): Promise<TridentRun | null> {
+    const repo = canonicalRepositoryPath(run.repo_path)
+    const branch = run.branch ?? `trident/${run.slug}`
+    const reservation = await reserveBranch(this.db,
+      { repo_path: repo, branch, run_id: run.id, purpose: 'salvage' }, () => {
+        if (this.isOrchestratorRecoverySalvageProtected(run.id)) return false
+        const owners = this.db.all<{ repo_path: string }>(`SELECT repo_path FROM code_trident_runs
+          WHERE id <> ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND COALESCE(NULLIF(branch, ''), 'trident/' || slug) = ?`, [run.id, branch])
+        return !owners.some(owner => canonicalRepositoryPath(owner.repo_path) === repo)
+      })
+    if (!reservation) return null
+    try {
+      const result = await body()
+      if (result) await this.update(run.id, {
+        pr: result.pr,
+        ...(result.published_pr !== null ? { published_pr: result.published_pr } : {}),
+        failure_reason: result.failure_reason,
+      })
+      return result
+    } finally { await releaseBranch(this.db, reservation) }
+  }
+
   async createIfClaimsAvailable(
     input: CreateTridentRunInput,
     retrySource?: { priorRunId: string; eventId: number; head: string },
     recovery?: { decision: OrchestratorRecoveryDecision; assertAuthority(): void; bind(tx: ProjectDb, run: TridentRun): boolean },
+    branchReservation?: BranchReservation,
   ): Promise<
     | { ok: true; run: TridentRun }
     | { ok: false; conflict: 'path'; holding_run: TridentRun; path: string }
     | { ok: false; conflict: 'branch'; holding_run: TridentRun }
+    | { ok: false; conflict: 'reservation' }
   > {
-    return this.db.transaction(async () => {
-      const wanted = new Set(input.claimed_paths ?? [])
-      if (wanted.size > 0) {
-        for (const live of this.listNonTerminalByRepo(input.repo_path)) {
-          const path = live.claimed_paths.find((candidate) => wanted.has(candidate))
-          if (path !== undefined) {
-            return { ok: false as const, conflict: 'path' as const, holding_run: live, path }
+    const reservation = branchReservation ?? await this.reserveBranch({ repo_path: input.repo_path,
+      branch: input.branch ?? `trident/${input.slug}`, run_id: input.id ?? crypto.randomUUID(), purpose: 'admission' })
+    if (!reservation) return { ok: false, conflict: 'reservation' }
+    try {
+      return await this.db.transaction(async () => {
+        if (reservation.purpose !== 'admission' || reservation.repo_path !== canonicalRepositoryPath(input.repo_path)
+          || reservation.branch !== (input.branch ?? `trident/${input.slug}`)
+          || (input.id !== undefined && reservation.run_id !== input.id)
+          || !ownsBranchReservation(this.db, reservation)) throw new Error('Branch admission reservation changed')
+        const wanted = new Set(input.claimed_paths ?? [])
+        if (wanted.size > 0) {
+          for (const live of this.listNonTerminalByRepo(input.repo_path)) {
+            const path = live.claimed_paths.find((candidate) => wanted.has(candidate))
+            if (path !== undefined) {
+              return { ok: false as const, conflict: 'path' as const, holding_run: live, path }
+            }
           }
         }
-      }
-      const branchHolder = this.liveBranchOrSlugHolder(input)
-      if (branchHolder !== null) {
-        return { ok: false as const, conflict: 'branch' as const, holding_run: branchHolder }
-      }
-      if (recovery) {
-        recovery.assertAuthority()
-        if (retrySource) throw new Error('Recovery cannot also import an ordinary retry source')
-        const d = recovery.decision
-        const source = rejectedRecoverySource(this, input.project_slug, d.request)
-        if (source.meta !== d.source_meta || source.card.linked_run_id !== d.current_run_id
-          || source.card.updated_at !== d.card_updated_at || source.card.status !== d.card_status
-          || input.task !== source.prior.task || input.branch !== source.prior.branch
-          || input.repo_path !== source.prior.repo_path || input.base_sha !== source.prior.base_sha
-          || input.execution_strategy !== source.prior.execution_strategy
-          || input.task_iteration !== d.task_iteration || input.max_task_iterations !== d.max_task_iterations
-          || input.max_rounds !== d.max_rounds || input.published_pr !== d.request.published_pr
-          || d.task_iteration < Math.max(source.card.task_iteration, source.prior.task_iteration)
-          || d.max_task_iterations > Math.min(source.card.max_task_iterations ?? source.prior.max_task_iterations, source.prior.max_task_iterations)
-          || d.max_rounds > source.prior.max_rounds || d.max_rounds <= source.state.checkpoint.round
-          || d.task_iteration >= d.max_task_iterations) throw new Error('Recovery decision no longer matches its source and budgets')
-      }
-      const run = await this.create(input)
-      if (recovery) {
-        recovery.assertAuthority()
-        const decision = recovery.decision
-        const meta = JSON.stringify(decision)
-        await this.db.run(
-          `INSERT INTO code_trident_orchestrator_recoveries
-           (source_run_id, source_event_id, run_id, project_slug, item_id, call_id, decision, consumed_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [decision.request.source_run_id, decision.request.source_event_id, run.id, run.project_slug,
-            decision.request.board_item_id, decision.authority.call_id, meta, this.now()],
-        )
-        await this.recordStageEvent(run.id, ORCHESTRATOR_RECOVERY_STAGE, meta)
-        if (!recovery.bind(this.db, run)) throw new Error('Recovery card binding changed before source consumption')
-      }
-      if (retrySource) {
-        // The row and its resume source must survive a crash together. Validate
-        // the relationship inside this transaction so a future caller cannot
-        // mint a source link for a different task or a changed checkpoint.
-        await this.recordStageEvent(run.id, 'build-retry-source', JSON.stringify({ ...retrySource, runId: run.id }))
-        readBuildRetrySource(this, run)
-      }
-      return { ok: true as const, run }
-    })
+        const branchHolder = this.liveBranchOrSlugHolder(input)
+        if (branchHolder !== null) {
+          return { ok: false as const, conflict: 'branch' as const, holding_run: branchHolder }
+        }
+        if (recovery) {
+          recovery.assertAuthority()
+          if (retrySource) throw new Error('Recovery cannot also import an ordinary retry source')
+          const d = recovery.decision
+          const source = rejectedRecoverySource(this, input.project_slug, d.request)
+          if (source.meta !== d.source_meta || source.card.linked_run_id !== d.current_run_id
+            || source.card.updated_at !== d.card_updated_at || source.card.status !== d.card_status
+            || input.task !== source.prior.task || input.branch !== source.prior.branch
+            || input.repo_path !== source.prior.repo_path || input.base_sha !== source.prior.base_sha
+            || input.execution_strategy !== source.prior.execution_strategy
+            || input.task_iteration !== d.task_iteration || input.max_task_iterations !== d.max_task_iterations
+            || input.max_rounds !== d.max_rounds || input.published_pr !== d.request.published_pr
+            || d.task_iteration < Math.max(source.card.task_iteration, source.prior.task_iteration)
+            || d.max_task_iterations > Math.min(source.card.max_task_iterations ?? source.prior.max_task_iterations, source.prior.max_task_iterations)
+            || d.max_rounds > source.prior.max_rounds || d.max_rounds <= source.state.checkpoint.round
+            || d.task_iteration >= d.max_task_iterations) throw new Error('Recovery decision no longer matches its source and budgets')
+        }
+        const run = await this.create(input)
+        if (recovery) {
+          recovery.assertAuthority()
+          const decision = recovery.decision
+          const meta = JSON.stringify(decision)
+          await this.db.run(
+            `INSERT INTO code_trident_orchestrator_recoveries
+             (source_run_id, source_event_id, run_id, project_slug, item_id, call_id, decision, consumed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [decision.request.source_run_id, decision.request.source_event_id, run.id, run.project_slug,
+              decision.request.board_item_id, decision.authority.call_id, meta, this.now()],
+          )
+          await this.recordStageEvent(run.id, ORCHESTRATOR_RECOVERY_STAGE, meta)
+          if (!recovery.bind(this.db, run)) throw new Error('Recovery card binding changed before source consumption')
+        }
+        if (retrySource) {
+          // The row and its resume source must survive a crash together. Validate
+          // the relationship inside this transaction so a future caller cannot
+          // mint a source link for a different task or a changed checkpoint.
+          await this.recordStageEvent(run.id, 'build-retry-source', JSON.stringify({ ...retrySource, runId: run.id }))
+          readBuildRetrySource(this, run)
+        }
+        return { ok: true as const, run }
+      })
+    } finally { if (!branchReservation) await releaseBranch(this.db, reservation) }
   }
 
   recoveryCard(project: string, item: string): RecoveryCard | null {
@@ -1210,18 +1257,20 @@ export class TridentRunStore {
    * empty string bound in its place is never a real ref name.
    */
   private liveBranchOrSlugHolder(input: CreateTridentRunInput): TridentRun | null {
-    const row = this.db
-      .prepare<TridentRunDbRow, [string, string, string, string]>(
+    const rows = this.db
+      .prepare<TridentRunDbRow, [string, string, string]>(
         `SELECT ${COLS}
            FROM code_trident_runs
           WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
-            AND ( (repo_path = ? AND branch IS NOT NULL AND branch = ?)
-               OR (project_slug = ? AND slug = ?) )
-          ORDER BY started_at ASC
-          LIMIT 1`,
+            AND (branch = ? OR (project_slug = ? AND slug = ?))
+          ORDER BY started_at ASC`,
       )
-      .get(input.repo_path, input.branch ?? '', input.project_slug, input.slug)
-    return row === null ? null : rowToRun(row)
+      .all(input.branch ?? '', input.project_slug, input.slug)
+    const repo = canonicalRepositoryPath(input.repo_path)
+    const row = rows.find(candidate =>
+      (candidate.project_slug === input.project_slug && candidate.slug === input.slug)
+      || canonicalRepositoryPath(candidate.repo_path) === repo)
+    return row === undefined ? null : rowToRun(row)
   }
 
   get(id: string): TridentRun | null {

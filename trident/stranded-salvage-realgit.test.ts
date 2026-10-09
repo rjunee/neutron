@@ -17,6 +17,7 @@ import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { RunHostCommand } from './merge.ts'
 import {
   buildTridentOrchestrator,
+  sweepStrandedFailures,
   TRIDENT_SALVAGE_MARKER,
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
   TRIDENT_SNAPSHOT_MARKER,
@@ -253,7 +254,7 @@ function buildHybridHost(failPush = false): { run: RunHostCommand; calls: string
   let opened = false
   const run: RunHostCommand = async (cmd, cwd, extraEnv) => {
     calls.push([...cmd])
-    if (cmd[0] === 'git') {
+    if (cmd[0] === 'git' || cmd[0] === 'env' || cmd[0] === 'bash') {
       if (failPush && cmd.includes('push')) {
         return {
           ok: false,
@@ -285,6 +286,9 @@ function orchestrator(world: World, host: RunHostCommand, store?: TridentRunStor
     sleep: async () => {},
     now: () => NOW,
     run_host: honourDiffOutput(host),
+    // Standalone publisher cases have no concurrent store. Consuming ownership
+    // cases below supply the actual database-backed reservation boundary.
+    with_salvage_reservation: (run, body) => store ? store.withSalvageReservation(run, body) : body(),
     ...(store ? { persist_refire_reset: async (id: string, patch: import('./store.ts').TridentRunUpdate) => { await store.update(id, patch) } } : {}),
   })
 }
@@ -294,6 +298,103 @@ afterAll(() => {
 })
 
 describe('REAL git — stranded terminal-failure salvage', () => {
+  test('a missing branch reservation seam cannot inspect or publish a stranded branch', async () => {
+    const world = await seedWorld('ahead')
+    const harness = buildHybridHost()
+    const orch = buildTridentOrchestrator({
+      fire_workflow: async () => ({ status: 'failed', error: 'fixture failure' }),
+      db_path: join(world.root, 'unused.db'), run_host: honourDiffOutput(harness.run),
+    })
+    expect(await orch.reconcile_stranded(makeRun(world.checkout, { phase: 'failed' }))).toBeNull()
+    expect(harness.calls).toHaveLength(0)
+  })
+
+  test('startup salvage preserves a live review branch after main advances; unowned work still publishes', async () => {
+    const world = await seedWorld('ahead')
+    await git(world.checkout, 'push', 'origin', BRANCH)
+    const worktree = join(world.root, 'live-review')
+    await git(world.checkout, 'worktree', 'add', worktree, BRANCH)
+    const base = await gitOut(world.checkout, 'rev-parse', 'main')
+    writeFileSync(join(world.checkout, 'main-change.txt'), 'advanced main\n')
+    await git(world.checkout, 'add', 'main-change.txt')
+    await git(world.checkout, ...GIT_ID, 'commit', '-m', 'advance main')
+    await git(world.checkout, 'push', 'origin', 'main')
+    const db = ProjectDb.open(join(world.root, 'project.db'))
+    applyMigrations(db.raw(), join(import.meta.dir, '..', 'migrations'))
+    const store = new TridentRunStore(db)
+    const harness = buildHybridHost()
+    try {
+      let old = await store.create({ slug: 'salvage-card', project_slug: 'project',
+        repo_path: world.checkout, branch: BRANCH, task: 'old failed attempt', phase: 'failed', merge_mode: 'pr' })
+      await store.update(old.id, { base_sha: base })
+      old = store.get(old.id)!
+      const live = await store.create({ slug: 'live-review', project_slug: 'project',
+        repo_path: world.checkout, branch: BRANCH, task: 'current review', phase: 'argus', merge_mode: 'pr' })
+      await store.update(live.id, { base_sha: base, inner_checkpoint: 'argus',
+        inner_checkpoint_head: world.branchHead, worktree, pr: 7 })
+      const checkpoint = store.get(live.id)
+      const files = await gitRaw(worktree, 'status', '--porcelain=v1')
+      const orch = orchestrator(world, harness.run, store)
+      await sweepStrandedFailures({ store, reconcile: orch.reconcile_stranded })
+      expect(await gitOut(world.checkout, 'rev-parse', BRANCH)).toBe(world.branchHead!)
+      expect(await gitOut(world.origin, 'rev-parse', BRANCH)).toBe(world.branchHead!)
+      expect(await gitOut(worktree, 'rev-parse', 'HEAD')).toBe(world.branchHead!)
+      expect(await gitRaw(worktree, 'status', '--porcelain=v1')).toBe(files)
+      expect(store.get(live.id)).toEqual(checkpoint)
+      expect(store.get(old.id)?.pr).toBeNull()
+      // Direct callers must use the same guard, not just the startup census.
+      expect(await orch.reconcile_stranded(old)).toBeNull()
+      expect(harness.calls).toHaveLength(0)
+
+      // Opposing control: once that owner is terminal, the actual publisher
+      // replays the same candidate onto advanced main and records its receipt.
+      await store.update(live.id, { phase: 'failed' })
+      const salvaged = await orch.reconcile_stranded(old)
+      expect(salvaged?.pr).toBe(7)
+      expect(store.get(old.id)?.published_pr).toBe(7)
+      const published = await gitOut(world.origin, 'rev-parse', BRANCH)
+      expect(published).not.toBe(world.branchHead!)
+      expect(await gitOut(world.origin, 'show', `${published}:work.txt`)).toBe('finished work')
+      expect(await gitOut(world.origin, 'show', `${published}:main-change.txt`)).toBe('advanced main')
+    } finally { db.close() }
+  }, 60_000)
+
+  test('linked repository checkouts share reservation and live branch ownership', async () => {
+    const world = await seedWorld('ahead')
+    const linked = join(world.root, 'linked-checkout')
+    await git(world.checkout, 'worktree', 'add', '--detach', linked, 'main')
+    const db = ProjectDb.open(join(world.root, 'project.db'))
+    applyMigrations(db.raw(), join(import.meta.dir, '..', 'migrations'))
+    const store = new TridentRunStore(db)
+    const otherDb = ProjectDb.open(db.path)
+    const other = new TridentRunStore(otherDb)
+    const harness = buildHybridHost()
+    try {
+      const old = await store.create({ slug: 'salvage-card', project_slug: 'project',
+        repo_path: world.checkout, branch: BRANCH, task: 'old attempt', phase: 'failed', merge_mode: 'pr' })
+      const reservation = await other.reserveBranch({ repo_path: linked, branch: BRANCH,
+        run_id: 'linked-owner', purpose: 'admission' })
+      expect(reservation).not.toBeNull()
+      const orch = orchestrator(world, harness.run, store)
+      expect(await orch.reconcile_stranded(old)).toBeNull()
+      try {
+        expect((await other.createIfClaimsAvailable({ id: 'linked-owner', slug: 'linked-owner',
+          project_slug: 'another-project', repo_path: linked, branch: BRANCH, task: 'new owner' },
+        undefined, undefined, reservation!)).ok).toBe(true)
+      } finally { await other.releaseBranch(reservation!) }
+      expect(await orch.reconcile_stranded(old)).toBeNull()
+      const competing = await store.createIfClaimsAvailable({ slug: 'competing', project_slug: 'third-project',
+        repo_path: world.checkout, branch: BRANCH, task: 'competing admission' })
+      expect(competing.ok).toBe(false)
+      if (competing.ok || competing.conflict !== 'branch') throw new Error('shared Git branch owner was not observed')
+      expect(competing.holding_run.id).toBe('linked-owner')
+      expect(harness.calls).toHaveLength(0)
+      expect(await gitOut(linked, 'rev-parse', BRANCH)).toBe(world.branchHead!)
+      await other.update('linked-owner', { phase: 'failed' })
+      expect((await orch.reconcile_stranded(old))?.pr).toBe(7)
+    } finally { otherDb.close(); db.close() }
+  }, 60_000)
+
   test('a committed branch survives a fire failure: pushed, linked to a PR, and still failed', async () => {
     const world = await seedWorld('ahead')
     const harness = buildHybridHost()

@@ -22,6 +22,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) — Let the initial planner select a persisted execution strategy
 - [`published-branch-preservation`](published-branch-preservation.md) — Preserve previously published work across fresh dispatch and replay
 - [`refreshed-ci-merge-readiness`](refreshed-ci-merge-readiness.md) — Wait for refreshed CI without rebuilding an approved revision
+- [`salvage-publication-provenance`](salvage-publication-provenance.md) — Preserve publication ownership when salvaging a failed build
 - [`the-orchestrator-owns-the-build-loop`](the-orchestrator-owns-the-build-loop.md) — The project REPL owns the build loop
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`trident-build-efficiency`](trident-build-efficiency.md) — Avoid repeated build work and measure Trident's time and token costs

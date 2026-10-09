@@ -664,6 +664,7 @@ export function buildCoreModules(
           },
           record_recovery_refusal: (run_id, reason) => store.recordOrchestratorRecoveryRefusal(run_id, reason),
           recovery_salvage_protected: (run_id) => store.isOrchestratorRecoverySalvageProtected(run_id),
+          with_salvage_reservation: (run, body) => store.withSalvageReservation(run, body),
           // THE THREE RUN-SCOPED PROBES the watchdog must consult before it may
           // declare a hang: a live process for the run, fresh mtime on the run's
           // own artifacts, recent movement on its branch ref.
