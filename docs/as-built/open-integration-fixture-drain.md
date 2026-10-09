@@ -66,9 +66,8 @@ resolved to a different copy, and the start patch captured nothing.
   - a held tick;
   - an earlier rejecting cleanup and an earlier throwing cleanup;
   - an empty cleanup list.
-- `bash scripts/ci/lint.sh`: passed. `bash scripts/ci/typecheck-all.sh`: the
-  root `tsconfig.json` passed LOCALLY, but that result was wrong. See the
-  correction under "Fix round" below: CI failed the root config on this file.
+- `bash scripts/ci/lint.sh`: passed. For the typecheck result see "Fix round"
+  below.
 
 ### Mutations
 
@@ -100,8 +99,7 @@ the five files listed above. On the merged tree:
 `bun test tests/integration/claim-redirect-once.open.test.ts tests/integration/import-watch-rearm-on-reconnect.open.test.ts`
 gave 15 pass, 0 fail. `bun test tests/support/held-sweeper-teardown.test.ts`
 gave 3 pass, 0 fail. `bash scripts/ci/lint.sh` passed and
-`git diff --check` was clean. `bash scripts/ci/typecheck-all.sh` reported the
-root config as passing locally. That was not a true result; see "Fix round".
+`git diff --check` was clean. For the typecheck result see "Fix round".
 
 Nominated mutation, run on the merged tree: delete
 `if (trace.includes('db:close')) v.push('db:close while the tick was held')`
@@ -121,7 +119,7 @@ errors in `tests/support/held-sweeper-teardown.ts`: TS2307 `Cannot find module
 at line 432. The root package does not depend on `@neutronai/loop`. In this
 worktree the bare specifier resolved only through the main checkout's ancestor
 `node_modules`, which is why the earlier local typecheck passed. CI has no
-ancestor install. The earlier local "root passed" claims above are wrong.
+ancestor install.
 
 Changes:
 
@@ -156,3 +154,38 @@ Measured on this round's tree:
   Guard `-t "db close moved before an awaited drain"`: 0 pass, 1 fail on
   `expect(report.whileHeldViolations).toContain('db:close while the tick was held')`.
   Control `-t "awaited production drain"`: 1 pass. Restored: guard 1 pass.
+
+### Revalidation, 2026-10-09: merged onto main `5195c246`
+
+The PR's current head `5b8c9d4c`, which contains the original build
+`60b7d2d8`, was merged onto main `5195c246` with a merge commit, so both stay
+in history. The merge applied cleanly and changed only the five files listed
+above.
+
+Two review nits were applied on top of the merge:
+
+- In the import fixture's `Harness.close`, `db.close()` now runs in a
+  `finally` after `await graph.shutdown()`. The awaited drain still comes
+  before both, and the shutdown order is unchanged.
+- The stale "root typecheck passed locally" lines earlier in this record were
+  removed. "Fix round" holds the true typecheck result.
+
+Measured on the merged tree with the nits applied:
+
+- `bun test tests/integration/claim-redirect-once.open.test.ts tests/integration/import-watch-rearm-on-reconnect.open.test.ts`:
+  15 pass, 0 fail.
+- `bun test tests/support/held-sweeper-teardown.test.ts`: 3 pass, 0 fail.
+- `bash scripts/ci/typecheck-all.sh`: root `tsconfig.json` pass. The only
+  failure is `app/tsconfig.json` (the same unused `@ts-expect-error` in
+  `app/__tests__/support/mount.tsx`), which this change does not touch.
+- `bash scripts/ci/lint.sh`: exit 0. `git diff --check` against `5195c246`:
+  clean.
+- Nominated mutation in `tests/support/held-sweeper-teardown.ts`: delete
+  `if (trace.includes('db:close')) v.push('db:close while the tick was held')`.
+  Guard `bun test tests/support/held-sweeper-teardown.test.ts -t "db close moved before an awaited drain"`:
+  0 pass, 1 fail on
+  `expect(report.whileHeldViolations).toContain('db:close while the tick was held')`
+  (received `[]`). Control
+  `bun test tests/support/held-sweeper-teardown.test.ts -t "awaited production drain"`:
+  1 pass. After restoring the file, `git diff` on it was empty and the guard
+  was green again (1 pass).

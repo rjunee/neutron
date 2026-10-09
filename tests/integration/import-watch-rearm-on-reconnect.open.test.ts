@@ -241,8 +241,11 @@ async function startHarness({
         // AWAIT every composed cleanup (e.g. the upload sweeper's quiescing
         // stop) so no loop tick is in flight when the DB closes below.
         await drainRealmodeCleanups(composition.realmode_cleanups ?? [])
-        await graph.shutdown()
-        db.close()
+        try {
+          await graph.shutdown()
+        } finally {
+          db.close()
+        }
       })()
       return closing
     },
