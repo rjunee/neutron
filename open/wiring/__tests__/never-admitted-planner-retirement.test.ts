@@ -552,25 +552,14 @@ async function quarantinedChatFixture(complete = true) {
   return { ...f, server, terminal, makeTerminal, journalPath, registryPath, base, key, row, pane, lookup, lifecycle, getRecord }
 }
 
-test('completed quarantine crosses registered wrapper, lifecycle and real workspace manager into a fresh native Chat', async () => {
-  const f = await quarantinedChatFixture()
-  const originalCall = f.server.call.bind(f.server)
-  f.server.call = async (method, params) => {
-    const value = await originalCall(method, params)
-    if (method === 'pane.process_info' && params.pane_id === f.pane) {
-      const info = value.process_info as { foreground_processes: unknown[] }
-      info.foreground_processes.push({ pid: process.pid + 1, name: 'bun', argv: ['bun', 'channel'] },
-        { pid: process.pid + 2, name: 'bun', argv: ['bun', 'bridge'] })
-    }
-    return value
-  }
+async function registeredFreshConversation(f: Awaited<ReturnType<typeof quarantinedChatFixture>>, scope = 'project',
+  lifecycle = f.lifecycle(), succeeds = true) {
   const capacity = await import('@neutronai/runtime/workers/claude-capacity-client.ts')
   const { buildLlmCallSubstrate } = await import('@neutronai/gateway/wiring/build-llm-call-substrate.ts')
   const { shutdownAllPersistentRepls } = await import('@neutronai/runtime/adapters/claude-code/persistent/pool.ts')
   const { createClaudeCodeSubstrateAuto } = await import('@neutronai/runtime/adapters/claude-code/index.ts')
   const { lifecycleReplHost } = await import('@neutronai/runtime/adapters/claude-code/persistent/__tests__/lifecycle-repl-host.ts')
   const { pool, supervisedBySessionKey } = await import('@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts')
-  const oldRow = f.getRecord(f.registryPath, f.key), oldPane = structuredClone(f.server.panes.get(f.pane)), closes = [...f.server.closed]
   const route = spyOn(capacity, 'nativeRelayRouteFingerprint').mockReturnValue('fixture-native-route')
   const pin = spyOn(capacity, 'loadClaudeCapacityPin').mockReturnValue(f.options.capacityPin)
   const peer = lifecycleReplHost({ pid: process.pid }), argvs: string[][] = []
@@ -584,19 +573,19 @@ test('completed quarantine crosses registered wrapper, lifecycle and real worksp
   // its native process/dev-channel transport is a peer; placement and lifecycle
   // retain their real persisted managers, registry and completed authority.
   const substrate = buildLlmCallSubstrate({ substrate_instance_id: 'cc-agent-owner', cwd: f.dir, user_id: 'owner', owner_handle: 'owner',
-    ownerConversation: true, conversationLifecycle: f.lifecycle(), conversationTerminal: f.terminal,
+    ownerConversation: true, conversationLifecycle: lifecycle, conversationTerminal: f.terminal,
     isConversationQuarantined: id => f.admission.maintenance.isConversationQuarantined(id),
     substrateFactory: opts => {
       expect(opts.credential_identity).toBe('fixture-native-route')
-      expect(opts.conversationProjectId).toBe('project')
-      expect(opts.projectPlacement).toEqual(f.terminal.placementFor('project'))
+      expect(opts.conversationProjectId).toBe(scope)
+      expect(opts.projectPlacement).toEqual(f.terminal.placementFor(scope))
       expect(opts.ptyHost).toBe(f.terminal.host)
       expect(opts.isConversationQuarantined?.(f.body.parent.sessionId)).toBe(true)
       const actualHost = opts.ptyHost!
       return createClaudeCodeSubstrateAuto({ ...opts, ptyHost: { async spawn(argv, options) {
         expect(options.projectPlacement).toEqual(opts.projectPlacement)
-        const registered = [...supervisedBySessionKey.values()].find(value => value.replRegistryPath === f.registryPath)
-        expect(registered?.conversationProjectId).toBe('project')
+        const registered = [...supervisedBySessionKey.values()].find(value => value.replRegistryPath === f.registryPath && value.conversationProjectId === scope)
+        expect(registered?.conversationProjectId).toBe(scope)
         expect(registered?.isConversationQuarantined).toBe(opts.isConversationQuarantined)
         argvs.push(argv)
         const placed = await actualHost.spawn(argv, options)
@@ -606,13 +595,34 @@ test('completed quarantine crosses registered wrapper, lifecycle and real worksp
     } })!
   const events = []
   for await (const event of substrate.start({ prompt: 'fresh independent work', tools: [], model_preference: ['sonnet'],
-    metering_context: { project_id: 'project', conversationProjectId: 'project' } }).events) events.push(event)
+    metering_context: { project_id: scope, conversationProjectId: scope } }).events) events.push(event)
+  if (!succeeds) {
+    expect(events.some(e => e.kind === 'error')).toBe(true)
+    expect(peer.children).toHaveLength(0); expect(f.registrations).toEqual([])
+    return
+  }
   expect(events.filter(e => e.kind === 'error')).toEqual([])
   expect(events.some(e => e.kind === 'completion')).toBe(true)
   expect(argvs).toHaveLength(1); expect(argvs[0]).not.toContain('--resume')
   expect(peer.children[0]!.sessionId).not.toBe(f.body.parent.sessionId)
   expect(f.registrations).toEqual([peer.children[0]!.sessionId])
   expect(peer.children[0]!.prompts).toEqual(['fresh independent work'])
+}
+
+test('completed quarantine crosses registered wrapper, lifecycle and real workspace manager into a fresh native Chat', async () => {
+  const f = await quarantinedChatFixture()
+  const originalCall = f.server.call.bind(f.server)
+  f.server.call = async (method, params) => {
+    const value = await originalCall(method, params)
+    if (method === 'pane.process_info' && params.pane_id === f.pane) {
+      const info = value.process_info as { foreground_processes: unknown[] }
+      info.foreground_processes.push({ pid: process.pid + 1, name: 'bun', argv: ['bun', 'channel'] },
+        { pid: process.pid + 2, name: 'bun', argv: ['bun', 'bridge'] })
+    }
+    return value
+  }
+  const oldRow = f.getRecord(f.registryPath, f.key), oldPane = structuredClone(f.server.panes.get(f.pane)), closes = [...f.server.closed]
+  await registeredFreshConversation(f)
   expect(f.server.panes.get(f.pane)).toEqual(oldPane); expect(f.server.closed).toEqual(closes)
   expect(f.getRecord(f.registryPath, f.key)).toEqual(oldRow)
   const rows = JSON.parse(await readFile(f.journalPath, 'utf8')), record = Object.values(rows)[0] as { chat: { pane: string }; quarantinedChats: { pane: string }[] }
@@ -674,7 +684,13 @@ test.each(['forged-preparation', 'generation', 'reused-pid', 'registry-alias', '
     const lifecycle = f.lifecycle(f.terminal, change === 'unresolved-owner'
       ? { sessions: async () => ({ live: [], unresolved: 1 }) } : {})
     const outcome = await lifecycle.handoffChat('project', { sessionKey: 'next', credentialId: 'next' })
-    expect(['refused', 'unknown']).toContain(outcome.status)
+    if (change === 'workspace-token' || change === 'moved-pane') {
+      // Ordinary placement retains its own reconciliation authority. The lifecycle
+      // must not turn every refused inspection into a permanent pre-placement veto.
+      expect(outcome.status).toBe('ready')
+      await expect(f.terminal.host!.spawn(['new-chat'], { cwd: f.dir, env: {},
+        projectPlacement: f.terminal.placementFor('project') })).rejects.toThrow()
+    } else expect(['refused', 'unknown']).toContain(outcome.status)
     expect([...f.server.panes]).toEqual(before); expect(f.server.closed).toEqual(closes)
     const rows = JSON.parse(await readFile(f.journalPath, 'utf8')), record = Object.values(rows)[0] as { chat: { pane: string }; quarantinedChats?: unknown[] }
     expect(record.chat.pane).toBe(f.pane); expect(record.quarantinedChats).toBeUndefined()
@@ -696,4 +712,35 @@ test('completed Chat metadata release preserves worker and unrelated scopes and 
   expect((await restarted.retireEmptyWorkspace!('project', inspected)).status).toBe('refused')
   expect(await restarted.inspectChat!('other')).toMatchObject({ status: 'live', pane: sibling.paneHandle })
   expect([...f.server.panes]).toEqual(before)
+})
+
+
+test.each(['missing', 'live'] as const)('ordinary pending Chat placement recovers only after positive workspace absence (%s)', async workspace => {
+  const f = await quarantinedChatFixture()
+  const prior = await f.terminal.host!.spawn(['unrelated-native'], { cwd: f.dir, env: {}, projectPlacement: f.terminal.placementFor('other') })
+  prior.detach?.()
+  const rows = JSON.parse(await readFile(f.journalPath, 'utf8')) as Record<string, { scope: string[]; state: string; workspace: string; chat: { pane: string }; quarantinedChats?: unknown[] }>
+  const record = Object.values(rows).find(row => row.scope[1] === 'other')!
+  const targetBefore = structuredClone(Object.values(rows).find(row => row.scope[1] === 'project'))
+  record.state = 'pending'
+  await writeFile(f.journalPath, JSON.stringify(rows))
+  if (workspace === 'missing') {
+    f.server.workspaces.delete(record.workspace)
+    for (const [id, pane] of f.server.panes) if (pane.workspace_id === record.workspace) f.server.panes.delete(id)
+    for (const [id, tab] of f.server.tabs) if (tab.workspace_id === record.workspace) f.server.tabs.delete(id)
+  }
+  expect((await f.terminal.inspectChat!('other')).status).toBe('refused')
+  const originalPane = structuredClone(f.server.panes.get(f.pane)), originalRow = f.getRecord(f.registryPath, f.key)
+  const beforeProbes = f.server.callsTo('workspace.get').length
+  const lifecycle = f.lifecycle(f.terminal, { completedConversationQuarantine: () => { throw Error('ordinary scope needs no quarantine authority') } })
+  await registeredFreshConversation(f, 'other', lifecycle, workspace === 'missing')
+  expect(f.server.callsTo('workspace.get').slice(beforeProbes).some(call => call.params.workspace_id === record.workspace)).toBe(true)
+  const after = JSON.parse(await readFile(f.journalPath, 'utf8')) as typeof rows
+  expect(Object.values(after).find(row => row.scope[1] === 'project')).toEqual(targetBefore)
+  expect(f.server.panes.get(f.pane)).toEqual(originalPane); expect(f.getRecord(f.registryPath, f.key)).toEqual(originalRow)
+  const replacement = Object.values(after).find(row => row.scope[1] === 'other')!
+  if (workspace === 'missing') {
+    expect(replacement.state).toBe('ready'); expect(replacement.workspace).not.toBe(record.workspace)
+    expect(replacement.quarantinedChats).toBeUndefined()
+  } else expect(replacement).toEqual(record)
 })

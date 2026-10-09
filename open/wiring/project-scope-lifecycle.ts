@@ -345,7 +345,6 @@ export function createProjectScopeLifecycle(deps: ProjectScopeLifecycleDeps): Pr
       // kind (a durable Codex native owner after a live provider switch): the manager
       // would refuse the placement, and this owner has no exact authority to retire it.
       const held = await deps.conversationTerminal?.inspectChat?.(scope)
-      if (held?.status === 'refused') return { status: 'unknown', reason: held.reason }
       if (held?.status === 'live' && held.pane && deps.registryPath && deps.completedConversationQuarantine
         && deps.conversationTerminal?.relinquishQuarantinedChat) {
         const current = await sessions(poolProjectIds(scope))

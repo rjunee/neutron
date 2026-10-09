@@ -26,10 +26,12 @@ A restarted manager recognizes the released Chat slot before a replacement is
 spawned. The registered conversation factory then creates a fresh native session
 without resume or copied input. Quarantined history is excluded from automatic
 workspace retirement and dead-shell cleanup. Workers and other scopes retain
-their claims. An unverified workspace inspection now returns an unknown handoff
-instead of reporting readiness that the placement manager would later refuse.
+their claims. Ordinary pending-placement recovery remains with the placement
+manager: a refused inspection alone cannot prevent its positive
+`workspace_not_found` probe and reconstruction. A surviving pending workspace
+still refuses. This preserves recovery independently of quarantine authority.
 
-Author validation: the ten affected test files passed 260 tests and 2,025
+Author validation: the ten affected test files passed 262 tests and 2,071
 assertions, including the actual conversation wrapper, production substrate
 factory, signed capacity registration, scope lifecycle and real workspace manager
 against a synthetic native process/dev-channel and terminal RPC boundary. The
@@ -39,11 +41,15 @@ registry, and restart before spawn. Opposing controls cover prepared-only and
 forged authority, wrong scope/session/generation/PID, duplicate registry ownership,
 foreign native ownership, changed channel/workspace/pane incarnation, concurrent
 journal or authority change, and unresolved owners. Worker/sibling preservation
-and exclusion from workspace retirement also pass. The Open and Runtime
-TypeScript projects passed. Three source mutations were assertion-killed: omit the metadata handoff,
-omit preparation authentication, or omit the final journal comparison. Every
+and exclusion from workspace retirement also pass. A separate ordinary project
+uses the same production factory to recover a pending placement after positive
+workspace absence; the opposing surviving-workspace case refuses without changing
+the unrelated quarantined conversation. The Open and Runtime
+TypeScript projects passed. Four source mutations were assertion-killed: omit the metadata handoff,
+omit preparation authentication, omit the final journal comparison, or reinsert
+a generic handoff veto that blocks ordinary pending-placement recovery. Every
 mutated source was restored byte-for-byte before publication preparation; the
-15 new controls passed again afterward (129 assertions).
+17 new controls passed again afterward (175 assertions).
 
 A separate read-only rehearsal against the deployed completed authority, registry,
 kernel identity and terminal RPC reached the authorized metadata boundary while
