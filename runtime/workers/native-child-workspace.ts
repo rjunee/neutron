@@ -129,8 +129,10 @@ export function independentNativeChildren(next: NativeChildWorkspace | undefined
   if (!next || !prior) return !next && !prior
   const a = records.get(next), b = records.get(prior)
   return !!a && !!b && !a.completed && !b.completed && a.session === b.session && b.bound
-    && ((a.readOnly && b.readOnly) || (!a.readOnly && !b.readOnly
-      && a.directory !== b.directory && a.inode !== b.inode && (a.common !== b.common || a.branch !== b.branch)
+    // A pair containing any writer needs the same measured disjointness proof,
+    // including a reviewer of another card. Read-only pairs may share a tree.
+    && ((a.readOnly && b.readOnly) || (a.directory !== b.directory && a.inode !== b.inode
+      && (a.common !== b.common || a.branch !== b.branch)
       && a.paths.every(left => b.paths.every(right => !contains(left, right) && !contains(right, left)))))
 }
 
