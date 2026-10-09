@@ -11,7 +11,7 @@
  * production drain, `drainRealmodeCleanups`, which awaits each one in
  * registration order, logs and continues after a throw or rejection, and always
  * resolves. Only after that drain settles does it shut the graph down and close
- * the database, the same order the gateway's own shutdown uses.
+ * the database.
  */
 
 import { drainRealmodeCleanups } from '@neutronai/gateway/index.ts'
