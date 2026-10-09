@@ -56,5 +56,11 @@ are rejected by the existing incomplete-output test.
 
 The initial full-validation attempts stopped at lint and then typecheck. The
 initial upgraded CI run exposed the compatibility failures above; those failed
-receipts remain evidence. Focused correction checks pass, but the full corrected
-gate and deployed acceptance remain separate requirements.
+receipts remain evidence. The corrected canonical `bash scripts/check-shared-host.sh`
+completed on `7313dc9c647cafeffe902902a68b628e0d973666` under Bun 1.4.2: lint,
+all 51 typechecks and all 1,804 test files passed, with 28,319 passes, 24 skips and
+zero failures across 19 bounded-memory lanes. The wrapper verified unchanged
+suite inputs before and after the run. Native and bounded cross-model source
+reviews are GO. The subsequent documentation edit records this exact local
+receipt; it does not transfer that suite identity to another revision.
+Exact publication-head CI and deployed acceptance remain separate requirements.
