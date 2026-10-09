@@ -14,8 +14,11 @@ binding from the original live parent's canonical transcript location
 supplies identity only. The original armed reservation, canonical path and live
 execution's result validator still establish completion. Reconciliation confirms
 the binding and parent again before exact-token release. Original session, PID
-and kernel birth identity must match; adoption can change the gateway wrapper
-generation without changing that native process (same file, line 107). No signed
+and kernel birth identity must match. The current wrapper is pinned throughout
+observation; a differing wrapper generation is accepted only with the exact
+native process identity (same file, line 107). Ordinary boot adoption normally
+restores the recorded generation; the changed-generation control exercises the
+identity contract, not an assertion that normal adoption changes generation. No signed
 journal, attempt, result, run or budget is rewritten, and no native input is sent.
 
 The consuming tests cover a completed late build, adopted parent wrapper,
@@ -47,3 +50,26 @@ After restoring mutations, the 38 focused recovery and planner tests passed with
 177 assertions; Open TypeScript checking passed again. The five changed files
 plus the license passed the leak gate with zero findings. This scoped preflight
 is not a whole-tree publication receipt.
+
+Cross-model review initially returned NO-GO: the identity check reused the usage
+collector, whose 8 MiB transcript and 256 KiB per-line limits rejected completed
+larger builds even when their first request envelope was valid. Recovery now uses
+a binding-only reader in `runtime/workers/claude-child-observation.ts`, sharing
+bounded metadata uniqueness and the timeout with usage collection, but reading
+only the first envelope. The read retains `O_NOFOLLOW`, `O_NONBLOCK`, regular-file
+checks and the first-envelope bound. Usage retains its original whole-transcript
+limits. Original dispatch/process/result checks and the final binding rescan are
+unchanged. No multi-parent or queued-input behavior changes are included.
+
+The consuming large-transcript and oversized-later-line cases first failed
+against the original binder, while wrong-first-request and duplicate-child
+controls passed. The corrected reader passes these cases and retains oversized
+first-envelope, malformed envelope, metadata, symlink, FIFO and timeout refusals.
+
+Correction verification: 46 focused recovery/planner/startup/tick tests passed
+with 192 assertions, and all 33 runtime observation tests passed with 79
+assertions. Open and runtime TypeScript checks passed. A mutation restoring the
+usage-based binder reproduced exactly the two large-tail positive failures while
+all four wrong-first-request/duplicate controls passed; restoring the binding-only
+reader made the focused checks green. The correction's changed-file leak
+preflight passed; combined full-suite and renewed external review remain pending.

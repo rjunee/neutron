@@ -9,7 +9,7 @@ import type { TridentRunStore, TridentRun } from '@neutronai/trident/store.ts'
 import type { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { readClaudeNativeDispatchReceipt, verifyNativeDispatchNotSubmitted, verifyNativeDispatchChildBound, verifyNativeDispatchSubmissionStarted, type SignedNativeDispatchRecord } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
-import { observeClaudeChildUsage } from '@neutronai/runtime/workers/claude-child-observation.ts'
+import { observeClaudeChildBinding } from '@neutronai/runtime/workers/claude-child-observation.ts'
 import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
 import { resolveTranscriptProjectsDir } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import { isProcessIdentity, readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
@@ -77,7 +77,7 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
       // Failed observation does not kill the native child. Inspect terminal runs
       // without reconstructing an actor, changing outcome, or dispatching again.
       if (!isTerminalPhase(run.phase)) continue
-      // A usage observation supplies only a unique full-request child binding.
+      // A bounded first-envelope read supplies only the original child binding.
       // Completion still comes exclusively from the original reserved result.
       const binding = unbound && attempt.outcome === 'unknown'
         ? await lateChildBinding(receipt as SignedNativeDispatchRecord, lease.scope.projectId) : undefined
@@ -101,9 +101,9 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
   return { status: 'observed', released, kept: leases.length - released }
 }
 
-/** Observe the original native process through the authoritative live pool. A
- * gateway adoption may replace its wrapper generation without replacing that
- * process; session id plus kernel birth identity must still match exactly. */
+/** Observe the original native process through the authoritative live pool.
+ * Wrapper incarnation is distinct from native process identity: pin the current
+ * wrapper during observation and match original session, PID and kernel birth. */
 async function lateChildBinding(receipt: SignedNativeDispatchRecord, projectId: string | null):
   Promise<(() => Promise<boolean>) | undefined> {
   const parent = receipt.body.parent
@@ -120,7 +120,7 @@ async function lateChildBinding(receipt: SignedNativeDispatchRecord, projectId: 
     && session.childGeneration === generation && isDeepStrictEqual(readProcessIdentity(parent.pid), parent.processIdentity)
     && directory() === path
   if (!owns()) return
-  const observation = await observeClaudeChildUsage(path, parent.sessionId, receipt.body.request)
+  const observation = await observeClaudeChildBinding(path, parent.sessionId, receipt.body.request)
   if (!observation || !owns()) return
   const stillCurrent = async () => {
     const latest = await resolve()
@@ -131,8 +131,8 @@ async function lateChildBinding(receipt: SignedNativeDispatchRecord, projectId: 
     if (!await stillCurrent()) return false
     // Repeat the unbound scan: a new duplicate must not be hidden by pinning the
     // first agent id. Never write a child-bound journal from this observation.
-    const confirmed = await observeClaudeChildUsage(path, parent.sessionId, receipt.body.request)
-    return confirmed?.thread_id === observation.thread_id && await stillCurrent()
+    const confirmed = await observeClaudeChildBinding(path, parent.sessionId, receipt.body.request)
+    return confirmed?.agentId === observation.agentId && await stillCurrent()
   }
 }
 

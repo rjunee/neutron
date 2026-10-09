@@ -99,6 +99,9 @@ is the thing being rebuilt.
       through the exact surviving native parent's canonical transcript location.
       The full first-request envelope must match; original session, PID and kernel
       birth identity must survive, including after gateway wrapper adoption.
+      Identity reads bound the first envelope and metadata, independently of total
+      transcript size or later line size. Large valid transcripts must discharge
+      ownership; wrong first requests and duplicate metadata must still refuse.
       Require the original canonical armed reservation and the ordinary validated
       completed or blocked result before releasing only the exact lease. Recheck
       parent and child binding before release. Preserve all dispatch records,

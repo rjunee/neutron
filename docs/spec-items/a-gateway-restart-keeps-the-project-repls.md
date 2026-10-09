@@ -530,8 +530,12 @@ the canonical attempt must agree on provider, placement, role and model. A signe
 with an `unknown` canonical attempt, passive recovery may instead observe one
 unique child whose first transcript envelope binds the full original request.
 The transcript location comes from the authoritative live parent, whose original
-session id, PID and kernel birth identity must match. Gateway adoption may change
-the wrapper generation while retaining that exact native process. Recheck the
+session id, PID and kernel birth identity must match. Pin the current wrapper
+throughout observation; its generation need not equal the original journal's
+when the native process identity is exact. Read only the bounded first envelope:
+a transcript larger than the usage reader's limit, or an oversized later line,
+must not veto valid identity. Oversized or invalid first envelopes and unreadable
+or ambiguous metadata remain refusals. Recheck the
 live parent and unique binding before release; unresolved, replaced, foreign,
 missing, duplicate or malformed evidence retains ownership. Transcript usage or
 an `end_turn` record alone never establishes completion, and observation never

@@ -39,13 +39,72 @@ async function snapshot(path: string, limit: number, signal: AbortSignal): Promi
  * retain maxima by message id instead of charging the same message repeatedly. */
 export async function observeClaudeChildUsage(directory: string, sessionId: string,
   request: BoundedWorkRequest, boundAgentId?: string): Promise<ProviderObservation | undefined> {
+  return boundedObservation(signal => collect(directory, sessionId, request, signal, boundAgentId))
+}
+
+/** Identity only: later transcript size and usage records cannot veto a valid
+ * first request envelope. This does not establish completion or authorize work. */
+export async function observeClaudeChildBinding(directory: string, sessionId: string,
+  request: BoundedWorkRequest): Promise<{ agentId: string } | undefined> {
+  return boundedObservation(async signal => {
+    try {
+      const agentId = await uniqueChild(directory, request, signal)
+      if (agentId === undefined) return
+      const file = await open(join(directory, `agent-${agentId}.jsonl`), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+      try {
+        signal.throwIfAborted()
+        if (!(await file.stat()).isFile()) return
+        const bytes = Buffer.alloc(CHILD_OBSERVATION_MAX_LINE + 1)
+        let offset = 0, end = -1
+        while (offset < bytes.length && end < 0) {
+          signal.throwIfAborted()
+          const read = await file.read(bytes, offset, Math.min(4096, bytes.length - offset), offset)
+          signal.throwIfAborted()
+          if (read.bytesRead === 0) break
+          const newline = bytes.subarray(offset, offset + read.bytesRead).indexOf(10)
+          if (newline >= 0) end = offset + newline
+          offset += read.bytesRead
+        }
+        if (end < 0) end = offset
+        if (end > CHILD_OBSERVATION_MAX_LINE) return
+        const row = JSON.parse(bytes.subarray(0, end).toString('utf8'))
+        if (ownsRequest(row, agentId, sessionId, request)) return { agentId }
+      } finally { await file.close() }
+    } catch { return undefined }
+  })
+}
+
+async function boundedObservation<T>(read: (signal: AbortSignal) => Promise<T | undefined>): Promise<T | undefined> {
   const controller = new AbortController()
   let timer: ReturnType<typeof setTimeout> | undefined
   const expired = new Promise<undefined>(resolve => {
     timer = setTimeout(() => { controller.abort(); resolve(undefined) }, CHILD_OBSERVATION_TIMEOUT_MS)
   })
-  try { return await Promise.race([collect(directory, sessionId, request, controller.signal, boundAgentId), expired]) }
+  try { return await Promise.race([read(controller.signal), expired]) }
   finally { clearTimeout(timer); controller.abort() }
+}
+
+async function uniqueChild(directory: string, request: BoundedWorkRequest, signal: AbortSignal): Promise<string | undefined> {
+  const matches: string[] = []
+  let entries = 0
+  for await (const entry of await opendir(directory)) {
+    signal.throwIfAborted()
+    if (++entries > 4096) return undefined
+    const name = entry.name
+    if (!/^agent-.+\.meta\.json$/.test(name)) continue
+    try {
+      const meta = JSON.parse(await snapshot(join(directory, name), 16 * 1024, signal))
+      if (meta?.description === `${request.role}: ${request.step_id}`) matches.push(name.slice(6, -10))
+    } catch { return undefined /* Cannot establish uniqueness across unreadable metadata. */ }
+  }
+  return matches.length === 1 ? matches[0] : undefined
+}
+
+function ownsRequest(row: any, agentId: string, sessionId: string, request: BoundedWorkRequest): boolean {
+  if (!row || row.agentId !== agentId || row.sessionId !== sessionId || row.isSidechain !== true
+    || row.type !== 'user' || row.message?.role !== 'user' || typeof row.message.content !== 'string') return false
+  const requests = row.message.content.split('\n').filter((value: string) => value.startsWith('Request (data): '))
+  return requests.length === 1 && isDeepStrictEqual(JSON.parse(requests[0]!.slice(16)), request)
 }
 
 async function collect(directory: string, sessionId: string, request: BoundedWorkRequest,
@@ -53,20 +112,8 @@ async function collect(directory: string, sessionId: string, request: BoundedWor
   const started_at_ms = Date.now()
   try {
     if (boundAgentId !== undefined && !/^[A-Za-z0-9_-]+$/.test(boundAgentId)) return undefined
-    const matches: string[] = boundAgentId === undefined ? [] : [boundAgentId]
-    let entries = 0
-    if (boundAgentId === undefined) for await (const entry of await opendir(directory)) {
-      signal.throwIfAborted()
-      if (++entries > 4096) return undefined
-      const name = entry.name
-      if (!/^agent-.+\.meta\.json$/.test(name)) continue
-      try {
-        const meta = JSON.parse(await snapshot(join(directory, name), 16 * 1024, signal))
-        if (meta?.description === `${request.role}: ${request.step_id}`) matches.push(name.slice(6, -10))
-      } catch { return undefined /* Cannot establish uniqueness across unreadable metadata. */ }
-    }
-    if (matches.length !== 1) return undefined
-    const agentId = matches[0]!
+    const agentId = boundAgentId ?? await uniqueChild(directory, request, signal)
+    if (agentId === undefined) return undefined
     const bytes = await snapshot(join(directory, `agent-${agentId}.jsonl`), CHILD_OBSERVATION_MAX_BYTES, signal)
     const messages = new Map<string, Counts>()
     const models = new Set<string>()
@@ -80,9 +127,7 @@ async function collect(directory: string, sessionId: string, request: BoundedWor
         if (!row || typeof row !== 'object') { if (first) return undefined; continue }
         if (first) {
           first = false
-          if (!owns(row) || row.type !== 'user' || row.message?.role !== 'user' || typeof row.message.content !== 'string') return undefined
-          const requests = row.message.content.split('\n').filter((value: string) => value.startsWith('Request (data): '))
-          if (requests.length !== 1 || !isDeepStrictEqual(JSON.parse(requests[0]!.slice(16)), request)) return undefined
+          if (!ownsRequest(row, agentId, sessionId, request)) return undefined
           continue
         }
         if (!owns(row) || row.type !== 'assistant' || row.message?.role !== 'assistant' || row.isApiErrorMessage === true) continue

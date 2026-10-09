@@ -163,9 +163,9 @@ test(`late submission child ownership: ${fault}`, async () => {
   if (fault === 'exited-parent') f.session.hasChildExited = () => true
   if (fault === 'wrong-transcript-root') f.liveOptions.projectsDir = join(f.dir, 'foreign')
   if (['duplicate-after-first', 'replaced-after-confirm', 'generation-during-read'].includes(fault)) {
-    const observe = childObservation.observeClaudeChildUsage
+    const observe = childObservation.observeClaudeChildBinding
     let calls = 0
-    const reader = spyOn(childObservation, 'observeClaudeChildUsage').mockImplementation(async (...args) => {
+    const reader = spyOn(childObservation, 'observeClaudeChildBinding').mockImplementation(async (...args) => {
       const result = await observe(...args)
       calls++
       if (fault === 'duplicate-after-first' && calls === 1) await writeFile(join(f.directory, 'agent-duplicate.meta.json'), await readFile(f.meta))
@@ -193,6 +193,19 @@ test(`late submission child ownership: ${fault}`, async () => {
   expect(f.attempts.get(f.key)).toEqual(attempt); expect(f.runs.get(f.run.id)).toEqual(run)
   if (fault === 'none' || fault === 'adopted-generation') expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: 0, kept: 0 })
   expect(await Promise.all(paths.map(path => readFile(path, 'utf8')))).toEqual(before)
+})
+
+for (const tail of ['large-transcript', 'large-later-line'] as const)
+for (const fault of ['none', 'wrong-first-request', 'duplicate-child'] as const)
+test(`late submission binding ignores ${tail}: ${fault}`, async () => {
+  const f = await lateChildFixture()
+  if (fault === 'wrong-first-request') f.row.message.content = `Request (data): ${JSON.stringify({ ...f.request, model_id: 'foreign' })}`
+  if (fault === 'duplicate-child') await writeFile(join(f.directory, 'agent-duplicate.meta.json'), await readFile(f.meta))
+  const later = tail === 'large-transcript'
+    ? (JSON.stringify({ padding: 'x'.repeat(8192) }) + '\n').repeat(1025)
+    : JSON.stringify({ padding: 'x'.repeat(256 * 1024 + 1) }) + '\n'
+  await writeFile(f.transcript, JSON.stringify(f.row) + '\n' + later)
+  expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: fault === 'none' ? 1 : 0, kept: fault === 'none' ? 0 : 1 })
 })
 
 function panelResult(request: BoundedWorkRequest, kind = 'completed') {

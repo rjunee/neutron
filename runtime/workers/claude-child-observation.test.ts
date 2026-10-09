@@ -4,7 +4,7 @@ import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
-import { CHILD_OBSERVATION_MAX_BYTES, CHILD_OBSERVATION_MAX_LINE, observeClaudeChildUsage } from './claude-child-observation.ts'
+import { CHILD_OBSERVATION_MAX_BYTES, CHILD_OBSERVATION_MAX_LINE, observeClaudeChildUsage, observeClaudeChildBinding } from './claude-child-observation.ts'
 
 const dirs: string[] = []
 afterEach(async () => { for (const dir of dirs.splice(0)) await rm(dir, { recursive: true, force: true }) })
@@ -123,4 +123,53 @@ for (const bound of [false, true]) test(`stalled I/O times out and late completi
     expect(delayed).toBe(true)
   } finally { release(); mock.mockRestore() }
   expect((await f.observe())?.usage.input_tokens).toBe(10)
+})
+
+for (const fault of ['oversized-first', 'blank-first', 'malformed-first', 'wrong-request', 'duplicate-request',
+  'foreign-session', 'duplicate-child', 'metadata-too-large', 'metadata-symlink', 'transcript-symlink',
+  'metadata-fifo', 'transcript-fifo'] as const)
+test(`binding-only observation retains first-envelope and safe-file refusal: ${fault}`, async () => {
+  const f = await fixture()
+  await f.save([f.initial])
+  expect(await observeClaudeChildBinding(f.dir, 'session', f.request)).toEqual({ agentId: 'child' })
+  if (fault === 'oversized-first') await f.save([{ ...f.initial, padding: 'x'.repeat(CHILD_OBSERVATION_MAX_LINE) }])
+  if (fault === 'blank-first') await writeFile(join(f.dir, 'agent-child.jsonl'), '\n' + JSON.stringify(f.initial))
+  if (fault === 'malformed-first') await writeFile(join(f.dir, 'agent-child.jsonl'), '{\n' + JSON.stringify(f.initial))
+  if (fault === 'wrong-request') await f.save([{ ...f.initial, message: { role: 'user', content: `Request (data): ${JSON.stringify({ ...f.request, model_id: 'other' })}` } }])
+  if (fault === 'duplicate-request') await f.save([{ ...f.initial, message: { role: 'user', content: f.initial.message.content + '\n' + f.initial.message.content } }])
+  if (fault === 'foreign-session') await f.save([{ ...f.initial, sessionId: 'foreign' }])
+  if (fault === 'duplicate-child') await writeFile(join(f.dir, 'agent-other.meta.json'), JSON.stringify({ description: 'build: step' }))
+  if (fault === 'metadata-too-large') await writeFile(join(f.dir, 'agent-child.meta.json'), JSON.stringify({ description: 'build: step', padding: 'x'.repeat(16 * 1024) }))
+  if (fault.endsWith('-symlink') || fault.endsWith('-fifo')) {
+    const path = join(f.dir, fault.startsWith('metadata') ? 'agent-child.meta.json' : 'agent-child.jsonl')
+    await fs.rename(path, path + '.target')
+    if (fault.endsWith('-symlink')) await symlink(path + '.target', path)
+    else expect(Bun.spawnSync(['mkfifo', path]).exitCode).toBe(0)
+  }
+  expect(await observeClaudeChildBinding(f.dir, 'session', f.request)).toBeUndefined()
+})
+
+for (const suffix of ['large-transcript', 'large-later-line'] as const)
+test(`binding-only reader stops at first envelope despite ${suffix}`, async () => {
+  const f = await fixture()
+  const tail = suffix === 'large-transcript' ? ('x'.repeat(8192) + '\n').repeat(1025) : 'x'.repeat(CHILD_OBSERVATION_MAX_LINE + 1)
+  await f.save([f.initial], tail)
+  expect(await observeClaudeChildBinding(f.dir, 'session', f.request)).toEqual({ agentId: 'child' })
+  // The telemetry reader deliberately retains its whole-transcript limits.
+  expect(await f.observe()).toBeUndefined()
+})
+
+for (const block of ['.jsonl', '.meta.json']) test(`binding-only I/O timeout remains bounded: ${block}`, async () => {
+  const f = await fixture()
+  await f.save([f.initial])
+  const original = fs.open
+  let release!: () => void
+  const blocked = new Promise<void>(resolve => { release = resolve })
+  const mock = spyOn(fs, 'open').mockImplementation(async (...args) => {
+    if (String(args[0]).endsWith(block)) await blocked
+    return original(...args)
+  })
+  try { expect(await observeClaudeChildBinding(f.dir, 'session', f.request)).toBeUndefined() }
+  finally { release(); mock.mockRestore() }
+  expect(await observeClaudeChildBinding(f.dir, 'session', f.request)).toEqual({ agentId: 'child' })
 })
