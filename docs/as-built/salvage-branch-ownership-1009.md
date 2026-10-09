@@ -68,9 +68,28 @@ All 51 typechecks passed. Documentation edits during that run also made its
 final clean-tree identity unavailable, so it does not establish a stable-input
 suite receipt. The failures and that rejection remain recorded.
 
-The corrected branch and the companion invalidated-review ownership repair are
-integrated for one complete frozen-tree validation and release. Native and
-bounded cross-model source reviews approve the combined source. The complete
-corrected shared-host check, final receipt review and exact-head CI remain
-pending; their exact receipts will be recorded before publication. This source change alone does not
+The corrected branch and the companion invalidated-review ownership repair were
+validated together at `164112fef451829fcb78002b0f15714dd30d1df0` with
+`bash scripts/check-shared-host.sh`. Lint and all 51 typechecks passed. The
+complete suite executed all 1,801 discovered files: 28,069 passed, 24 skipped
+and one failed. The general batches, database lane, device lane and both HTTP
+batches all completed. The sole failure was the existing #1457
+`project-owner-retirement.test.ts:12` subprocess setup error; that file is
+unchanged from base `8e473fcc9b412938ab80c79c0a5fbbe2efd81b00`. The gate exited
+1 and confirmed unchanged input identity
+`6a20d7eed2b7bb60ea822dafda30c183192cfba1015834c34a827c6467439704`.
+This is a stable-input failed receipt, not a full-suite pass.
+
+`bash scripts/ci/depcruise.sh` passed with no new cross-band violations.
+The local full-tree privacy scan reported 452 findings, including worktree
+metadata. Scans of the 25 changed-file contents plus LICENSE at the base and
+candidate each reported the same eight findings after line-number normalization:
+seven in existing system-overview prose and one in an existing store comment.
+Both corpus scans remain FAIL and do not cover commit messages or PR prose.
+Separate publication-text preflight and exact-head CI remain required.
+
+Native and bounded cross-model source reviews approve the combined source.
+The publication delta after the completed check records evidence only; no full
+receipt is transferred to a different input identity. Final receipt review and
+green exact-head CI remain merge gates. This source change alone does not
 establish deployed unattended single, sequence or concurrent acceptance.

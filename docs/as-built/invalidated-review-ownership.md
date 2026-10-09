@@ -29,12 +29,16 @@ assertions; the review-source suite passed 63 tests with 408 assertions. Root
 and Trident TypeScript checks passed. Four isolated must-fail mutations were
 rejected: restoring the invalidation veto, bypassing request-hash comparison,
 bypassing terminal payload validation, and removing review-source invalidation
-refusal. All mutated sources were restored afterward. For combined full-suite validation, see
-[salvage branch ownership](salvage-branch-ownership-1009.md). Full validation and
-live deployment acceptance remain delivery work; this slice does not establish
-unattended build completion.
+refusal. All mutated sources were restored afterward. Combined validation at
+`164112fef451829fcb78002b0f15714dd30d1df0` completed all 51 typechecks and all
+1,801 discovered test files: 28,069 passed, 24 skipped and the existing #1457
+subprocess setup case failed. The frozen input identity remained unchanged and
+the full local gate remains FAIL. See
+[salvage branch ownership](salvage-branch-ownership-1009.md) for the exact receipt.
+Final publication review, exact-head CI and live deployment acceptance remain
+delivery work; this slice does not establish unattended build completion.
 
-The changed-file corpus and commit-message leak checks passed. The full local
+The five-file ownership slice's corpus and commit-message leak checks passed. The full local
 tree scan reported 452 findings, including worktree metadata, so it is not
 recorded as a passing publication gate; delivery must resolve or independently
 classify those findings.
