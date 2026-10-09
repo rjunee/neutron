@@ -1068,7 +1068,7 @@ for (const scenario of ['raw', 'pasted', 'pasted blocks', 'wrong id', 'embedded'
   })
 }
 
-for (const scenario of ['enqueue', 'absorbed', 'attachment', 'late child', 'cancelled', 'budget', 'wrong trailer',
+for (const scenario of ['enqueue', 'absorbed', 'attachment', 'foreign absorbed', 'foreign attachment', 'late child', 'cancelled', 'budget', 'wrong trailer',
   'historical', 'other session', 'missing session', 'wrong payload', 'notification', 'embedded', 'wrong id',
   'unknown operation', 'removed', 'foreign removal', 'other attachment'] as const) {
   test(`queued dispatch survives compaction without replay: ${scenario}`, async () => {
@@ -1079,11 +1079,8 @@ for (const scenario of ['enqueue', 'absorbed', 'attachment', 'late child', 'canc
     const encode = (record: unknown) => JSON.stringify(record) + '\n'
     const queued = (text: string) => ({ type: 'queue-operation', operation: 'enqueue', sessionId: 'session',
       content: `\n\n<pasted_content id="fixture">\n${text}\n</pasted_content id="fixture">\n\n` })
-    const dispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...f.input.spec, effort: f.input.request.effort })
-    // The identical historical command and a multibyte prefix are not evidence of
-    // this submission. The captured byte boundary must exclude both.
-    await writeFile(transcript, encode({ type: 'user', message: { content: 'earlier ☃' } }) + encode(queued(dispatch)))
-    let now = 0, yielded = 0
+    let historicalDispatch = ''
+    let now = 0, yielded = 0, released = 0
     const controller = new AbortController()
     f.input.signal = controller.signal
     f.input.request = { ...f.input.request, writable: false, tools: 'read-only', budget: { wall_ms: 180_000 } }
@@ -1091,8 +1088,8 @@ for (const scenario of ['enqueue', 'absorbed', 'attachment', 'late child', 'canc
       background?.(() => { yielded++ })
       return () => { released++ }
     }
-    let released = 0
     f.binding.session.child.submitLine = async text => {
+      expect(text).toBe(historicalDispatch)
       f.commands.push(text)
       if (scenario === 'historical') return
       const row = queued(text)
@@ -1103,9 +1100,11 @@ for (const scenario of ['enqueue', 'absorbed', 'attachment', 'late child', 'canc
       if (scenario === 'embedded') row.content = 'quoted instruction: ' + row.content
       if (scenario === 'wrong id') row.content = row.content.replace('</pasted_content id="fixture">', '</pasted_content id="other">')
       if (scenario === 'unknown operation') row.operation = 'unknown'
-      if (scenario === 'attachment' || scenario === 'other attachment') {
-        await appendFile(transcript, encode({ type: 'attachment', sessionId: 'session', attachment: {
-          type: scenario === 'attachment' ? 'queued_command' : 'task_notification', prompt: row.content } }))
+      if (['attachment', 'other attachment', 'foreign attachment'].includes(scenario)) {
+        await appendFile(transcript, encode({ type: 'attachment', sessionId: scenario === 'foreign attachment' ? 'other' : 'session', attachment: {
+          type: scenario === 'other attachment' ? 'task_notification' : 'queued_command', prompt: row.content } }))
+      } else if (scenario === 'foreign absorbed') {
+        await appendFile(transcript, encode({ ...row, sessionId: 'other', operation: 'remove', reason: 'absorbed_mid_turn' }))
       } else {
         await appendFile(transcript, encode(row))
         if (['absorbed', 'removed', 'foreign removal'].includes(scenario)) await appendFile(transcript,
@@ -1131,7 +1130,14 @@ for (const scenario of ['enqueue', 'absorbed', 'attachment', 'late child', 'canc
           kind: 'completed', result: { verdict: 'APPROVE' } }))
     } })
     const runners = await createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
-      actingTurn, headless: {}, trailer: { schemas: new Map([['v1', value => (value as { verdict?: string }).verdict === 'APPROVE']]), metadata: () => undefined } })
+      actingTurn: async input => {
+        historicalDispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...input.spec, effort: input.request.effort })
+        // Seed the runner's actual dispatch before the actor captures its byte
+        // boundary. Submission asserts identity so this historical control cannot
+        // pass merely because its synthetic prompt differs from the real request.
+        await writeFile(transcript, encode({ type: 'user', message: { content: 'earlier ☃' } }) + encode(queued(historicalDispatch)))
+        return actingTurn(input)
+      }, headless: {}, trailer: { schemas: new Map([['v1', value => (value as { verdict?: string }).verdict === 'APPROVE']]), metadata: () => undefined } })
     const outcome = await runners.inRepl!.run(f.input.request, 'in-repl', controller.signal)
     if (['enqueue', 'absorbed', 'attachment', 'late child', 'foreign removal'].includes(scenario)) {
       expect(outcome).toMatchObject({ kind: 'completed', result: { verdict: 'APPROVE' } })

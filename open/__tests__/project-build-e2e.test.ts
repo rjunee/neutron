@@ -9676,7 +9676,7 @@ test.each(['enqueue', 'other session', 'notification'] as const)('queued native 
   const submit = f.session.child.submitLine!
   let held: string | undefined
   let submissions = 0, completed = 0
-  f.session.child.submitLine = async line => {
+  f.session.child.submitLine = async (line: string) => {
     const spec = JSON.parse(line.slice(line.indexOf('{')))
     const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
     const requestLine = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!

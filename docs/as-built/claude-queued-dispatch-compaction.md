@@ -22,7 +22,8 @@ and trailer validation retain those responsibilities. No timeout constant change
 
 The acting-turn regression first failed on the eight cases requiring continued
 observation, while all ten refusal controls passed. After the correction, all
-129 acting-turn tests passed. New controls cover cancellation, original expiry,
+131 acting-turn tests passed after review strengthened the historical control.
+New controls cover cancellation, original expiry,
 foreign and absent session identity, historical commands, payload/envelope
 mutations, notifications, removals, queued attachments, and a later bound child
 that alone permits slot transfer.
@@ -34,7 +35,24 @@ clock. Exact queued evidence reaches merge; foreign-session and notification
 decoys stop unknown and retain the native lease. All three cases passed. Three
 separate source mutations were rejected by those consuming tests: ignoring queued
 evidence, accepting foreign sessions, and accepting an embedded dispatch. The
-original source bytes were restored after each experiment set.
+original source bytes were restored after each experiment set. Cross-model review
+found that the initial historical fixture used a synthetic dispatch rather than
+the runner's actual prompt. The corrected fixture seeds the actual command before
+boundary capture and asserts it equals the submitted bytes. A fourth mutation,
+reading from byte zero, now makes that historical case incorrectly complete and
+is rejected. Foreign-session absorption and attachment controls were also added.
+
+Native and bounded cross-model source reviews returned GO. The first shared-host
+validation passed lint, then found a missing test callback parameter type in the
+Open check. That attempt was stopped before the full suite while applying the
+review correction. The corrected Open package typecheck passed. These partial
+results are not a full local validation receipt.
+
+The local archive purity scan reported 451 findings on the candidate and its
+unchanged base, with identical reported findings and totals. The scanner truncates
+individual findings, so this comparison does not establish equality of every
+undisplayed finding or a full-tree pass. The commit-message and issue-prose gate
+passed. Exact-head CI remains required.
 
 The existing orchestrator spec records this scoped acceptance. Full local gates,
 independent review, exact-head CI, deployed-source verification and fresh live
