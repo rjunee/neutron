@@ -224,9 +224,9 @@ before "fixing" a spawned-child env assertion by extending the delete list.
 ### CI parity
 
 CI executes **every** file. `.github/workflows/ci.yml` runs the *same*
-`bash scripts/run-tests.sh` under an 8-way `NEUTRON_TEST_SHARD` matrix with bun
-pinned `1.3.13`, and the same coverage audit (`declared == bun-discovered ==
-executed`, drift fatal) gates both. Shard 1 additionally runs every app test in
+`bash scripts/run-tests.sh` under a 4-way `NEUTRON_TEST_SHARD` matrix with bun
+pinned `1.4.2`, and the same coverage audit (`declared == bun-discovered ==
+executed`, drift fatal) gates both. Shard 4 additionally runs every app test in
 one `--isolate` invocation, so app co-residency is checked independently of the
 matrix grouping. There is no hidden skip list. "CI is green" and "the local
 suite passes" now mean the same thing, up to toolchain version.
@@ -259,7 +259,7 @@ and CI surface. A gate with no failing case is an empty check wearing a green ti
 ### The toolchain-skew gotcha
 
 That last clause is load-bearing: toolchain versions can differ. CI now pins bun
-`1.3.13`; the following differences were measured while CI still pinned `1.3.9`
+`1.4.2`; the following differences were measured while CI still pinned `1.3.9`
 and the local runner used `1.3.13`:
 
 - `stat.mtimeMs` carries sub-ms precision (1.3.9 hands back integer ms) — which

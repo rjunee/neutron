@@ -133,6 +133,18 @@ test('native transport owns the lock after parent lease closes; exact exit relea
   } finally { transport.close() }
 })
 
+test('collected native transport preserves a reused parent reservation descriptor', async () => {
+  const child = Bun.spawn([process.execPath,
+    join(import.meta.dir, '__tests__/fixtures/account-writer-descriptor-lifetime.ts'), binary], {
+    stdout: 'pipe', stderr: 'pipe',
+  })
+  const [code, stdout, stderr] = await Promise.all([
+    child.exited, new Response(child.stdout).text(), new Response(child.stderr).text(),
+  ])
+  expect({ code, stderr }).toEqual({ code: 0, stderr: '' })
+  expect(JSON.parse(stdout)).toEqual({ collected: true, descriptorPreserved: true, nativeExitObserved: true })
+}, 30_000)
+
 test('closing a surviving parent descriptor cannot unlock an already-running native writer', async () => {
   const home = root(), lease = acquireCodexAccountWriteLease(home)
   const [command, ...args] = codexAccountWriterCommand(binary, [], home)

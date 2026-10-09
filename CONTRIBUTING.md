@@ -35,7 +35,9 @@ the PR that earns it. No ad-hoc tracking files.
 
 Requirements:
 
-- [Bun](https://bun.sh) (the runtime and test runner).
+- [Bun](https://bun.sh) 1.4.2 or later (the runtime and test runner; CI pins 1.4.2).
+  Older runtime descriptor-finalization behavior can close an unrelated file after
+  a native child exits. The account-writer lifecycle regression checks this boundary.
 - The `claude` CLI (Claude Code), authenticated with your own subscription
   (`claude setup-token`). Neutron runs on your own Claude credentials.
 - `git`.
