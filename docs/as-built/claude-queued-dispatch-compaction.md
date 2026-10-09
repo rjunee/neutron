@@ -62,13 +62,31 @@ GO. Production deadlines, cancellation, identity refusals, submission counts and
 child-only slot transfer are unchanged. These affected checks do not establish a
 final-head local full-suite pass.
 
-The local archive purity scan reported 451 findings on the candidate and its
-unchanged base, with identical reported findings and totals. The scanner truncates
+The earlier prevention-only archive purity scan reported 451 findings on that
+candidate and its unchanged base, with identical reported findings and totals. The scanner truncates
 individual findings, so this comparison does not establish equality of every
 undisplayed finding or a full-tree pass. The commit-message and issue-prose gate
 passed. Exact-head CI remains required.
 
-The existing orchestrator spec records this scoped acceptance. Full local gates,
-independent review, exact-head CI, deployed-source verification and fresh live
-acceptance remain delivery checks; no production run, lease, receipt or candidate
-branch was edited by this repair.
+The combined canonical local check, `bash scripts/check-shared-host.sh`, completed
+at `b2562d734c7af513a445c0193f7e9d79de45df47`: lint and all 51 typechecks passed;
+all 1,801 files executed, with 28,150 tests passing, 24 skipped and two failures.
+The failures were the unchanged `project-owner-retirement.test.ts:12`
+`child.exited` EBADF tracked in #1457 and the new wrong-trailer clock assertion
+corrected above. All 178 HTTP integration files passed. The full check exited 1
+with unchanged input identity
+`16aadd0ac86c9b6f3b5fd28f5d89900863b47b07c69c98edea5d8ff97c3b8d4c`.
+Its log SHA-256 is
+`4ad5355ebb7ff1474111522545fb7622efc05d9274609ab8f811c4b70b334a86`.
+This is a completed failed receipt, not a full-suite pass for the corrected head.
+
+The integrated correction at `4a8e0f7ec38a046f2a5f2357e043aa49822c91c1`
+passed `bun test runtime/workers/claude-acting-turn.test.ts` (133 tests, 72,676
+assertions), `bunx tsc -p runtime/tsconfig.json --noEmit` and
+`bash scripts/ci/lint.sh` in the delivery worktree. Only these new as-built
+records were edited while those affected checks ran; production source remained
+identical to the completed combined check.
+
+The existing orchestrator spec records this scoped acceptance. Exact-head CI,
+deployed-source verification and fresh live acceptance remain delivery checks;
+no production run, lease, receipt or candidate branch was edited by this repair.

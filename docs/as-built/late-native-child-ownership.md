@@ -59,7 +59,8 @@ bounded metadata uniqueness and the timeout with usage collection, but reading
 only the first envelope. The read retains `O_NOFOLLOW`, `O_NONBLOCK`, regular-file
 checks and the first-envelope bound. Usage retains its original whole-transcript
 limits. Original dispatch/process/result checks and the final binding rescan are
-unchanged. No multi-parent or queued-input behavior changes are included.
+unchanged. This binding-reader correction does not broaden parent selection or
+change queued-input handling.
 
 The consuming large-transcript and oversized-later-line cases first failed
 against the original binder, while wrong-first-request and duplicate-child
@@ -72,4 +73,9 @@ assertions. Open and runtime TypeScript checks passed. A mutation restoring the
 usage-based binder reproduced exactly the two large-tail positive failures while
 all four wrong-first-request/duplicate controls passed; restoring the binding-only
 reader made the focused checks green. The correction's changed-file leak
-preflight passed; combined full-suite and renewed external review remain pending.
+preflight passed. Independent native and bounded cross-model source reviews
+approved the corrected implementation. The completed combined local receipt and
+subsequent fixture correction are recorded in
+`claude-queued-dispatch-compaction.md`: all 1,801 files executed, with two failures
+and no full-suite pass claimed for the corrected publication head. Exact-head CI,
+deployment and unattended acceptance remain required.
