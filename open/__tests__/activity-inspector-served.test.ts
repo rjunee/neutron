@@ -439,6 +439,52 @@ function armDbClose(db: ProjectDb, rec: Recorder): void {
 }
 
 /**
+ * Await `waiting`, but if the composition run REJECTS first with anything other
+ * than the body's own `expected` failure (an in-body assertion, or the composer
+ * itself), throw that error: the real cause, not a later guard-deadline timeout
+ * that hides it.
+ */
+async function untilOrRunFailure(
+  waiting: Promise<void>,
+  run: Promise<void>,
+  expected?: unknown,
+): Promise<void> {
+  await Promise.race([
+    waiting,
+    run.then(
+      () => waiting,
+      (err: unknown) => {
+        if (expected !== undefined && err === expected) return waiting
+        throw err
+      },
+    ),
+  ])
+}
+
+/**
+ * A rejecting cleanup whose rejection is OBSERVABLY consumed. It returns a
+ * thenable (which `await` adopts by calling its `then`) that records
+ * `<label>:handled` only when a consumer attaches a rejection handler, and
+ * delivers its error only through that handler, so it can never surface as an
+ * unhandled rejection. The record is the positive evidence that the drain caught
+ * the rejection; a process-level `unhandledRejection` listener cannot provide
+ * it under `bun test`, whose runner fails the running test on an unhandled
+ * rejection before any such listener can observe it.
+ */
+function observedRejection(rec: Recorder, label: string): Promise<void> {
+  rec.push(`${label}:ran`)
+  const err = new Error(label)
+  const thenable = {
+    then(_onFulfilled?: unknown, onRejected?: (reason: unknown) => unknown): void {
+      if (typeof onRejected !== 'function') return
+      rec.push(`${label}:handled`)
+      onRejected(err)
+    },
+  }
+  return thenable as unknown as Promise<void>
+}
+
+/**
  * Replace every REGISTERED cleanup IN PLACE with a counting wrapper, before
  * teardown begins, so the fixture's own drain is what is counted. Positive
  * control: a composition with no registered cleanup would make the count vacuous.
@@ -533,42 +579,53 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
         const probe = installSweeperProbe(rec, tick.promise)
         const bodyFailure = new Error('body-failure')
         let bodyErr: unknown = null
+        let inBodyErr: unknown = null
+        // An in-body assertion failure is the REAL cause; surface it before any
+        // later teardown assertion can fail on its consequences instead.
+        const surfaceUnexpected = (err: unknown): void => {
+          if (err !== null && err !== bodyFailure) throw err
+        }
         let heldDb: ProjectDb | null = null
         let sweeperDescriptor: LoopDescriptor | undefined
         let counts: number[] = []
         let settled: Promise<void> = Promise.resolve()
         try {
           const run = withComposition(async ({ db, composition }) => {
-            heldDb = db
-            armDbClose(db, rec)
-            counts = countCleanups(composition)
+            try {
+              heldDb = db
+              armDbClose(db, rec)
+              counts = countCleanups(composition)
 
-            // The composed loop is live and is the one the probe captured.
-            sweeperDescriptor = composition.loop_registry?.get(SWEEPER_LOOP)
-            expect(sweeperDescriptor?.isActive?.()).toBe(true)
-            const loop = probe.loop()
-            expect(loop).not.toBeNull()
+              // The composed loop is live and is the one the probe captured.
+              sweeperDescriptor = composition.loop_registry?.get(SWEEPER_LOOP)
+              expect(sweeperDescriptor?.isActive?.()).toBe(true)
+              const loop = probe.loop()
+              expect(loop).not.toBeNull()
 
-            // Seed a KNOWN expired row that is still `uploading`.
-            const store = new SqliteUploadSessionStore(db)
-            const now = Date.now()
-            await store.create({
-              upload_id: HELD_UPLOAD_ID,
-              project_slug: 'owner',
-              source: 'chatgpt',
-              filename: 'x.zip',
-              total_bytes: 10,
-              mime_type: 'application/zip',
-              created_at: now - 120_000,
-              expires_at: now - 60_000,
-            })
-            expect((await store.get(HELD_UPLOAD_ID))?.status).toBe('uploading')
-            const expired = await store.listExpiredUploading(Date.now(), 100)
-            expect(expired.map((r) => r.upload_id)).toContain(HELD_UPLOAD_ID)
+              // Seed a KNOWN expired row that is still `uploading`.
+              const store = new SqliteUploadSessionStore(db)
+              const now = Date.now()
+              await store.create({
+                upload_id: HELD_UPLOAD_ID,
+                project_slug: 'owner',
+                source: 'chatgpt',
+                filename: 'x.zip',
+                total_bytes: 10,
+                mime_type: 'application/zip',
+                created_at: now - 120_000,
+                expires_at: now - 60_000,
+              })
+              expect((await store.get(HELD_UPLOAD_ID))?.status).toBe('uploading')
+              const expired = await store.listExpiredUploading(Date.now(), 100)
+              expect(expired.map((r) => r.upload_id)).toContain(HELD_UPLOAD_ID)
 
-            // Drive the REAL composed loop tick; it enters the held write.
-            void loop!.runOnce()
-            await rec.waitFor('markExpired:entered')
+              // Drive the REAL composed loop tick; it enters the held write.
+              void loop!.runOnce()
+              await rec.waitFor('markExpired:entered')
+            } catch (err) {
+              inBodyErr = err
+              throw err
+            }
             if (outcome === 'throws') throw bodyFailure
           })
           settled = run.then(
@@ -580,7 +637,8 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
           )
 
           // Teardown has reached the sweeper's quiescing stop() while the tick is held.
-          await rec.waitFor('sweeper.stop:start')
+          await untilOrRunFailure(rec.waitFor('sweeper.stop:start'), run, bodyFailure)
+          surfaceUnexpected(inBodyErr)
           expect(rec.has('markExpired:entered')).toBe(true)
           expect({
             teardownSettledWhileHeld: rec.has('teardown:settled'),
@@ -591,6 +649,10 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
 
           tick.release()
           await settled
+          // The body's own outcome first: the original failure survived cleanup.
+          surfaceUnexpected(bodyErr)
+          if (outcome === 'throws') expect(bodyErr).toBe(bodyFailure)
+          else expect(bodyErr).toBeNull()
 
           // The held write committed before close, and close preceded settlement.
           const order = [
@@ -621,9 +683,6 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
           } finally {
             verify.close()
           }
-
-          if (outcome === 'throws') expect(bodyErr).toBe(bodyFailure)
-          else expect(bodyErr).toBeNull()
         } finally {
           tick.release()
           await settled
@@ -637,25 +696,26 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
   test('a rejecting cleanup does not skip a later held one or close early', async () => {
     const rec = recorder()
     const gate = deferred()
-    const unhandled: unknown[] = []
-    const onUnhandled = (reason: unknown): void => {
-      unhandled.push(reason)
-    }
-    process.on('unhandledRejection', onUnhandled)
     let heldDb: ProjectDb | null = null
     let counts: number[] = []
     const appended = { reject: 0, held: 0 }
     let settled: Promise<void> = Promise.resolve()
     let runErr: unknown = null
     try {
+      // Positive control for the handled-rejection probe: a rejection nobody
+      // consumes records no handler, so `reject:handled` below is not vacuous.
+      const control = recorder()
+      observedRejection(control, 'unconsumed')
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(control.events).toEqual(['unconsumed:ran'])
+
       const run = withComposition(async ({ db, composition }) => {
         heldDb = db
         armDbClose(db, rec)
         counts = countCleanups(composition)
-        composition.realmode_cleanups!.push(async () => {
+        composition.realmode_cleanups!.push(() => {
           appended.reject++
-          rec.push('reject:ran')
-          throw new Error('cleanup-reject')
+          return observedRejection(rec, 'reject')
         })
         composition.realmode_cleanups!.push(async () => {
           appended.held++
@@ -672,7 +732,7 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
         },
       )
 
-      await rec.waitFor('held:entered')
+      await untilOrRunFailure(rec.waitFor('held:entered'), run)
       expect(rec.events.indexOf('reject:ran')).toBeGreaterThanOrEqual(0)
       expect(rec.events.indexOf('reject:ran')).toBeLessThan(rec.events.indexOf('held:entered'))
       expect({
@@ -683,7 +743,7 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
 
       gate.release()
       await settled
-      expect(runErr).toBeNull()
+      if (runErr !== null) throw runErr
 
       const order = ['reject:ran', 'held:entered', 'held:released', 'db:closed', 'teardown:settled']
       const positions = order.map((e) => rec.events.indexOf(e))
@@ -696,12 +756,13 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
       expect(appended).toEqual({ reject: 1, held: 1 })
       expect(rec.count('db:closed')).toBe(1)
 
-      await new Promise<void>((resolve) => setImmediate(resolve))
-      expect(unhandled).toEqual([])
+      // The drain consumed the rejection (a handler was attached and it
+      // delivered there) before it moved on to the held cleanup.
+      expect(rec.count('reject:handled')).toBe(1)
+      expect(rec.events.indexOf('reject:handled')).toBeLessThan(rec.events.indexOf('held:entered'))
     } finally {
       gate.release()
       await settled
-      process.off('unhandledRejection', onUnhandled)
     }
   }, 30_000)
 
@@ -715,9 +776,13 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
       // Take every registered cleanup off the list and dispose of them here, so
       // the fixture's own drain sees an empty list and no loop is live at close.
       const saved = composition.realmode_cleanups!.splice(0)
-      expect(saved.length).toBeGreaterThan(0)
-      await drainRealmodeCleanups(saved)
-      expect(composition.realmode_cleanups).toEqual([])
+      try {
+        expect(saved.length).toBeGreaterThan(0)
+        expect(composition.realmode_cleanups).toEqual([])
+      } finally {
+        // Disposed even when an assertion above fails, so no loop outlives close.
+        await drainRealmodeCleanups(saved)
+      }
     })
     expect(rec.count('db:closed')).toBe(1)
     expect(sweeperDescriptor?.isActive?.()).toBe(false)
