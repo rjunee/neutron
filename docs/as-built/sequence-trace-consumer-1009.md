@@ -124,6 +124,29 @@ Validation measured for T2:
 - The full suite is deferred for this intermediate task. The terminal task runs it
   over the cumulative branch.
 
+T2 revalidation (run b2fb8978): T1 and T2 came onto this run's branch by a
+fast-forward merge of the published PR #1475 head `c24a8c24`, not by a rebuild;
+`c24a8c24` is an ancestor of the branch head. The branch diff against main
+`5195c246` lists only the four fixture files, this shard and the run-owned ledger.
+Measured again on that head:
+
+- `bun test tests/fixtures/trident-sequence-trace/validate.test.ts`: 41 pass,
+  0 fail. `bun test tests/fixtures/trident-sequence-trace/decode.test.ts`: 86 pass,
+  0 fail.
+- `bunx tsc -p tsconfig.json --noEmit` and `bunx tsc -p trident/tsconfig.json
+  --noEmit`: clean.
+- `bash scripts/ci/typecheck-all.sh`: 50 of 51 pass, including
+  `open/tsconfig.json`. The one failure is the same `app/tsconfig.json` unused
+  `@ts-expect-error` at `app/__tests__/support/mount.tsx:17`, outside this diff.
+- `bunx eslint tests/fixtures/trident-sequence-trace/` and
+  `git diff --check 5195c246..HEAD`: clean.
+- M6 (the `merged before the final task` check deleted, so a premature merge
+  passes): strict `tsc` clean, 3 of 41 tests fail. M7 (the accept branch returns a
+  rejection, so a legitimate completed trace is refused): strict `tsc` clean, 7 of
+  41 tests fail. After each, `validate.ts` was restored and
+  `git diff --exit-code` was clean (sha256 `2f245c01…` before and after).
+- The full suite remains deferred to the terminal task (T3).
+
 ### Evidence boundary
 
 All trace data here is synthetic. This fixture proves only that the decoder and
