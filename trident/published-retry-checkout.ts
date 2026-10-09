@@ -89,6 +89,10 @@ const failed = (result: HostCommandResult): boolean => !result.ok || result.time
  * When no checkout holds the branch any more, the same authority, settled-head,
  * base-ancestry and publication checks still run and nothing is released: the
  * outcome is 'handed-off' so the caller re-checks the settled head after its add.
+ * Preparation calls this whether or not the branch still exists: when the
+ * retained branch itself is gone, the settled-head read fails and the outcome is
+ * UNKNOWN `branch-unreadable`, so the caller never recreates the branch at the
+ * predecessor's base without the retained work.
  *
  * 'none' means no owned published retry authority exists and outer launch did
  * not adopt the branch: the caller's path is unchanged and no reservation is

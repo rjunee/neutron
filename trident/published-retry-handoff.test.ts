@@ -21,7 +21,9 @@ import { TridentAttemptLedger, type AttemptOutcome } from './attempt-ledger.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import { prepareLaunch, type PreparedLaunch } from './launch-preparation.ts'
-import { publishedRetryHandoff, readPublishedRetryHandoff } from './published-retry-handoff.ts'
+import {
+  adoptedPublishedRetryPin, LAUNCH_TELEMETRY_EVENTS, publishedRetryHandoff, readPublishedRetryHandoff,
+} from './published-retry-handoff.ts'
 import { retryModeSource } from './build-mode-state.ts'
 import { withRetainedCheckoutHandoff, type RetainedCheckoutOutcome, type RetainedCheckoutRefusal } from './published-retry-checkout.ts'
 
@@ -427,6 +429,26 @@ for (const [name, shape] of [['unfinished fix', UNFINISHED_FIX], ['completed bui
   })
 }
 
+// Production stamps launch telemetry on every launch (`build-core-modules.ts`
+// wires the orchestrator's `record_stage`; `work_board_start` stamps its own
+// dispatch), so a live preparation-refused attempt carries those stamps around
+// its one worktree-add diagnostic. They neither qualify nor disqualify it.
+test('a preparation-refused card attempt with the production launch telemetry still passes over', async () => {
+  const f = await world(UNFINISHED_FIX)
+  const { refused, retry } = await afterPreparationRefusedRetry(f)
+  for (const stage of ['work-board-start-dispatched', 'launch-start', 'fire-dispatched', 'fire-settled']) {
+    await f.store.recordStageEvent(refused.id, stage, null)
+  }
+  expect(LAUNCH_TELEMETRY_EVENTS).toEqual(expect.arrayContaining(['launch-start', 'fire-dispatched',
+    'fire-unobserved-launch', 'work-board-start-dispatched']))
+  const handoff = publishedRetryHandoff(f.store, f.store.get(retry.id)!)
+  expect(handoff?.prior.id).toBe(f.prior.id)
+  expect(prepared(await f.launch(f.store.get(retry.id)!)).pinnedRun.base_sha).toBe(f.base)
+  // Telemetry alone is not the diagnostic: without it the attempt still refuses.
+  await f.db.run("DELETE FROM code_trident_stage_events WHERE run_id = ? AND stage = 'build-worktree-add-failed'", [refused.id])
+  expect(publishedRetryHandoff(f.store, f.store.get(retry.id)!)).toBeNull()
+})
+
 const preparationFaults: Record<string, (f: Awaited<ReturnType<typeof world>>, refused: TridentRun) => Promise<unknown>> = {
   'its inner result carries an extra key': (f, refused) => f.store.update(refused.id, { inner_result:
     JSON.stringify({ ok: false, checkpoint: 'inner-error', terminalCause: PREPARATION_CAUSE, prNumber: PR }) }),
@@ -584,6 +606,42 @@ for (const [name, move] of [
     expect(reached).toBe(true)
     expect(await snapshot(f)).toEqual(before)
     expect(destructive(f.commands.slice(start))).toEqual([])
+  })
+}
+
+// The retained branch itself can vanish after outer launch adopted it (its
+// checkout released and the local ref deleted). Preparation still consults the
+// hand-off, which cannot read the settled head: UNKNOWN, and nothing recreates
+// the branch at the predecessor's base without the retained work.
+test('preparation refuses UNKNOWN when the adopted retained branch vanished after outer launch', async () => {
+  const f = await launched()
+  await git(f.repo, '-C', f.repo, 'worktree', 'remove', f.worktree)
+  await git(f.repo, '-C', f.repo, 'update-ref', '-d', `refs/heads/${BRANCH}`)
+  const before = await snapshot(f)
+  const start = f.commands.length
+  const reached: RetainedCheckoutOutcome[] = []
+  const outcome = await handOff(f, () => true, async seen => { reached.push(seen) })
+  expect(outcome).toEqual({ verdict: 'unknown', detail: 'branch-unreadable' })
+  expect(reached).toEqual([outcome])
+  expect(await snapshot(f)).toEqual(before)
+  expect(destructive(f.commands.slice(start))).toEqual([])
+})
+
+// The adopted-pin fallback covers only a FRESH adopted retry. Once the retry has
+// its own checkpoint, retry source or recovery, the authority is null by design
+// and a same-run re-preparation keeps its existing path ('none').
+for (const [name, stage] of [['its own build-mode-state checkpoint', 'build-mode-state'],
+  ['its own build-retry-source', 'build-retry-source']] as const) {
+  test(`the adopted-pin fallback does not apply to a retry that already recorded ${name}`, async () => {
+    const f = await launched()
+    expect(adoptedPublishedRetryPin(f.store, f.store.get(f.retry.id)!)).toBe(true)
+    await f.store.recordStageEvent(f.retry.id, stage, JSON.stringify({ runId: f.retry.id }))
+    expect(publishedRetryHandoff(f.store, f.store.get(f.retry.id)!)).toBeNull()
+    expect(adoptedPublishedRetryPin(f.store, f.store.get(f.retry.id)!)).toBe(false)
+    const start = f.commands.length
+    expect(await handOff(f)).toEqual({ verdict: 'none' })
+    expect(f.commands.slice(start)).toEqual([])
+    expect(f.db.all('SELECT * FROM code_trident_branch_reservations')).toEqual([])
   })
 }
 

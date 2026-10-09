@@ -472,10 +472,12 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     // OWNED PUBLISHED RETRY (#1476): the predecessor's linked checkout may still
     // hold the retained branch. Its hand-off runs through the existing worktree
     // lifecycle under this run's branch reservation, which stays held across the add.
-    if (branch.ok) {
-      await withRetainedCheckoutHandoff({ store: context.store, settled: context.publishedRetrySettled, runId: run.id,
-        baseBranch: input.base_branch, runHost: (argv, cwd) => context.runHost(argv, cwd) }, addWorktree)
-    } else await addWorktree({ verdict: 'none' })
+    // It is consulted whether or not the branch still exists: an adopted retry
+    // whose retained branch vanished after outer launch must refuse (the branch
+    // is unreadable), never recreate it at the predecessor's base without the work.
+    // With no authority and no adopted pin the outcome is 'none' and the path is unchanged.
+    await withRetainedCheckoutHandoff({ store: context.store, settled: context.publishedRetrySettled, runId: run.id,
+      baseBranch: input.base_branch, runHost: (argv, cwd) => context.runHost(argv, cwd) }, addWorktree)
   }
   const checked = await context.runHost(['git', '-C', run.worktree, 'symbolic-ref', '--quiet', 'HEAD'], run.worktree)
   if (!checked.ok || checked.timed_out || checked.stdout.trim() !== `refs/heads/${run.branch}`) throw Error('Build worktree does not hold the assigned branch')

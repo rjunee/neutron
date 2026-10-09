@@ -134,7 +134,7 @@ import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, projectBuildTrailerDecoder, type ProjectBuildContext } from '../wiring/project-build.ts'
 import { publishedRetrySettlement } from '../wiring/published-retry-settlement.ts'
-import { readPublishedRetryHandoff } from '@neutronai/trident/published-retry-handoff.ts'
+import { LAUNCH_TELEMETRY_EVENTS, readPublishedRetryHandoff } from '@neutronai/trident/published-retry-handoff.ts'
 import { claudeInReplRunner } from '@neutronai/runtime/workers/claude-in-repl.ts'
 import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
 import { createCodexHeadlessRunner, codexHeadlessReservation } from '@neutronai/runtime/workers/codex-headless.ts'
@@ -6620,10 +6620,18 @@ async function ownedPublishedRetry(shape: OwnedRetryShape, options: { owned?: bo
     if (!dispatched.ok) throw Error('retry was not dispatched')
     return dispatched.run
   }
-  const launch = async (runId: string, reader = (run: TridentRun) => readPublishedRetryHandoff(f.store, settled, run)) => {
+  // The production composition (`gateway/composition/build-core-modules.ts`)
+  // wires the orchestrator's `record_stage` into the run store, so every launch
+  // stamps its telemetry on the run; these launches measure that event set.
+  const stamps: Promise<unknown>[] = []
+  const launch = async (runId: string, reader = (run: TridentRun) => readPublishedRetryHandoff(f.store, settled, run),
+    onPrepare: (input: InnerLoopInput) => void | Promise<void> = () => {}) => {
     f.world.dispatches.length = 0
     f.world.plannerChoices.length = 0
-    return launchThroughGateway(f, runId, () => {}, { read_published_retry_handoff: reader })
+    const launched = await launchThroughGateway(f, runId, onPrepare, { read_published_retry_handoff: reader,
+      record_stage: (id, stage, meta) => { stamps.push(f.store.recordStageEvent(id, stage, meta ?? null).catch(() => {})) } })
+    await Promise.all(stamps.splice(0))
+    return launched
   }
   return { f, board, card, prior, task, publishedHead, settledHead, state, observe, git, dispatch, launch, settled }
 }
@@ -6772,7 +6780,10 @@ for (const [variant, holder] of PREPARATION_REFUSALS) {
     // The exact preparation-refused shape: the launcher's inner-error over its own
     // reservation, the single worktree-add diagnostic, no attempt, no checkpoint.
     expect(JSON.parse(refusedRow.inner_result!)).toMatchObject({ ok: false, checkpoint: 'inner-error' })
-    expect(refusedEvents.map(event => event.stage)).toEqual(['build-worktree-add-failed'])
+    // Around it, only the launch telemetry production stamps on every launch.
+    expect(refusedEvents.map(event => event.stage).filter(stage => !LAUNCH_TELEMETRY_EVENTS.includes(stage)))
+      .toEqual(['build-worktree-add-failed'])
+    expect(refusedEvents.map(event => event.stage)).toEqual(expect.arrayContaining(['launch-start', 'fire-dispatched']))
     expect(f.store.attempts(refusedRetry.id)).toEqual([])
     expect(refusedRow.inner_checkpoint).toBeNull()
     // The board observer recorded it as the card's newest terminal attempt.
@@ -6876,6 +6887,41 @@ for (const [control, { apply, refusal }] of Object.entries(OWNED_RETRY_CONTROLS)
   }, 120_000)
 }
 
+// #1476 round 3: outer launch ADOPTED the retained branch, then (before actual
+// preparation) the predecessor's checkout was released and the local branch ref
+// deleted. Preparation must still consult the hand-off and refuse, never recreate
+// the branch at the predecessor's base pin without the retained work.
+test('owned published retry refuses at preparation when the adopted branch vanished after outer launch', async () => {
+  const w = await ownedPublishedRetry('completed-build')
+  const { f, prior } = w
+  const before = await w.observe()
+  const retry = await w.dispatch()
+  const commandsBefore = f.commands.length
+  let prepared: InnerLoopInput | null = null
+  const { stepped, outcome } = await w.launch(retry.id, undefined, async input => {
+    prepared = input
+    await gitOut(spawnCapture, f.repo, ['worktree', 'remove', prior.worktree!])
+    await gitOut(spawnCapture, f.repo, ['update-ref', '-d', `refs/heads/${prior.branch}`])
+  })
+  // Outer launch adopted the branch: the launcher received the predecessor's pin.
+  expect(prepared!.run.base_sha).toBe(prior.base_sha!)
+  expect(outcome).toBeNull()
+  expect(stepped.phase).toBe('failed')
+  expect(stepped.failure_reason).toContain('handoff=unknown:branch-unreadable')
+  expect(f.world.dispatches).toEqual([])
+  expect(f.store.attempts(retry.id)).toEqual([])
+  // The branch was not recreated and nothing was forced.
+  const ref = await spawnCapture(['git', '-C', f.repo, 'show-ref', '--verify', '--quiet', `refs/heads/${prior.branch}`], f.repo)
+  expect(ref.ok).toBe(false)
+  expect(f.commands.slice(commandsBefore).some(argv => argv[0] === 'git' && argv.includes('worktree')
+    && argv.includes('add'))).toBe(false)
+  expect(forcing(w, f.commands.slice(commandsBefore))).toEqual([])
+  // The published work still exists on origin and the predecessor is untouched.
+  expect(await gitOut(spawnCapture, f.origin, ['rev-parse', `refs/heads/${prior.branch}`])).toBe(w.publishedHead)
+  expect(await w.observe()).toEqual(before)
+  expect(f.db.all('SELECT * FROM code_trident_branch_reservations')).toEqual([])
+}, 120_000)
+
 /** The state a restarted driver actually reads back (`production-host-effects.ts:235`). */
 function lastCheckpoint(f: Awaited<ReturnType<typeof fixture>>) {
   const events = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
@@ -6931,8 +6977,8 @@ async function restartThroughGateway(f: Awaited<ReturnType<typeof fixture>>) {
  * that never started.
  */
 async function launchThroughGateway(f: Awaited<ReturnType<typeof fixture>>, runId: string,
-  onPrepare: (input: InnerLoopInput) => void,
-  extra: Pick<Parameters<typeof buildTridentOrchestrator>[0], 'read_published_retry_handoff'> = {}) {
+  onPrepare: (input: InnerLoopInput) => void | Promise<void>,
+  extra: Pick<Parameters<typeof buildTridentOrchestrator>[0], 'read_published_retry_handoff' | 'record_stage'> = {}) {
   let settled!: () => void
   const completion = new Promise<void>(resolve => { settled = resolve })
   const record = f.store.recordStageEvent.bind(f.store)
@@ -6943,7 +6989,7 @@ async function launchThroughGateway(f: Awaited<ReturnType<typeof fixture>>, runI
   cleanups.push(() => recording.mockRestore())
   const errors: unknown[] = []
   const launcher = createProjectLauncher({ store: f.store, onError: error => { errors.push(error) }, prepare: async input => {
-    onPrepare(input)
+    await onPrepare(input)
     f.input.run = input.run
     return f.prepare()
   } })

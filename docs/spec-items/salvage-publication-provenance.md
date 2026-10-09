@@ -177,7 +177,10 @@ existing authority:
   inner result of exactly `ok: false`, `checkpoint: 'inner-error'` and the
   bounded worktree-creation refusal as `terminalCause` (the launcher's write
   over its own reservation), the single `build-worktree-add-failed` diagnostic
-  as its only stage event, and no PR other than this card's. A refused retry,
+  as its only stage event apart from the launch and dispatch telemetry the
+  production composition stamps on every launch (`launch-start`,
+  `fire-dispatched`, `work-board-start-dispatched` and the other fire stamps),
+  and no PR other than this card's. A refused retry,
   including a transient UNKNOWN refusal of this path at launch or preparation,
   never ends the card's recovery, and any other newer attempt refuses;
 - the predecessor's pending worker is settled by its original authenticated
@@ -216,7 +219,16 @@ cannot be re-read at preparation but the row carries the base pin outer launch
 wrote on adopting the branch (the predecessor's own pin, on an owned-published
 fresh retry whose same-lane predecessor still records a pending build or fix),
 preparation refuses as UNKNOWN before any reservation, cleanup or add; it never
-attaches that branch unchecked. Predecessor run rows,
+attaches that branch unchecked. That fallback applies only to a fresh adopted
+retry: once the retry holds its own checkpoint, retry source or recovery, its
+existing path is unchanged. Preparation consults the hand-off whether or not the
+retained branch still exists, so an adopted retry whose branch vanished after
+outer launch refuses as UNKNOWN instead of recreating the branch at the
+predecessor's base without the retained work. A preparation failure AFTER a
+successful hand-off (dependency installation, the disk reserve, the phase-model
+parse) is not the exact preparation-refused shape: it fails closed, and the
+card's next retry refuses at outer launch until an operator resolves it.
+Predecessor run rows,
 stage events, attempts, budgets and retained artifacts are unchanged.
 
 The retry receives current proof, review and pinned merge gates under its own
@@ -255,16 +267,25 @@ because a PR exists.
   both predecessors' rows, events and attempts unchanged. A preparation-refused
   attempt with an extra inner-result key, a still-pending reservation, a driver
   rejection's cause, no or two diagnostics, another stage event, a worker
-  attempt, a checkpoint or its own PR refuses. Verify: `owned published retry
-  survives an intermediate retry refused at preparation` in
+  attempt, a checkpoint or its own PR refuses; the production launch telemetry
+  around the diagnostic neither qualifies nor disqualifies it, and the consuming
+  case launches with the production `record_stage` wiring. Verify: `owned
+  published retry survives an intermediate retry refused at preparation` in
   `open/__tests__/project-build-e2e.test.ts` and the `refused at preparation`
   and `preparation-refused card attempt` cases in
   `trident/published-retry-handoff.test.ts`.
 - [x] An authority that cannot be re-read at preparation on a row carrying the
   adopted base pin refuses as UNKNOWN `authority-unreadable` with the holder
   checkout and branch ref unchanged and no command run; without that pin the
-  hand-off stays `none`. Verify: the `unreadable authority` cases in
-  `trident/published-retry-handoff.test.ts`.
+  hand-off stays `none`, and a retry that already recorded its own checkpoint
+  or retry source stays `none`. Verify: the `unreadable authority` and
+  `adopted-pin fallback` cases in `trident/published-retry-handoff.test.ts`.
+- [x] An adopted retry whose retained branch vanished after outer launch
+  refuses at preparation as UNKNOWN `branch-unreadable`: the branch is not
+  recreated, no worktree is added and no worker runs. Verify: `owned published
+  retry refuses at preparation when the adopted branch vanished after outer
+  launch` in `open/__tests__/project-build-e2e.test.ts` and the `adopted
+  retained branch vanished` case in `trident/published-retry-handoff.test.ts`.
 - [x] An owned PR head object that `git cat-file -e` cannot read (missing,
   failed or killed by its watchdog) refuses outer launch as UNKNOWN, not
   wrong-base, with nothing written. Verify: the `unreadable owned PR head`

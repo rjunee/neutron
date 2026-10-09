@@ -18,10 +18,23 @@ const reservationPrefix = new Map([['anthropic', 'claude'], ['openai-codex', 'co
  * throw in `prepareProjectBuild` after it recorded its worktree-add diagnostic. */
 const PREPARATION_REFUSAL_PREFIX = 'Error: Build worktree creation was not confirmed ('
 const PREPARATION_REFUSAL_SUFFIX = '; diagnostic_recorded=true)'
-/** The only stage events a retry refused at preparation records: the one
+/** The only stage event a retry refused at preparation itself records: the one
  * worktree-add diagnostic. Every other stage (a checkpoint, a settled driver, a
- * retry source, a recovery, an invalidated seed) means it was not that retry. */
+ * retry source, a recovery, an invalidated seed, a dependency interval) means it
+ * was not that retry. */
 export const PREPARATION_REFUSAL_EVENTS: readonly string[] = ['build-worktree-add-failed']
+/** Launch and dispatch telemetry the production composition stamps on EVERY
+ * launch around the fire, before and independently of preparation: the
+ * orchestrator's `launch()` (`launch-start`, `fire-dispatched`, `fire-settled`,
+ * `fire-unconfirmed`, `fire-unobserved-launch`, `fire-confirmed`, `fire-drained`,
+ * `fire-cancelled`; `gateway/composition/build-core-modules.ts` wires
+ * `record_stage`) and the agent-native `work_board_start` dispatch. None of them
+ * is worker, checkpoint or recovery evidence, so they neither qualify nor
+ * disqualify a preparation-refused attempt. */
+export const LAUNCH_TELEMETRY_EVENTS: readonly string[] = [
+  'launch-start', 'fire-dispatched', 'fire-settled', 'fire-unconfirmed', 'fire-unobserved-launch',
+  'fire-confirmed', 'fire-drained', 'fire-cancelled', 'work-board-start-dispatched',
+]
 
 /**
  * Whether a newer terminal card attempt is provably a retry the project
@@ -32,8 +45,9 @@ export const PREPARATION_REFUSAL_EVENTS: readonly string[] = ['build-worktree-ad
  * writes the same three keys, so the shape alone is not evidence: the attempt
  * must also carry the single `build-worktree-add-failed` diagnostic that
  * preparation records before it throws, the matching bounded refusal message,
- * no other stage event, and no PR receipt but the card's own. The caller
- * separately requires no attempt rows and no inner checkpoint.
+ * no other stage event except launch telemetry (`LAUNCH_TELEMETRY_EVENTS`), and
+ * no PR receipt but the card's own. The caller separately requires no attempt
+ * rows and no inner checkpoint.
  */
 function preparationRefused(candidate: TridentRun, events: ReturnType<TridentRunStore['stageEvents']>,
   published: number): boolean {
@@ -45,7 +59,8 @@ function preparationRefused(candidate: TridentRun, events: ReturnType<TridentRun
   if (!equal(Object.keys(result).sort(), ['checkpoint', 'ok', 'terminalCause']) || result.ok !== false
     || result.checkpoint !== 'inner-error' || typeof cause !== 'string'
     || !cause.startsWith(PREPARATION_REFUSAL_PREFIX) || !cause.endsWith(PREPARATION_REFUSAL_SUFFIX)) return false
-  if (events.length !== 1 || !PREPARATION_REFUSAL_EVENTS.includes(events[0]!.stage)) return false
+  const evidence = events.filter(event => !LAUNCH_TELEMETRY_EVENTS.includes(event.stage))
+  if (evidence.length !== 1 || !PREPARATION_REFUSAL_EVENTS.includes(evidence[0]!.stage)) return false
   return candidate.pr === null || candidate.pr === published
 }
 
@@ -205,6 +220,10 @@ export function publishedRetryHandoff(store: TridentRunStore, run: TridentRun): 
  * base pin of the card's newest same-lane attempt whose latest checkpoint still
  * records a pending build or fix, the only predecessor the authority adopts.
  *
+ * The run must still be fresh: its own `build-mode-state`, `build-retry-source`
+ * or recovery means it already ran past adoption, and answers false (the same
+ * exclusions the authority applies).
+ *
  * Preparation consults this only when the authority itself is null: a row that
  * outer launch adopted must then refuse UNKNOWN rather than attach the branch
  * unchecked. A read failure on such a candidate row answers true.
@@ -215,6 +234,12 @@ export function adoptedPublishedRetryPin(store: TridentRunStore, run: TridentRun
     || run.inner_checkpoint !== null || run.bound_pr !== null || typeof run.branch !== 'string' || run.branch.length === 0
     || typeof run.base_sha !== 'string' || !oid.test(run.base_sha)) return false
   try {
+    // Scoped to a FRESH retry, the only state outer launch adopts: once the run
+    // holds its own checkpoint, retry source or recovery, the authority is null
+    // by design and a same-run re-preparation keeps its existing path.
+    if (store.stageEvents(run.id).some(event => event.stage === 'build-retry-source'
+      || event.stage === ORCHESTRATOR_RECOVERY_STAGE || event.stage === 'build-mode-state')
+      || store.orchestratorRecovery(run.id) !== null) return false
     const card = store.linkedCardAttempts(run.project_slug, run.id)
     if (!card) return false
     for (const id of card.run_ids) {
