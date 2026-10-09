@@ -37,7 +37,16 @@ Measured focused evidence:
   recheck fails the moved-head refusal control. Both unit mutations retain the
   legitimate executable-target sibling. All three mutations were restored.
 
-Independent review approved the five-file change. The full local check,
-exact-head CI, deployment and a fresh unattended Work Board retry remain pending
-at this stage. Focused test results
+The initial canonical check on `c1ee5cb0980f84a2418bf13ae6fb009336e4cf9c`
+passed lint but failed the Open and root TypeScript configurations: the new
+fixture assigned `undefined` to an optional property under
+`exactOptionalPropertyTypes`. The other 49 configurations passed; the complete
+suite was not started. Both resets now delete the optional property. The failed
+receipt remains failed.
+
+Independent native and bounded cross-model reviews approved the initial code.
+Non-blocking review notes are tracked in #1467. The corrected 20-case consuming
+matrix passed again with 324 assertions. The corrected local
+check, final-head review, CI, deployment and a fresh unattended Work Board retry
+remain pending at this stage. Focused test results
 are not live autonomous acceptance; #1416 and the cutover acceptance stay open.

@@ -8884,7 +8884,7 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
   // Any genuinely requested new worker could return the corrected executable
   // nomination; the reproduction proves whether the loop ever asks one.
   f.world.mutationArgv = repeated ? argv : 'valid'
-  if (!repeated) f.world.mutationClaimFile = undefined
+  if (!repeated) delete f.world.mutationClaimFile
   let settled!: () => void
   const completion = new Promise<void>(resolve => { settled = resolve })
   const record = f.store.recordStageEvent.bind(f.store)
@@ -8942,7 +8942,7 @@ test(`${mergeMode} ${nomination} nomination gets one bounded fix and a fresh rev
       expect(context.findings.join('\n')).toContain(nomination === 'missing' ? 'nominated no mutation'
         : nomination === 'outside-diff' ? 'is not in this branch' : 'not a test runner on the prover allowlist')
       f.world.mutationArgv = 'valid'
-      f.world.mutationClaimFile = undefined
+      delete f.world.mutationClaimFile
     }
     await prepare(request, context)
   }
