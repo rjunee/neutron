@@ -41,6 +41,7 @@ import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
+import { drainRealmodeCleanups } from '@neutronai/gateway/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import * as ambientAuth from '../ambient-claude-auth.ts'
 import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
@@ -82,7 +83,15 @@ const SAVED_ENV_KEYS = [
 let savedEnv: Record<string, string | undefined> = {}
 let tmpDir: string
 
-interface Harness { base: string; db: ProjectDb; close(): Promise<void> }
+type Composition = Awaited<ReturnType<ReturnType<typeof buildOpenGraphComposer>>>
+interface Harness {
+  base: string
+  db: ProjectDb
+  composition: Composition
+  graph: Awaited<ReturnType<typeof composeProductionGraph>>
+  /** Memoized: a repeat call returns the first teardown, so it never drains twice. */
+  close(): Promise<void>
+}
 let harness: Harness | null = null
 
 /** Mock substrate: a distinctive reply body; non-reminder turns sleep so the
@@ -162,15 +171,24 @@ async function startHarness(options: { nativeProject?: boolean; typingProject?: 
   const graph = await composeProductionGraph(composition)
   if (graph.fetch === undefined || graph.websocket === undefined) throw new Error('no fetch/ws')
   const server = Bun.serve({ port: 0, fetch: (req, srv) => graph.fetch!(req, srv), websocket: graph.websocket })
+  let closing: Promise<void> | null = null
   return {
     base: `http://127.0.0.1:${server.port}`,
     db,
-    close: async () => {
+    composition,
+    graph,
+    close: () => (closing ??= (async () => {
       await server.stop(true)
-      for (const cleanup of composition.realmode_cleanups ?? []) { try { cleanup() } catch { /* */ } }
-      await graph.shutdown()
-      db.close()
-    },
+      // AWAIT the production drain (forward order, continue-after-rejection) so
+      // every composed loop's in-flight tick settles BEFORE the DB closes. The
+      // list is read at close time: the quiesce regressions below edit it in place.
+      await drainRealmodeCleanups(composition.realmode_cleanups ?? [])
+      try {
+        await graph.shutdown()
+      } finally {
+        db.close()
+      }
+    })()),
   }
 }
 
@@ -587,5 +605,386 @@ describe('Open app-ws durable chat-log + typing (real instance)', () => {
     expect(ready['last_seen_seq']).toBe(0)
     sock.close()
     await sleep(50)
+  }, 30_000)
+})
+
+// ── Harness-close quiesce regressions (#1389) ──────────────────────────────
+//
+// The harness close above used to CALL each composed `realmode_cleanups` entry
+// in a synchronous `try { cleanup() }` loop without awaiting it, then shut the
+// graph down and closed SQLite — a loop tick in flight at teardown could write
+// to a closed DB. These regressions boot THIS harness, hold a REAL composed
+// DB-using tick (the Open composer's `chunked-upload-sweeper`, whose tick awaits
+// `markExpired` on an expired `uploading` row — chunked-upload-sweeper.ts) at an
+// explicit barrier, start the harness's own `close()`, and record an ordered
+// event trace of what the close does while the tick is held.
+//
+// The instrumentation is deliberately LOCAL to this file (the integration
+// fixtures own `tests/support/held-sweeper-teardown.ts`; this card must not wait
+// on or edit it). MODULE IDENTITY IS LOAD-BEARING: the prototype patches must
+// hit the SAME module records the composer built its instances from, so both
+// classes are resolved from the composer's upload wiring directory rather than
+// via a bare specifier here (a partial install can resolve a bare
+// `@neutronai/loop` to a different copy, and a patch on it captures nothing).
+
+const SWEEPER_LOOP = 'chunked-upload-sweeper'
+const WIRING_DIR = join(HERE, '..', 'wiring')
+const SWEEPER_MODULE_PATH = Bun.resolveSync('@neutronai/gateway/upload/chunked-upload-sweeper.ts', WIRING_DIR)
+
+/** The slice of `SupervisedLoop` driven here, typed structurally (no type import of `@neutronai/loop`). */
+interface HeldLoop {
+  start(): void
+  stop(): Promise<void>
+  runOnce(): Promise<{ readonly ran: boolean; readonly skipped: boolean }>
+  stats(): { readonly running: boolean }
+}
+const { SupervisedLoop: SweeperLoopClass } = (await import(
+  Bun.resolveSync('@neutronai/loop', dirname(SWEEPER_MODULE_PATH))
+)) as { SupervisedLoop: { prototype: HeldLoop } }
+const { SqliteUploadSessionStore: WiredUploadStore } = (await import(
+  Bun.resolveSync('@neutronai/gateway/upload/upload-session-store.ts', WIRING_DIR)
+)) as typeof import('@neutronai/gateway/upload/upload-session-store.ts')
+
+interface Deferred<T> { promise: Promise<T>; resolve(value: T): void }
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => { resolve = res })
+  return { promise, resolve }
+}
+
+const errText = (err: unknown): string => (err instanceof Error ? err.message : String(err))
+
+/** Boot the REAL harness while capturing the composer's started sweeper loop instance. */
+async function startHarnessCapturingSweeper(): Promise<{ h: Harness; loop: HeldLoop }> {
+  const proto = SweeperLoopClass.prototype
+  const realStart = proto.start
+  const loops: HeldLoop[] = []
+  proto.start = function capturingStart(this: HeldLoop): void {
+    if ((this as unknown as { name: string }).name === SWEEPER_LOOP) loops.push(this)
+    return realStart.call(this)
+  }
+  let h: Harness
+  try {
+    h = await startHarness()
+  } finally {
+    proto.start = realStart
+  }
+  // Hand the booted stack to afterEach BEFORE any precondition can throw.
+  harness = h
+  if (loops.length !== 1) throw new Error(`expected exactly one started '${SWEEPER_LOOP}' loop, captured ${loops.length}`)
+  return { h, loop: loops[0]! }
+}
+
+function readUploadStatus(db: ProjectDb, uploadId: string): { status: string; expires_at: number } | null {
+  return (db.raw()
+    .query('SELECT status, expires_at FROM upload_sessions WHERE upload_id = ?')
+    .get(uploadId) as { status: string; expires_at: number } | null) ?? null
+}
+
+function dbIsClosed(db: ProjectDb): boolean {
+  try { db.raw().query('SELECT 1').get(); return false } catch { return true }
+}
+
+interface QuiesceReport {
+  sweeperIndex: number | null
+  loopActiveBefore: boolean | null
+  loopRunningWhileHeld: boolean
+  whileHeld: string[]
+  teardownSettledWhileHeld: boolean
+  dbStatusWhileHeld: string | null
+  dbReadErrorWhileHeld: string | null
+  write: { changed: boolean | null; statusAfterWrite: string | null; error: string | null }
+  writeEnteredCount: number
+  tickResult: { ran: boolean; skipped: boolean } | null
+  teardownError: string | null
+  trace: string[]
+  counts: number[]
+  loopActiveAfter: boolean | null
+  dbClosedAfter: boolean
+  unhandled: string[]
+}
+
+let seededSeq = 0
+
+/**
+ * Hold one real sweeper tick at the `markExpired` barrier, run the harness's
+ * ACTUAL `close()` against it, and report what the close did. It never waits on
+ * time — only on events (the held write entered; the close reached the held
+ * loop's stop, or settled). Every patch is installed inside the `try` whose
+ * `finally` releases the barrier, awaits the tick and the close, and restores.
+ */
+async function driveHeldClose(h: Harness, loop: HeldLoop): Promise<QuiesceReport> {
+  const { db, composition, graph } = h
+  const cleanups = composition.realmode_cleanups
+  if (cleanups === undefined || cleanups.length === 0) throw new Error('composition has no realmode_cleanups')
+
+  // Premise: a known expired row still `uploading`, so the tick reaches the DB write.
+  const uploadId = `chatlog-held-${process.pid}-${++seededSeq}`
+  const now = Date.now()
+  db.raw().run(
+    `INSERT INTO upload_sessions
+       (upload_id, project_slug, source, filename, total_bytes,
+        bytes_received, mime_type, status, created_at, expires_at)
+     VALUES (?, 'owner', 'chatgpt', 'export.zip', 1024, 0, 'application/zip', 'uploading', ?, ?)`,
+    [uploadId, now - 120_000, now - 60_000],
+  )
+  const seeded = readUploadStatus(db, uploadId)
+  expect(seeded?.status).toBe('uploading')
+  expect(seeded!.expires_at).toBeLessThan(Date.now())
+
+  const descriptor = composition.loop_registry?.get(SWEEPER_LOOP)
+  const loopActive = (): boolean | null => descriptor?.isActive?.() ?? null
+
+  const trace: string[] = []
+  const unhandled: string[] = []
+  const onUnhandled = (reason: unknown): void => { unhandled.push(errText(reason)) }
+  const counts = cleanups.map(() => 0)
+  const originals = cleanups.slice()
+  const st: { currentIndex: number | null; sweeperIndex: number | null; teardownSettled: boolean } =
+    { currentIndex: null, sweeperIndex: null, teardownSettled: false }
+  const entered = deferred()
+  const barrier = deferred()
+  const stopEntered = deferred()
+  let writeEnteredCount = 0
+  const report: QuiesceReport = {
+    sweeperIndex: null, loopActiveBefore: loopActive(), loopRunningWhileHeld: false, whileHeld: [],
+    teardownSettledWhileHeld: false, dbStatusWhileHeld: null, dbReadErrorWhileHeld: null,
+    write: { changed: null, statusAfterWrite: null, error: null }, writeEnteredCount: 0,
+    tickResult: null, teardownError: null, trace, counts, loopActiveAfter: null, dbClosedAfter: false, unhandled,
+  }
+  const restorers: Array<() => void> = []
+  let tickP: Promise<{ ran: boolean; skipped: boolean }> | null = null
+  let teardownP: Promise<void> | null = null
+  try {
+    // Count + trace every registered cleanup; a failure is RETHROWN so the
+    // drain's continue-after-rejection is what is exercised. The wrapper is NOT
+    // async: a cleanup that throws synchronously still throws synchronously at
+    // the drain's `await cleanup()` call (traced `reject-sync`), and only a
+    // returned promise is chained (traced `settle` / `reject`).
+    restorers.push(() => { for (let i = 0; i < originals.length && i < cleanups.length; i++) cleanups[i] = originals[i]! })
+    for (let i = 0; i < cleanups.length; i++) {
+      const original = originals[i]!
+      cleanups[i] = (): void | Promise<void> => {
+        counts[i] = (counts[i] ?? 0) + 1
+        st.currentIndex = i
+        trace.push(`cleanup:${i}:enter`)
+        let result: void | Promise<void>
+        try {
+          result = original()
+        } catch (err) {
+          trace.push(`cleanup:${i}:reject-sync`)
+          throw err
+        }
+        if (!(result instanceof Promise)) {
+          trace.push(`cleanup:${i}:settle`)
+          return result
+        }
+        return result.then(
+          () => { trace.push(`cleanup:${i}:settle`) },
+          (err: unknown) => { trace.push(`cleanup:${i}:reject`); throw err },
+        )
+      }
+    }
+
+    const realLoopStop = loop.stop
+    restorers.push(() => { delete (loop as unknown as Record<string, unknown>)['stop'] })
+    ;(loop as unknown as { stop: () => Promise<void> }).stop = async (): Promise<void> => {
+      trace.push('loop:stop-entered')
+      if (st.sweeperIndex === null) st.sweeperIndex = st.currentIndex
+      stopEntered.resolve()
+      await realLoopStop.call(loop)
+      trace.push('loop:stop-settled')
+    }
+
+    const graphOwn = graph as { shutdown: () => Promise<void> }
+    const hadOwnShutdown = Object.prototype.hasOwnProperty.call(graph, 'shutdown')
+    const realShutdown = graph.shutdown
+    restorers.push(() => {
+      if (hadOwnShutdown) graphOwn.shutdown = realShutdown
+      else delete (graph as unknown as Record<string, unknown>)['shutdown']
+    })
+    graphOwn.shutdown = (): Promise<void> => { trace.push('graph:shutdown'); return realShutdown.call(graph) }
+
+    const dbOwn = db as unknown as { close: () => void }
+    const hadOwnClose = Object.prototype.hasOwnProperty.call(db, 'close')
+    const realClose = db.close
+    restorers.push(() => {
+      if (hadOwnClose) dbOwn.close = realClose
+      else delete (db as unknown as Record<string, unknown>)['close']
+    })
+    dbOwn.close = (): void => { trace.push('db:close'); realClose.call(db) }
+
+    const storeProto = WiredUploadStore.prototype
+    const realMarkExpired = storeProto.markExpired
+    restorers.push(() => { storeProto.markExpired = realMarkExpired })
+    storeProto.markExpired = async function heldMarkExpired(
+      this: InstanceType<typeof WiredUploadStore>, id: string,
+    ): Promise<boolean> {
+      if (id !== uploadId) return realMarkExpired.call(this, id)
+      writeEnteredCount += 1
+      trace.push('tick:markExpired-entered')
+      entered.resolve()
+      await barrier.promise
+      try {
+        const changed = await realMarkExpired.call(this, id)
+        report.write.changed = changed
+        report.write.statusAfterWrite = readUploadStatus(db, id)?.status ?? null
+        trace.push('tick:markExpired-done')
+        return changed
+      } catch (err) {
+        // The sweeper swallows this — success is asserted from this record.
+        report.write.error = errText(err)
+        trace.push('tick:markExpired-threw')
+        throw err
+      }
+    }
+
+    process.on('unhandledRejection', onUnhandled)
+    restorers.push(() => { process.off('unhandledRejection', onUnhandled) })
+
+    // Drive one tick through the captured loop's public runOnce (the in-flight
+    // promise its stop() awaits) and wait for it to enter the held write.
+    const tick = loop.runOnce()
+    tickP = tick
+    const reached = await Promise.race([entered.promise.then(() => true), tick.then(() => false)])
+    if (!reached) throw new Error(`the driven tick settled without reaching markExpired(${uploadId})`)
+    report.loopRunningWhileHeld = loop.stats().running
+
+    teardownP = h.close().then(
+      () => { st.teardownSettled = true; trace.push('teardown:settled') },
+      (err: unknown) => { st.teardownSettled = true; report.teardownError = errText(err); trace.push('teardown:rejected') },
+    )
+    await Promise.race([stopEntered.promise, teardownP])
+
+    // ── while the tick is held ──
+    report.sweeperIndex = st.sweeperIndex
+    const v = report.whileHeld
+    if (!trace.includes('loop:stop-entered')) v.push('close never reached the held loop stop')
+    if (trace.includes('graph:shutdown')) v.push('graph:shutdown while the tick was held')
+    if (trace.includes('db:close')) v.push('db:close while the tick was held')
+    if (st.sweeperIndex !== null) {
+      for (const e of trace) {
+        const m = /^cleanup:(\d+):enter$/.exec(e)
+        if (m !== null && Number(m[1]) > st.sweeperIndex) v.push(`${e} while the tick was held`)
+      }
+    }
+    report.teardownSettledWhileHeld = st.teardownSettled
+    try { report.dbStatusWhileHeld = readUploadStatus(db, uploadId)?.status ?? null } catch (err) {
+      report.dbReadErrorWhileHeld = errText(err)
+    }
+  } finally {
+    barrier.resolve()
+    if (teardownP !== null) await teardownP
+    if (tickP !== null) { try { report.tickResult = await tickP } catch { /* runOnce never rejects */ } }
+    report.writeEnteredCount = writeEnteredCount
+    report.loopActiveAfter = loopActive()
+    // One macrotask turn so a rejection from the drive reaches the collector.
+    await new Promise<void>((r) => setImmediate(r))
+    for (const restore of restorers.reverse()) restore()
+  }
+  report.dbClosedAfter = dbIsClosed(db)
+  return report
+}
+
+/** The consuming contract: ordering while held first, then the real write, final order, exact-once counts. */
+function expectQuiescedClose(r: QuiesceReport): void {
+  expect(r.loopActiveBefore).toBe(true)
+  expect(r.loopRunningWhileHeld).toBe(true)
+  expect(r.whileHeld).toEqual([])
+  expect(r.sweeperIndex).not.toBeNull()
+  expect(r.teardownSettledWhileHeld).toBe(false)
+  expect(r.dbReadErrorWhileHeld).toBeNull()
+  expect(r.dbStatusWhileHeld).toBe('uploading')
+  expect(r.writeEnteredCount).toBe(1)
+  expect(r.write).toEqual({ changed: true, statusAfterWrite: 'expired', error: null })
+  expect(r.tickResult).toEqual({ ran: true, skipped: false })
+  expect(r.teardownError).toBeNull()
+  const at = (e: string): number => r.trace.indexOf(e)
+  expect(at('tick:markExpired-done')).toBeGreaterThanOrEqual(0)
+  expect(at('tick:markExpired-done')).toBeLessThan(at('loop:stop-settled'))
+  expect(at('loop:stop-settled')).toBeLessThan(at('graph:shutdown'))
+  expect(at('graph:shutdown')).toBeLessThan(at('db:close'))
+  expect(r.trace.filter((e) => e === 'db:close')).toHaveLength(1)
+  expect(r.counts.length).toBeGreaterThan(0)
+  expect(r.counts).toEqual(r.counts.map(() => 1))
+  expect(r.loopActiveAfter).toBe(false)
+  expect(r.dbClosedAfter).toBe(true)
+  expect(r.unhandled).toEqual([])
+}
+
+describe('durable chat-log harness close quiesces composed loops before DB close', () => {
+  test('harness close quiesces a held composed sweeper tick before DB close', async () => {
+    const { h, loop } = await startHarnessCapturingSweeper()
+    const report = await driveHeldClose(h, loop)
+    harness = null
+    expectQuiescedClose(report)
+  }, 30_000)
+
+  test('an earlier rejecting cleanup does not skip the later held cleanup or close the DB early', async () => {
+    const { h, loop } = await startHarnessCapturingSweeper()
+    // Registered AHEAD of every composed cleanup: one async rejection, and one
+    // cleanup that throws SYNCHRONOUSLY. driveHeldClose's counting wrapper is
+    // sync-transparent, so the drain's `await cleanup()` receives a real sync
+    // throw (not a rejected promise) from cleanup 1.
+    h.composition.realmode_cleanups!.unshift(
+      async () => { throw new Error('earlier-async-reject') },
+      () => { throw new Error('earlier-sync-throw') },
+    )
+    const report = await driveHeldClose(h, loop)
+    harness = null
+    expectQuiescedClose(report)
+    const at = (e: string): number => report.trace.indexOf(e)
+    // Registration order kept: both earlier cleanups rejected, in order, before the sweeper stop.
+    expect(at('cleanup:0:reject')).toBeGreaterThanOrEqual(0)
+    expect(at('cleanup:0:reject')).toBeLessThan(at('cleanup:1:enter'))
+    // Presence first: indexOf returns -1 for a missing event, which would pass the
+    // ordering assertion below vacuously.
+    expect(at('cleanup:1:reject-sync')).toBeGreaterThanOrEqual(0)
+    expect(at('cleanup:1:reject-sync')).toBeLessThan(at('loop:stop-entered'))
+    // The async rejection settled as a rejection, the sync throw never produced a promise.
+    expect(at('cleanup:0:reject-sync')).toBe(-1)
+    expect(at('cleanup:1:reject')).toBe(-1)
+    expect(report.sweeperIndex).toBeGreaterThan(1)
+    expect(report.counts[0]).toBe(1)
+    expect(report.counts[1]).toBe(1)
+  }, 30_000)
+
+  test('an empty cleanup list still closes normally (control)', async () => {
+    const { h, loop } = await startHarnessCapturingSweeper()
+    const sweeper = h.composition.loop_registry?.get(SWEEPER_LOOP)
+    expect(sweeper?.isActive?.()).toBe(true)
+    const list = h.composition.realmode_cleanups!
+    const saved = list.splice(0, list.length)
+    // Quiesce the composed loops OUTSIDE the close under test so nothing leaks
+    // or touches the DB after it closes.
+    await drainRealmodeCleanups(saved)
+    // Premise: the composed loops really quiesced before the close under test.
+    expect(sweeper?.isActive?.()).toBe(false)
+    expect(loop.stats().running).toBe(false)
+    const trace: string[] = []
+    const graphOwn = h.graph as { shutdown: () => Promise<void> }
+    const hadOwnShutdown = Object.prototype.hasOwnProperty.call(h.graph, 'shutdown')
+    const realShutdown = h.graph.shutdown
+    const dbOwn = h.db as unknown as { close: () => void }
+    const hadOwnClose = Object.prototype.hasOwnProperty.call(h.db, 'close')
+    const realClose = h.db.close
+    let closeError: string | null = null
+    try {
+      graphOwn.shutdown = (): Promise<void> => { trace.push('graph:shutdown'); return realShutdown.call(h.graph) }
+      dbOwn.close = (): void => { trace.push('db:close'); realClose.call(h.db) }
+      await h.close()
+      trace.push('close:settled')
+    } catch (err) {
+      closeError = errText(err)
+    } finally {
+      harness = null
+      if (hadOwnShutdown) graphOwn.shutdown = realShutdown
+      else delete (h.graph as unknown as Record<string, unknown>)['shutdown']
+      if (hadOwnClose) dbOwn.close = realClose
+      else delete (h.db as unknown as Record<string, unknown>)['close']
+    }
+    expect(closeError).toBeNull()
+    expect(trace).toEqual(['graph:shutdown', 'db:close', 'close:settled'])
+    expect(dbIsClosed(h.db)).toBe(true)
   }, 30_000)
 })
