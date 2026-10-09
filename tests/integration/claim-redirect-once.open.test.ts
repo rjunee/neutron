@@ -171,22 +171,36 @@ beforeEach(async () => {
 /**
  * The fixture's DB-close owner: close every booted stack (each awaits its
  * composed cleanups), THEN close the shared DB exactly once. Idempotent.
+ * Every stack is closed and the DB closed even when one `Boot.close` rejects;
+ * the FIRST such rejection is then rethrown, so a failing stack teardown is
+ * observable (the held-sweeper harness records it as `teardownError`).
  */
 async function closeFixture(): Promise<void> {
   const open = servers
   servers = []
-  for (const s of open) await s.close().catch(() => {})
+  let firstError: { err: unknown } | null = null
+  for (const s of open) {
+    try {
+      await s.close()
+    } catch (err) {
+      firstError ??= { err }
+    }
+  }
   if (!dbClosed) {
     dbClosed = true
     db.close()
   }
+  if (firstError !== null) throw firstError.err
 }
 
 afterEach(async () => {
-  await closeFixture()
-  home.restore()
-  if (priorCookieSecret === undefined) delete process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
-  else process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = priorCookieSecret
+  try {
+    await closeFixture()
+  } finally {
+    home.restore()
+    if (priorCookieSecret === undefined) delete process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
+    else process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = priorCookieSecret
+  }
 })
 
 describe('Managed claim redirect — at most once per OWNER, not per page load', () => {

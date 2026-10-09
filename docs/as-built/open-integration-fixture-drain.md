@@ -189,3 +189,53 @@ Measured on the merged tree with the nits applied:
   `bun test tests/support/held-sweeper-teardown.test.ts -t "awaited production drain"`:
   1 pass. After restoring the file, `git diff` on it was empty and the guard
   was green again (1 pass).
+
+### Fix round, 2026-10-09: four carried review nits
+
+The host suite's only red was
+`runtime/adapters/codex-cli/persistent/project-owner-retirement.test.ts`
+(`EBADF: bad file descriptor, epoll_ctl` right after spawning `sleep 30`), in a
+different chunk from this change's files. This change does not reach that
+test. Re-run on its own on this tree, it gave 2 pass, 0 fail.
+
+Changes:
+
+- `closeFixture` in the claim fixture no longer swallows `Boot.close`
+  rejections. It attempts every stack close and the single DB close, then
+  rethrows the first close error, so the held harness's `teardownError`
+  assertion can now fail. `afterEach` restores the home and the cookie-secret
+  env in a `finally`.
+- The harness docblock no longer says `runHeldSweeperTeardown` "never
+  asserts". It makes no assertion about the teardown under test. It throws
+  only on a harness precondition: no `realmode_cleanups`, a seeded row that is
+  not expired+uploading, or a tick that never reached the held write.
+- `runHeldSweeperTeardown` now installs every patch (cleanup wrappers, loop
+  `stop`, graph `shutdown`, DB `close`, the held `markExpired`, the
+  unhandled-rejection listener) inside the `try` whose `finally` restores it.
+  Each install registers its restorer as it lands, and the restorers run in
+  reverse order, so a throw part-way through installation cannot leak a patch.
+- The drain-before-graph-shutdown check is now opt-in through
+  `HeldTeardownTarget.graphShutdownOrder`. The default, `'after-drain'`, is the
+  order of these two fixtures. Production (`gateway/index.ts`) shuts the graph
+  down before it drains `realmode_cleanups`. A fixture that mirrors production
+  passes `'before-drain'`, which drops the graph-shutdown-vs-drain checks (both
+  the while-held one and the final-order one) and still requires the loop stop
+  and the graph shutdown to come before the single DB close. New self-test
+  case (d) runs production's order under `'before-drain'` and gets a clean
+  report. The same trace checked under `'after-drain'` is flagged.
+
+Measured on this round's tree:
+
+- `bun test tests/support/held-sweeper-teardown.test.ts`: 4 pass, 0 fail.
+- `bun test tests/integration/claim-redirect-once.open.test.ts tests/integration/import-watch-rearm-on-reconnect.open.test.ts`:
+  15 pass, 0 fail.
+- `bunx tsc -p tsconfig.json --noEmit`: exit 0, 0 errors.
+  `bash scripts/ci/lint.sh`: exit 0. `git diff --check`: clean.
+- Nominated mutation in `tests/support/held-sweeper-teardown.ts`: delete
+  `if (trace.includes('db:close')) v.push('db:close while the tick was held')`.
+  Guard `bun test tests/support/held-sweeper-teardown.test.ts -t "db close moved before an awaited drain"`:
+  0 pass, 1 fail on
+  `expect(report.whileHeldViolations).toContain('db:close while the tick was held')`
+  (received `[]`). Control
+  `bun test tests/support/held-sweeper-teardown.test.ts -t "awaited production drain"`:
+  1 pass. With the file restored byte for byte, the guard passed again (1 pass).

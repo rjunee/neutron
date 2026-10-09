@@ -8,6 +8,8 @@
  *       harness observes the graph shut down while the tick is held;
  *   (c) db close moved BEFORE an awaited drain — the harness observes the DB
  *       closed while the tick is held, and the real write failing.
+ * Case (d) exercises the `graphShutdownOrder: 'before-drain'` opt-in: production's
+ * own order (graph shutdown first, then the awaited drain) is clean under it.
  * Cases (b) and (c) EXPECT the violation: they prove the harness can see it, so a
  * clean report from a consumer fixture means something.
  */
@@ -185,5 +187,33 @@ describe('held-sweeper teardown harness — discriminates awaited drain from ear
     expect(report.tickResult).toEqual({ ran: true, skipped: false })
     expect(report.write.changed).not.toBe(true)
     expect(report.write.error).not.toBeNull()
+  }, 45_000)
+
+  test("(d) production's order (graph shutdown, THEN awaited drain, then db close) is clean only when opted into", async () => {
+    const { db, loop, composition, graph } = await bootStack()
+    const report = await runHeldSweeperTeardown({
+      composition,
+      graph,
+      db,
+      loop,
+      graphShutdownOrder: 'before-drain',
+      teardown: async () => {
+        await graph.shutdown()
+        await drainRealmodeCleanups(composition.realmode_cleanups ?? [])
+        db.close()
+      },
+    })
+    leftover = null
+    expect(report.graphShutdownOrder).toBe('before-drain')
+    expect(report.whileHeldViolations).toEqual([])
+    expect(report.teardownSettledWhileHeld).toBe(false)
+    expect(report.dbStatusWhileHeld).toBe('uploading')
+    expectCleanTick(report)
+    expect(finalOrderViolations(report)).toEqual([])
+    expect(report.dbClosedAfter).toBe(true)
+    // The same trace judged by the fixtures' default order IS flagged.
+    expect(finalOrderViolations({ ...report, graphShutdownOrder: 'after-drain' })).toContain(
+      'loop:stop-settled after graph:shutdown',
+    )
   }, 45_000)
 })

@@ -31,11 +31,15 @@
  * After release it records the real write's outcome (the sweeper swallows DB
  * errors, so tick completion alone proves nothing) and the final event order.
  *
- * `runHeldSweeperTeardown` never asserts — it returns a
- * {@link HeldTeardownReport} so the self-test can show it DETECTS a broken
- * teardown, and consumer tests assert a clean one with
- * {@link expectQuiescedTeardown}. Every patch is restored, the barrier released and both
- * the tick and the teardown awaited in `finally`, whatever happened.
+ * `runHeldSweeperTeardown` makes no `expect` assertions about the teardown
+ * under test — it returns a {@link HeldTeardownReport} so the self-test can show
+ * it DETECTS a broken teardown, and consumer tests assert a clean one with
+ * {@link expectQuiescedTeardown}. It THROWS only on a harness precondition (the
+ * composition has no `realmode_cleanups`, the seeded row is not
+ * expired+uploading, or the driven tick never reached the held write), never on
+ * the teardown's behaviour. Every patch is installed inside the `try` whose
+ * `finally` restores it, and the barrier is released and both the tick and the
+ * teardown awaited there, whatever happened.
  *
  * MODULE IDENTITY IS LOAD-BEARING: the prototype patches below must hit the
  * SAME module records the composed instances were built from. Both classes are
@@ -290,10 +294,26 @@ export interface HeldTeardownTarget {
   teardown: () => Promise<void>
   /** Override the seeded upload id (defaults to a unique id). */
   uploadId?: string
+  /**
+   * Where the teardown under test shuts the graph down relative to the
+   * cleanup drain. Defaults to `'after-drain'` — the order of the TWO fixtures
+   * this harness was built for (claim-redirect-once, import-watch-rearm): they
+   * drain the composed cleanups, THEN shut the graph down, THEN close the DB.
+   * That is NOT production's order: `gateway/index.ts` shuts the module graph
+   * down FIRST and drains `realmode_cleanups` after it, before `db.close()`.
+   * A fixture that mirrors production passes `'before-drain'`, which drops the
+   * graph-shutdown-vs-drain checks and keeps only "drain settles, graph shut
+   * down, then DB closes" — do not let the default flag such a fixture.
+   */
+  graphShutdownOrder?: GraphShutdownOrder
 }
+
+export type GraphShutdownOrder = 'after-drain' | 'before-drain'
 
 export interface HeldTeardownReport {
   seeded: SeededUploadRow
+  /** The graph-shutdown order the report was checked against. */
+  graphShutdownOrder: GraphShutdownOrder
   /** Registry descriptor `isActive()` before the tick was driven. */
   loopActiveBefore: boolean | null
   /** The captured loop reported a running tick once the barrier was reached. */
@@ -331,7 +351,17 @@ export interface HeldTeardownReport {
   unhandledRejections: string[]
 }
 
-/** Violations in the FINAL trace order (empty == correct teardown order). */
+/**
+ * Violations in the FINAL trace order (empty == correct teardown order).
+ *
+ * Always required: the held write completes before the loop's stop settles,
+ * and both the loop stop and the graph shutdown precede the single DB close.
+ * The drain-BEFORE-graph-shutdown edge is checked only for
+ * `graphShutdownOrder: 'after-drain'` (the default, specific to the
+ * claim-redirect and import-watch fixtures) — production shuts the graph down
+ * first (`gateway/index.ts`), so a fixture mirroring it opts into
+ * `'before-drain'` and is not flagged for that order.
+ */
 export function finalOrderViolations(report: HeldTeardownReport): string[] {
   const t = report.trace
   const out: string[] = []
@@ -344,7 +374,8 @@ export function finalOrderViolations(report: HeldTeardownReport): string[] {
     else if (ia > ib) out.push(`${a} after ${b}`)
   }
   before('tick:markExpired-done', 'loop:stop-settled')
-  before('loop:stop-settled', 'graph:shutdown')
+  if (report.graphShutdownOrder === 'after-drain') before('loop:stop-settled', 'graph:shutdown')
+  else before('loop:stop-settled', 'db:close')
   before('graph:shutdown', 'db:close')
   const closes = t.filter((e) => e === 'db:close').length
   if (closes !== 1) out.push(`db:close recorded ${closes} times`)
@@ -355,15 +386,17 @@ let uploadSeq = 0
 
 /**
  * Drive one held sweeper tick through the captured composer loop, run the
- * fixture's teardown against it, and report what the teardown did. Never
- * asserts; always releases the barrier, awaits both promises and restores
- * every patch before returning.
+ * fixture's teardown against it, and report what the teardown did. Makes no
+ * assertion about the teardown (it throws only on a harness precondition —
+ * see the module docblock); always releases the barrier, awaits both promises
+ * and restores every installed patch before returning or throwing.
  */
 export async function runHeldSweeperTeardown(target: HeldTeardownTarget): Promise<HeldTeardownReport> {
   const { composition, graph, db, loop } = target
   const cleanups = composition.realmode_cleanups
   if (cleanups === undefined) throw new Error('composition has no realmode_cleanups')
   const uploadId = target.uploadId ?? `held-sweeper-${process.pid}-${++uploadSeq}`
+  const graphShutdownOrder: GraphShutdownOrder = target.graphShutdownOrder ?? 'after-drain'
   const trace: string[] = []
   const unhandled: string[] = []
   const onUnhandled = (reason: unknown): void => {
@@ -379,7 +412,10 @@ export async function runHeldSweeperTeardown(target: HeldTeardownTarget): Promis
   const descriptor = composition.loop_registry?.get(SWEEPER_LOOP_NAME)
   const loopActive = (): boolean | null => descriptor?.isActive?.() ?? null
 
-  // ── instrument the teardown surfaces (all restored in finally) ────────────
+  // Instrumentation state. Every patch below is INSTALLED inside the `try`
+  // whose `finally` restores it: each install registers its restorer the moment
+  // it lands, so a throw part-way through installation still restores what was
+  // installed (in reverse order) and never leaks a patched prototype.
   const counts = cleanups.map(() => 0)
   const originals = cleanups.slice()
   // A holder object (not bare `let`s) so closure writes are not narrowed away.
@@ -388,55 +424,13 @@ export async function runHeldSweeperTeardown(target: HeldTeardownTarget): Promis
     sweeperIndex: null,
     teardownSettled: false,
   }
-  for (let i = 0; i < cleanups.length; i++) {
-    const original = originals[i]!
-    cleanups[i] = async (): Promise<void> => {
-      counts[i] = (counts[i] ?? 0) + 1
-      st.currentIndex = i
-      trace.push(`cleanup:${i}:enter`)
-      try {
-        await original()
-        trace.push(`cleanup:${i}:settle`)
-      } catch (err) {
-        trace.push(`cleanup:${i}:reject`)
-        // Rethrow: the drain's continue-after-rejection is what is exercised.
-        throw err
-      }
-    }
-  }
-
   const stopEntered = deferred<void>()
-  const realLoopStop = loop.stop
-  const loopOwn = loop as unknown as { stop: () => Promise<void> }
-  loopOwn.stop = async function heldLoopStop(this: SupervisedLoop): Promise<void> {
-    trace.push('loop:stop-entered')
-    if (st.sweeperIndex === null) st.sweeperIndex = st.currentIndex
-    stopEntered.resolve()
-    await realLoopStop.call(loop)
-    trace.push('loop:stop-settled')
-  }
-
-  const graphOwn = graph as { shutdown: () => Promise<void> }
-  const hadOwnShutdown = Object.prototype.hasOwnProperty.call(graph, 'shutdown')
-  const realShutdown = graph.shutdown
-  graphOwn.shutdown = function tracedShutdown(): Promise<void> {
-    trace.push('graph:shutdown')
-    return realShutdown.call(graph)
-  }
-
-  const dbOwn = db as unknown as { close: () => void }
-  const hadOwnClose = Object.prototype.hasOwnProperty.call(db, 'close')
-  const realClose = db.close
-  dbOwn.close = function tracedClose(): void {
-    trace.push('db:close')
-    realClose.call(db)
-  }
-
-  const hold = holdMarkExpired({ uploadId, db, trace })
-  process.on('unhandledRejection', onUnhandled)
+  const restorers: Array<() => void> = []
+  let hold: ReturnType<typeof holdMarkExpired> | null = null
 
   const report: HeldTeardownReport = {
     seeded,
+    graphShutdownOrder,
     loopActiveBefore: loopActive(),
     loopRunningWhileHeld: false,
     sweeperIndex: null,
@@ -444,7 +438,7 @@ export async function runHeldSweeperTeardown(target: HeldTeardownTarget): Promis
     teardownSettledWhileHeld: false,
     dbStatusWhileHeld: null,
     dbReadErrorWhileHeld: null,
-    write: hold.outcome,
+    write: { changed: null, statusAfterWrite: null, error: null },
     writeEnteredCount: 0,
     tickResult: null,
     teardownError: null,
@@ -458,10 +452,79 @@ export async function runHeldSweeperTeardown(target: HeldTeardownTarget): Promis
   let tickP: Promise<{ ran: boolean; skipped: boolean }> | null = null
   let teardownP: Promise<void> | null = null
   try {
+    // ── instrument the teardown surfaces (all restored in finally) ──────────
+    restorers.push(() => {
+      for (let i = 0; i < originals.length && i < cleanups.length; i++) cleanups[i] = originals[i]!
+    })
+    for (let i = 0; i < cleanups.length; i++) {
+      const original = originals[i]!
+      cleanups[i] = async (): Promise<void> => {
+        counts[i] = (counts[i] ?? 0) + 1
+        st.currentIndex = i
+        trace.push(`cleanup:${i}:enter`)
+        try {
+          await original()
+          trace.push(`cleanup:${i}:settle`)
+        } catch (err) {
+          trace.push(`cleanup:${i}:reject`)
+          // Rethrow: the drain's continue-after-rejection is what is exercised.
+          throw err
+        }
+      }
+    }
+
+    const realLoopStop = loop.stop
+    const loopOwn = loop as unknown as { stop: () => Promise<void> }
+    restorers.push(() => {
+      delete (loop as unknown as Record<string, unknown>)['stop']
+    })
+    loopOwn.stop = async function heldLoopStop(this: SupervisedLoop): Promise<void> {
+      trace.push('loop:stop-entered')
+      if (st.sweeperIndex === null) st.sweeperIndex = st.currentIndex
+      stopEntered.resolve()
+      await realLoopStop.call(loop)
+      trace.push('loop:stop-settled')
+    }
+
+    const graphOwn = graph as { shutdown: () => Promise<void> }
+    const hadOwnShutdown = Object.prototype.hasOwnProperty.call(graph, 'shutdown')
+    const realShutdown = graph.shutdown
+    restorers.push(() => {
+      if (hadOwnShutdown) graphOwn.shutdown = realShutdown
+      else delete (graph as unknown as Record<string, unknown>)['shutdown']
+    })
+    graphOwn.shutdown = function tracedShutdown(): Promise<void> {
+      trace.push('graph:shutdown')
+      return realShutdown.call(graph)
+    }
+
+    const dbOwn = db as unknown as { close: () => void }
+    const hadOwnClose = Object.prototype.hasOwnProperty.call(db, 'close')
+    const realClose = db.close
+    restorers.push(() => {
+      if (hadOwnClose) dbOwn.close = realClose
+      else delete (db as unknown as Record<string, unknown>)['close']
+    })
+    dbOwn.close = function tracedClose(): void {
+      trace.push('db:close')
+      realClose.call(db)
+    }
+
+    const held = holdMarkExpired({ uploadId, db, trace })
+    hold = held
+    restorers.push(() => held.restore())
+    report.write = held.outcome
+
+    process.on('unhandledRejection', onUnhandled)
+    restorers.push(() => {
+      process.off('unhandledRejection', onUnhandled)
+    })
+
+    // ── drive the held tick, then the fixture's teardown ────────────────────
     const tick = loop.runOnce()
     tickP = tick
     const reached = await Promise.race([
-      hold.entered.then(() => true),
+      held.entered.then(() => true),
       tick.then(() => false),
     ])
     if (!reached) {
@@ -488,7 +551,9 @@ export async function runHeldSweeperTeardown(target: HeldTeardownTarget): Promis
     report.sweeperIndex = sweeperIndex
     const v = report.whileHeldViolations
     if (!trace.includes('loop:stop-entered')) v.push('teardown never reached the held loop stop')
-    if (trace.includes('graph:shutdown')) v.push('graph:shutdown while the tick was held')
+    if (graphShutdownOrder === 'after-drain' && trace.includes('graph:shutdown')) {
+      v.push('graph:shutdown while the tick was held')
+    }
     if (trace.includes('db:close')) v.push('db:close while the tick was held')
     if (sweeperIndex !== null) {
       for (const e of trace) {
@@ -505,7 +570,7 @@ export async function runHeldSweeperTeardown(target: HeldTeardownTarget): Promis
       report.dbReadErrorWhileHeld = err instanceof Error ? err.message : String(err)
     }
   } finally {
-    hold.release()
+    hold?.release()
     if (teardownP !== null) await teardownP
     if (tickP !== null) {
       try {
@@ -514,20 +579,13 @@ export async function runHeldSweeperTeardown(target: HeldTeardownTarget): Promis
         /* runOnce never rejects; defensive */
       }
     }
-    report.writeEnteredCount = hold.enteredCount()
+    report.writeEnteredCount = hold?.enteredCount() ?? 0
     report.loopActiveAfter = loopActive()
     // Let any rejection produced during the drive surface to the collector
     // before it is detached (one macrotask turn — an event boundary, not a wait
     // for some work to finish).
     await new Promise<void>((r) => setImmediate(r))
-    process.off('unhandledRejection', onUnhandled)
-    hold.restore()
-    delete (loop as unknown as Record<string, unknown>)['stop']
-    if (hadOwnShutdown) graphOwn.shutdown = realShutdown
-    else delete (graph as unknown as Record<string, unknown>)['shutdown']
-    if (hadOwnClose) dbOwn.close = realClose
-    else delete (db as unknown as Record<string, unknown>)['close']
-    for (let i = 0; i < originals.length && i < cleanups.length; i++) cleanups[i] = originals[i]!
+    for (const restore of restorers.reverse()) restore()
   }
 
   try {
