@@ -95,3 +95,24 @@ syntax error.
 
 This record covers only these two fixtures. The route-slot, activity-inspector
 and durable-chatlog fixtures belong to separate cards. #1389 stays open.
+
+Revalidation, 2026-10-09. The original change (`60b7d2d8`) was merged, with
+history kept, onto main `d01f0945`. The merge applied cleanly and changed only
+the five files listed above. On the merged tree:
+`bun test tests/integration/claim-redirect-once.open.test.ts tests/integration/import-watch-rearm-on-reconnect.open.test.ts`
+gave 15 pass, 0 fail. `bun test tests/support/held-sweeper-teardown.test.ts`
+gave 3 pass, 0 fail. `bash scripts/ci/lint.sh` passed and
+`git diff --check` was clean. `bash scripts/ci/typecheck-all.sh` passed 50 of
+51 tsconfigs, including the root one that covers `tests/`. The one failure is
+`app/tsconfig.json`, an unused `@ts-expect-error` in
+`app/__tests__/support/mount.tsx`. This change does not touch `app/`.
+
+Nominated mutation, run on the merged tree: delete
+`if (trace.includes('db:close')) v.push('db:close while the tick was held')`
+from `tests/support/held-sweeper-teardown.ts`. Guard:
+`bun test tests/support/held-sweeper-teardown.test.ts -t "db close moved before an awaited drain"`.
+It went red (0 pass, 1 fail) on its own assertion,
+`expect(report.whileHeldViolations).toContain('db:close while the tick was held')`.
+Control: `bun test tests/support/held-sweeper-teardown.test.ts -t "awaited production drain"`
+stayed green (1 pass). After the file was restored, `git diff` was empty and
+the guard was green again (1 pass).
