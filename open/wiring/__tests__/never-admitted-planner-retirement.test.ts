@@ -553,7 +553,15 @@ async function quarantinedChatFixture(complete = true) {
 }
 
 async function registeredFreshConversation(f: Awaited<ReturnType<typeof quarantinedChatFixture>>, scope = 'project',
-  lifecycle = f.lifecycle(), succeeds = true) {
+  lifecycle = f.lifecycle(), succeeds = true, refusal: 'placement' | 'ownership' = 'placement') {
+  const { setNativeChildLiveness } = await import('@neutronai/runtime/adapters/claude-code/persistent/native-child-liveness.ts')
+  // The production composer owns this process-local reader. This consuming fixture
+  // supplies its own real admission, including both distinct all/chat queries;
+  // inheriting an earlier composition would read that fixture's closed database.
+  setNativeChildLiveness('owner',
+    projectId => f.admission.listLeases('liveChild').some(lease => lease.scope.projectId === projectId),
+    projectId => f.admission.hasUnresolvedNativeChildForChat(projectId))
+  cleanup.push(() => setNativeChildLiveness('owner', undefined))
   const capacity = await import('@neutronai/runtime/workers/claude-capacity-client.ts')
   const { buildLlmCallSubstrate } = await import('@neutronai/gateway/wiring/build-llm-call-substrate.ts')
   const { shutdownAllPersistentRepls } = await import('@neutronai/runtime/adapters/claude-code/persistent/pool.ts')
@@ -598,7 +606,11 @@ async function registeredFreshConversation(f: Awaited<ReturnType<typeof quaranti
     metering_context: { project_id: scope, conversationProjectId: scope } }).events) events.push(event)
   if (!succeeds) {
     expect(events.some(e => e.kind === 'error')).toBe(true)
-    expect(peer.children).toHaveLength(0); expect(f.registrations).toEqual([])
+    if (refusal === 'ownership') {
+      expect(events).toContainEqual({ kind: 'error', retryable: false,
+        message: 'persistent-repl: native child ownership remains unresolved; reconcile before an ordinary turn' })
+      expect(peer.children.flatMap(child => child.prompts)).toEqual([])
+    } else { expect(peer.children).toHaveLength(0); expect(f.registrations).toEqual([]) }
     return
   }
   expect(events.filter(e => e.kind === 'error')).toEqual([])
@@ -743,4 +755,18 @@ test.each(['missing', 'live'] as const)('ordinary pending Chat placement recover
     expect(replacement.state).toBe('ready'); expect(replacement.workspace).not.toBe(record.workspace)
     expect(replacement.quarantinedChats).toBeUndefined()
   } else expect(replacement).toEqual(record)
+})
+
+
+test('fresh registered Chat still refuses an actual newly held native child lease without sending input', async () => {
+  const f = await quarantinedChatFixture(), port = f.admission.forNativeChild('other')
+  const held = await port.admit('independent-live-run', 'plan')
+  expect(held.status).toBe('admitted')
+  if (held.status !== 'admitted') throw Error('fixture child admission refused')
+  port.finishPreparing!(held.lease)
+  expect(f.admission.hasUnresolvedNativeChildForChat('other')).toBe(true)
+  const before = f.admission.listLeases(), original = f.getRecord(f.registryPath, f.key)
+  await registeredFreshConversation(f, 'other', f.lifecycle(), false, 'ownership')
+  expect(f.admission.listLeases()).toEqual(before)
+  expect(f.getRecord(f.registryPath, f.key)).toEqual(original)
 })

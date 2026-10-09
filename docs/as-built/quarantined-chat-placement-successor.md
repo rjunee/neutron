@@ -31,7 +31,7 @@ manager: a refused inspection alone cannot prevent its positive
 `workspace_not_found` probe and reconstruction. A surviving pending workspace
 still refuses. This preserves recovery independently of quarantine authority.
 
-Author validation: the ten affected test files passed 262 tests and 2,071
+Author validation: the initial ten affected test files passed 262 tests and 2,071
 assertions, including the actual conversation wrapper, production substrate
 factory, signed capacity registration, scope lifecycle and real workspace manager
 against a synthetic native process/dev-channel and terminal RPC boundary. The
@@ -50,6 +50,20 @@ omit preparation authentication, omit the final journal comparison, or reinsert
 a generic handoff veto that blocks ordinary pending-placement recovery. Every
 mutated source was restored byte-for-byte before publication preparation; the
 17 new controls passed again afterward (175 assertions).
+
+The canonical shared batch then exposed a test-fixture omission: an earlier Open
+composition had registered the owner census against its subsequently closed
+database. The new consuming fixture constructed an admission store but did not
+bind it to that runtime reader. The production unknown-ownership guard correctly
+refused. The fixture now binds its own real all-child and chat-specific admission
+queries exactly as composition does, with cleanup scoped to that owner; no
+production guard changed. The exact original 100-file batch reproduced both
+failures before this correction, then passed 1,472 tests and 6,612 assertions.
+A minimal predecessor pair independently reproduced the cause. Its corrected
+controls also include a genuinely admitted, finished-preparing child lease:
+ordinary input remains refused and the lease stays unchanged. Replacing the real
+chat census with a constant false was assertion-killed, and the restored control
+passed. Open typechecking passed again after the test-only correction.
 
 A separate read-only rehearsal against the deployed completed authority, registry,
 kernel identity and terminal RPC reached the authorized metadata boundary while
