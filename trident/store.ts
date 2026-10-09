@@ -1223,6 +1223,31 @@ export class TridentRunStore {
     ).get(project, item) ?? null
   }
 
+  /** The single card whose exact link names this run, and that card's terminal
+   * attempts, newest first. A duplicate link or an empty ledger answers null. */
+  linkedCardAttempts(project: string, runId: string): { item_id: string; run_ids: string[] } | null {
+    const items = this.db.all<{ id: string }>(
+      'SELECT id FROM work_board_items WHERE project_slug = ? AND linked_run_id = ?', [project, runId])
+    if (items.length !== 1) return null
+    const attempts = this.db.all<{ run_id: string }>(
+      `SELECT run_id FROM work_board_terminal_attempts WHERE project_slug = ? AND item_id = ?
+        ORDER BY rowid DESC`, [project, items[0]!.id])
+    return attempts.length > 0 ? { item_id: items[0]!.id, run_ids: attempts.map(row => row.run_id) } : null
+  }
+
+  /** Whether another nonterminal run or a reservation held for another run
+   * owns this repository branch. Repository identity is Git's common directory;
+   * an unreadable identity throws, which callers treat as ownership unknown. */
+  branchOwnedByAnother(runId: string, repoPath: string, branch: string): boolean {
+    const repo = canonicalRepositoryPath(repoPath)
+    const owners = this.db.all<{ repo_path: string }>(`SELECT repo_path FROM code_trident_runs
+      WHERE id <> ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+        AND COALESCE(NULLIF(branch, ''), 'trident/' || slug) = ?`, [runId, branch])
+    if (owners.some(owner => canonicalRepositoryPath(owner.repo_path) === repo)) return true
+    return this.db.get(`SELECT 1 AS held FROM code_trident_branch_reservations
+      WHERE repo_path = ? AND branch = ? AND run_id <> ?`, [repo, branch, runId]) != null
+  }
+
   recoveryHistory(project: string, item: string): string[] {
     return this.db.prepare<{ run_id: string }, [string, string]>(
       'SELECT run_id FROM work_board_terminal_attempts WHERE project_slug = ? AND item_id = ?',

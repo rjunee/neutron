@@ -184,3 +184,22 @@ for (const strategy of ['single', 'task_sequence'] as const) {
     expect(() => readBuildRetrySource(db, row)).toThrow('invalidation is invalid')
   })
 }
+
+// #1476 — settlement of an owned publication's pending worker never makes the
+// unfinished checkpoint a retry source; the owned published retry starts fresh.
+for (const phase of ['build', 'fix'] as const) for (const terminal of ['failed', 'stopped'] as const) {
+  test(`a ${terminal} predecessor holding a publication with a pending ${phase} is not a retry source`, () => {
+    const row = run({ merge_mode: 'pr', execution_strategy: 'single', strategy_source: 'planner', phase: terminal,
+      published_pr: 7, pr: 7 })
+    const step = `${row.id}:${phase === 'build' ? 'build:0' : 'fix:1'}`
+    const request = { run_id: row.id, step_id: step, role: phase, model_id: 'model', cwd: row.worktree,
+      result: { schema: 'project-build', path: `/state/${encodeURIComponent(row.id)}/${phase}.result` } }
+    const meta = JSON.stringify(state(row, { stage: phase === 'build' ? 'built' : 'rejected', round: phase === 'build' ? 0 : 1,
+      pending: { phase, step_id: step, recovery: { request, inputs: { workers: { [phase]: { provider: 'anthropic', request } } },
+        round: phase === 'build' ? 0 : 1, snapshot: { head, diff: '+change', pr: { number: 7, head, state: 'OPEN' } },
+        previous: null, findings: [], planner: 'full', plan: null, executionStrategy: 'single',
+        previousReview: null, reviewBaseline: 'none' } } }))
+    expect(parseBuildModeState(meta, row, true).checkpoint.pending?.phase).toBe(phase)
+    expect(retryModeSource(store([row], { [row.id]: [{ id: 1, stage: 'build-mode-state', meta }] }), row)).toBeNull()
+  })
+}

@@ -207,6 +207,11 @@ export interface BuildTridentOrchestratorOptions {
   /** Host-owned one-use table reader; a stage event alone never authorizes recovery. */
   read_orchestrator_recovery?: (run: TridentRun) => import('./orchestrator-recovery-contract.ts').OrchestratorRecoveryDecision | null
   record_recovery_refusal?: (run_id: string, reason: string) => Promise<void>
+  /** Owned published retry authority (#1476): a fresh card retry may adopt its
+   *  terminal predecessor's retained branch only when this composed reader
+   *  re-establishes the exact lineage receipt and the predecessor's settlement.
+   *  Absent or null keeps the wrong-base refusal. */
+  read_published_retry_handoff?: (run: TridentRun) => import('./published-retry-handoff.ts').PublishedRetryHandoff | null
   /** Durable recovery lineage cannot authorize ordinary stranded publication. */
   recovery_salvage_protected?: (run_id: string) => boolean
   /** Required for salvage: holds durable branch exclusion through every write. */

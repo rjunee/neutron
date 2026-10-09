@@ -8,6 +8,8 @@ import { readBuildModeState } from './build-mode-state.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import { ORCHESTRATOR_RECOVERY_STAGE } from './orchestrator-recovery-contract.ts'
 import { prepareRecoveryBranch, verifyRecoveryRemote } from './orchestrator-recovery.ts'
+import { observeOwnedPublication } from './published-retry-handoff.ts'
+import { isDeepStrictEqual } from 'node:util'
 
 const realSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -34,7 +36,7 @@ export interface LaunchPreparationDeps {
 
 export async function prepareLaunch(
   run: TridentRun,
-  opts: Pick<BuildTridentOrchestratorOptions, 'run_host' | 'sleep' | 'list_stage_events' | 'read_orchestrator_recovery' | 'record_recovery_refusal'>,
+  opts: Pick<BuildTridentOrchestratorOptions, 'run_host' | 'sleep' | 'list_stage_events' | 'read_orchestrator_recovery' | 'record_recovery_refusal' | 'read_published_retry_handoff'>,
   deps: LaunchPreparationDeps,
 ): Promise<AdvanceOutcome | PreparedLaunch> {
   const {
@@ -727,7 +729,72 @@ export async function prepareLaunch(
           }
         }
       }
-      if (contained === 'no' && !ownCrashLeftover) {
+      // OWNED PUBLISHED RETRY (#1476). A fresh card retry carries its card's exact
+      // publication receipt but no checkpoint and no prior-base pin, so neither
+      // exemption above can apply to the branch its terminal predecessor left. The
+      // composed authority re-establishes the receipt and the predecessor's
+      // settlement from original evidence; Git then proves the tip IS that settled
+      // head, descends from the predecessor's base pin and contains the owned PR's
+      // head. Anything less keeps the refusal below, byte-identical. Nothing is
+      // written here: no fetch of the branch, no ref update, no worktree operation.
+      let publishedRetry = false
+      if (contained === 'no' && !ownCrashLeftover && freshLaunch && !seeded_resume
+        && launchRun.merge_mode === 'pr' && typeof launchRun.published_pr === 'number' && launchRun.published_pr > 0
+        && opts.read_published_retry_handoff) {
+        const unknownRefusal = (detail: string): AdvanceOutcome => ({
+          run: failedRun(
+            pinnedRun,
+            `trident infra: branch ${branchProse} at ${branchTip} is not contained in origin/${baseProse} at ${base_sha}, and whether it is this card's owned published retry could NOT be established in ${repoProse} (${detail}); that is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
+            false,
+          ),
+          changed: true,
+          waiting: false,
+          note: `${launchRun.phase} → failed (owned published retry probe UNKNOWN — no fire)`,
+        })
+        // The authority is read over the run AS STORED (`run`), never `launchRun`: the
+        // launch-local `pr` discovered by `gh pr list` above is not yet persisted, so
+        // the authority's own unchanged-row check would refuse every owned retry
+        // whose PR GitHub reports (the e2e caught exactly that).
+        const handoff = opts.read_published_retry_handoff(run)
+        if (handoff !== null && handoff.settledHead === branchTip) {
+          const descends = await ancestry([
+            'git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', handoff.priorBase, branchTip,
+          ])
+          if (descends.verdict === 'unknown') return unknownRefusal(probeDetail(descends.res))
+          const pr = descends.verdict === 'yes'
+            ? await observeOwnedPublication(launchRun, base, opts.run_host) : null
+          if (pr?.verdict === 'unknown') return unknownRefusal(foldEvidence(pr.detail))
+          if (pr?.verdict === 'ok') {
+            const present = await opts.run_host(
+              ['git', '-C', launchRun.repo_path, 'cat-file', '-e', `${pr.head}^{commit}`], launchRun.repo_path)
+            const containsPr = present.ok
+              ? await ancestry(['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', pr.head, branchTip])
+              : null
+            if (containsPr?.verdict === 'unknown') return unknownRefusal(probeDetail(containsPr.res))
+            // The authority is re-read AFTER the Git and network observations; a
+            // change in between (a writer, a new owner, an altered artifact) refuses.
+            const reread = containsPr?.verdict === 'yes' ? opts.read_published_retry_handoff(run) : null
+            if (reread !== null && isDeepStrictEqual(reread, handoff)) {
+              const behind = await opts.run_host(
+                gitRangeArgv({
+                  repo_path: launchRun.repo_path,
+                  subcommand: 'rev-list',
+                  flags: ['--count'],
+                  base: handoff.priorBase,
+                  head: base_sha,
+                }),
+                launchRun.repo_path,
+              )
+              const count = Number.parseInt(behind.stdout.trim(), 10)
+              base_sha = handoff.priorBase
+              base_behind = behind.ok && Number.isFinite(count) ? count : null
+              pinnedRun = { ...launchRun, base_sha, base_behind }
+              publishedRetry = true
+            }
+          }
+        }
+      }
+      if (contained === 'no' && !ownCrashLeftover && !publishedRetry) {
         const ahead = await opts.run_host(
           // `--end-of-options` (#546): `base_sha` is the launcher's own resolved oid, and
           // `rev-list` is the family measured to write the smuggled file even while

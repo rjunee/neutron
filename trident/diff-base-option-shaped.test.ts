@@ -1137,6 +1137,9 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
       // branch rather than cutting one, the distance is measured FROM that branch's tip, so
       // the persisted pin describes the branch instead of the base branch's tip.
       { file: 'launch-preparation.ts', base: 'branchTip', why: 'the branch tip this launch just read with `rev-parse --verify` and checked against the full-OID pattern before use — an object name, never a ref name' },
+      // #1476 added the owned-published-retry base measurement: the adopted retry pins its
+      // terminal predecessor's base, so the distance is measured FROM that pin.
+      { file: 'launch-preparation.ts', base: 'handoff.priorBase', why: "the terminal predecessor's recorded base pin, which the published-retry authority returns only after checking it against the full-OID pattern and re-reading it unchanged — an object name, never a ref name" },
     ]
     const seen: string[] = []
     for (const file of ['launch-preparation.ts', 'merge.ts', 'mutation-prover.ts', 'orchestrator.ts', 'publication.ts', 'replay.ts'] as const) {

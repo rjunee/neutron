@@ -68,6 +68,7 @@ import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { ReminderTickLoop } from '@neutronai/reminders/tick.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import { readOrchestratorRecovery } from '@neutronai/trident/orchestrator-recovery.ts'
+import { readPublishedRetryHandoff } from '@neutronai/trident/published-retry-handoff.ts'
 import {
   TridentTickLoop,
   type TridentDeadLauncherLatch,
@@ -663,6 +664,11 @@ export function buildCoreModules(
             return store.orchestratorRecovery(run.id)
           },
           record_recovery_refusal: (run_id, reason) => store.recordOrchestratorRecoveryRefusal(run_id, reason),
+          // #1476 — owned published retry: trident's exact lineage + settlement
+          // authority AND the composer's host settlement witness. Unconditional;
+          // an absent witness answers null, which keeps the wrong-base refusal.
+          read_published_retry_handoff: (run) =>
+            readPublishedRetryHandoff(store, tridentWiring.published_retry_settled, run),
           recovery_salvage_protected: (run_id) => store.isOrchestratorRecoverySalvageProtected(run_id),
           with_salvage_reservation: (run, body) => store.withSalvageReservation(run, body),
           // THE THREE RUN-SCOPED PROBES the watchdog must consult before it may
