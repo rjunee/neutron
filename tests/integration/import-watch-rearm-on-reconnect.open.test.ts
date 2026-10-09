@@ -35,18 +35,33 @@ import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
+import { drainRealmodeCleanups } from '@neutronai/gateway/index.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
+import {
+  bootCapturingSweeperLoop,
+  expectQuiescedTeardown,
+  runHeldSweeperTeardown,
+  runTracedTeardown,
+} from '../support/held-sweeper-teardown.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
 
 let home: IsolatedHome
 
-interface Harness { base: string; db: ProjectDb; close(): Promise<void> }
+type Composition = Awaited<ReturnType<ReturnType<typeof buildOpenGraphComposer>>>
+interface Harness {
+  base: string
+  db: ProjectDb
+  composition: Composition
+  graph: Awaited<ReturnType<typeof composeProductionGraph>>
+  /** Memoized: a repeat call returns the first teardown. */
+  close(): Promise<void>
+}
 let harness: Harness | null = null
 
 function recordingSubstrate(): Substrate {
@@ -214,14 +229,22 @@ async function startHarness({
   const graph = await composeProductionGraph(composition)
   if (graph.fetch === undefined || graph.websocket === undefined) throw new Error('no fetch/ws')
   const server = Bun.serve({ port: 0, fetch: (req, srv) => graph.fetch!(req, srv), websocket: graph.websocket })
+  let closing: Promise<void> | null = null
   return {
     base: `http://127.0.0.1:${server.port}`,
     db,
-    close: async () => {
-      await server.stop(true)
-      for (const cleanup of composition.realmode_cleanups ?? []) { try { cleanup() } catch { /* */ } }
-      await graph.shutdown()
-      db.close()
+    composition,
+    graph,
+    close: () => {
+      closing ??= (async () => {
+        await server.stop(true)
+        // AWAIT every composed cleanup (e.g. the upload sweeper's quiescing
+        // stop) so no loop tick is in flight when the DB closes below.
+        await drainRealmodeCleanups(composition.realmode_cleanups ?? [])
+        await graph.shutdown()
+        db.close()
+      })()
+      return closing
     },
   }
 }
@@ -373,4 +396,65 @@ describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
     await sleep(2_000)
     expect(currentPhase(harness.db)).not.toBe('completed')
   }, 30_000)
+})
+
+/**
+ * #1389 follow-up — `Harness.close()` (what afterEach runs) must QUIESCE the
+ * composed loops before it closes the DB. A REAL composer loop's DB-using tick
+ * is held at a barrier while the actual teardown runs. Booted WITHOUT a seeded
+ * onboarding row, so no import watcher is armed alongside the held tick. See
+ * tests/support/held-sweeper-teardown.ts for the harness and its self-test.
+ */
+describe('fixture teardown quiesces composed loops before DB close', () => {
+  test('a held sweeper tick keeps Harness.close pending, the DB open, and later cleanups unentered until it lands', async () => {
+    const { value, loop } = await bootCapturingSweeperLoop(() => startHarness({ seedBeforeCompose: false }))
+    harness = value
+    const report = await runHeldSweeperTeardown({
+      composition: value.composition,
+      graph: value.graph,
+      db: value.db,
+      loop,
+      teardown: () => value.close(),
+    })
+    expectQuiescedTeardown(report)
+  }, 45_000)
+
+  test('an earlier rejecting and throwing cleanup neither skips the held cleanup nor lets the DB close early', async () => {
+    const { value, loop } = await bootCapturingSweeperLoop(() => startHarness({ seedBeforeCompose: false }))
+    harness = value
+    value.composition.realmode_cleanups!.unshift(
+      async () => {
+        throw new Error('injected-reject')
+      },
+      () => {
+        throw new Error('injected-throw')
+      },
+    )
+    const report = await runHeldSweeperTeardown({
+      composition: value.composition,
+      graph: value.graph,
+      db: value.db,
+      loop,
+      teardown: () => value.close(),
+    })
+    expectQuiescedTeardown(report)
+    expect(report.trace.indexOf('cleanup:0:reject')).toBeGreaterThanOrEqual(0)
+    expect(report.trace.indexOf('cleanup:1:reject')).toBeGreaterThan(report.trace.indexOf('cleanup:0:reject'))
+    expect(report.trace.indexOf('loop:stop-entered')).toBeGreaterThan(report.trace.indexOf('cleanup:1:reject'))
+    expect(report.sweeperIndex!).toBeGreaterThan(1)
+  }, 45_000)
+
+  test('an empty cleanup list still shuts the graph down and closes the DB', async () => {
+    harness = await startHarness({ seedBeforeCompose: false })
+    const h = harness
+    const cleanups = h.composition.realmode_cleanups!
+    // Stop the composed loops while the DB is open and no tick is in flight,
+    // leaving the fixture an EMPTY list to drain.
+    await drainRealmodeCleanups(cleanups.splice(0, cleanups.length))
+    expect(cleanups).toHaveLength(0)
+    const result = await runTracedTeardown({ graph: h.graph, db: h.db, teardown: () => h.close() })
+    expect(result.teardownError).toBeNull()
+    expect(result.trace).toEqual(['graph:shutdown', 'db:close', 'teardown:settled'])
+    expect(result.dbClosedAfter).toBe(true)
+  }, 45_000)
 })
