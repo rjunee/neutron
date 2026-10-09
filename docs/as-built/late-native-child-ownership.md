@@ -25,9 +25,10 @@ capability before reconciliation and serves its brief afterward; unrelated lease
 survive. Actual Open startup and periodic recovery consume the original evidence
 with zero native turns
 (`open/wiring/__tests__/claude-native-dispatch-boot.test.ts:145`, `:256`, `:423`).
-The existing project-build E2E file remains unchanged: its lost-acknowledgement,
-native planner and passive panel consumers provide surrounding execution coverage,
-while the boot tests directly exercise the new recovery and planner behavior.
+Existing project-build E2E lost-acknowledgement, native planner and passive panel
+consumers provide surrounding execution coverage, while the boot tests directly
+exercise the new recovery and planner behavior. The same delivery adds queued
+dispatch E2E cases recorded in `claude-queued-dispatch-compaction.md`.
 
 Focused verification: the boot suite passed 163 tests and 397 assertions with
 `bun test --timeout 15000`; six selected project-build E2E tests passed with 86
