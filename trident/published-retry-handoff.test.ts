@@ -296,6 +296,24 @@ for (const pr of ['closed', 'wrong branch', 'not contained', 'unreadable'] as co
   })
 }
 
+for (const failure of ['missing object (exit 1)', 'exit 128', 'watchdog timeout'] as const) {
+  test(`an unreadable owned PR head object refuses as UNKNOWN, not wrong-base: ${failure}`, async () => {
+    const f = await world(UNFINISHED_FIX)
+    f.faults.gitExit = {
+      match: argv => argv.includes('cat-file') && argv.includes('-e'),
+      result: failure === 'watchdog timeout'
+        ? { ok: false, stdout: '', stderr: '', exit_code: 124, timed_out: true }
+        : { ok: false, stdout: '', stderr: 'fatal: not a valid object', exit_code: failure === 'exit 128' ? 128 : 1 },
+    }
+    const before = await f.observe()
+    const reason = refusal(await f.launch())
+    expect(reason).toContain('owned published retry could NOT be established')
+    expect(reason).toContain('UNKNOWN authorises nothing')
+    expect(reason).not.toContain(WRONG_BASE)
+    expect(await f.observe()).toEqual(before)
+  })
+}
+
 for (const failure of ['exit 128', 'watchdog timeout'] as const) {
   test(`an unknown ancestry observation refuses as UNKNOWN: ${failure}`, async () => {
     const f = await world(UNFINISHED_FIX)
@@ -369,6 +387,72 @@ for (const [fault, apply] of Object.entries(intermediateFaults)) {
   test(`a newer card attempt that is not provably a refused retry ends the authority: ${fault}`, async () => {
     const f = await world(UNFINISHED_FIX)
     const { refused, retry } = await afterRefusedRetry(f)
+    await apply(f, refused)
+    expect(publishedRetryHandoff(f.store, f.store.get(retry.id)!)).toBeNull()
+    expect(refusal(await f.launch(f.store.get(retry.id)!))).toContain(WRONG_BASE)
+  })
+}
+
+// A retry the project launcher refused at PREPARATION (#1476 round 2): outer
+// launch adopted the branch, the launcher reserved `inner_result`, and the
+// preparation throw overwrote that reservation with the launcher's own
+// `inner-error` after recording the single worktree-add diagnostic.
+const PREPARATION_CAUSE = 'Error: Build worktree creation was not confirmed (reason=observation-error; exit=unknown; '
+  + 'timed_out=unknown; handoff=unknown:worktree-list-unreadable; diagnostic_recorded=true)'
+const PREPARATION_RESULT = JSON.stringify({ ok: false, checkpoint: 'inner-error', terminalCause: PREPARATION_CAUSE })
+const PREPARATION_DIAGNOSTIC = JSON.stringify({ operation: 'git-worktree-add', reason: 'observation-error',
+  exit_code: null, timed_out: null, handoff: 'unknown:worktree-list-unreadable' })
+async function afterPreparationRefusedRetry(f: Awaited<ReturnType<typeof world>>) {
+  const { refused, retry } = await afterRefusedRetry(f, { pr: PR })
+  await f.store.update(refused.id, { inner_result: PREPARATION_RESULT })
+  await f.store.recordStageEvent(refused.id, 'build-worktree-add-failed', PREPARATION_DIAGNOSTIC)
+  return { refused: f.store.get(refused.id)!, retry }
+}
+
+for (const [name, shape] of [['unfinished fix', UNFINISHED_FIX], ['completed build', COMPLETED_BUILD]] as const) {
+  test(`an intermediate retry refused at preparation does not end recovery: ${name}`, async () => {
+    const f = await world(shape)
+    const { refused, retry } = await afterPreparationRefusedRetry(f)
+    const events = f.store.stageEvents(refused.id)
+    const handoff = publishedRetryHandoff(f.store, retry)
+    expect(handoff?.prior.id).toBe(f.prior.id)
+    expect(handoff?.settledHead).toBe(f.settled)
+    const before = await f.observe()
+    const outcome = prepared(await f.launch(retry))
+    expect(outcome.pinnedRun.base_sha).toBe(f.base)
+    expect(await f.observe()).toEqual(before)
+    // The passed-over attempt is read, never rewritten or annotated.
+    expect(f.store.get(refused.id)).toEqual(refused)
+    expect(f.store.stageEvents(refused.id)).toEqual(events)
+  })
+}
+
+const preparationFaults: Record<string, (f: Awaited<ReturnType<typeof world>>, refused: TridentRun) => Promise<unknown>> = {
+  'its inner result carries an extra key': (f, refused) => f.store.update(refused.id, { inner_result:
+    JSON.stringify({ ok: false, checkpoint: 'inner-error', terminalCause: PREPARATION_CAUSE, prNumber: PR }) }),
+  'its launcher reservation is still pending': (f, refused) => f.store.update(refused.id, { inner_result: JSON.stringify({
+    projectBuild: { kind: 'unknown', phase: 'plan', step_id: null, detail: 'Project driver started; awaiting durable outcome' },
+    projectBuildReservation: { kind: 'in-process-driver', gateway_session: 'gateway' } }) }),
+  'its inner error is a driver rejection, not a preparation refusal': (f, refused) => f.store.update(refused.id, {
+    inner_result: JSON.stringify({ ok: false, checkpoint: 'inner-error', terminalCause: 'Error: driver rejected' }) }),
+  'it recorded no worktree-add diagnostic': async (f, refused) => {
+    await f.db.run("DELETE FROM code_trident_stage_events WHERE run_id = ? AND stage = 'build-worktree-add-failed'", [refused.id])
+  },
+  'it recorded two worktree-add diagnostics': (f, refused) =>
+    f.store.recordStageEvent(refused.id, 'build-worktree-add-failed', PREPARATION_DIAGNOSTIC),
+  'it recorded a different failure event': (f, refused) =>
+    f.store.recordStageEvent(refused.id, 'build-driver-settled', JSON.stringify({ kind: 'blocked' })),
+  'it dispatched a worker': (f, refused) => f.ledger.admit({ run_id: refused.id, step_id: `${refused.id}:build:0`,
+    attempt_id: 'dispatch', phase: 'build', task_id: `${refused.id}:task:0`, head_sha: f.settled, role: 'build',
+    review_seat: null, provider: 'anthropic', requested_model: 'opus', resolved_model: 'opus', placement: 'in-repl', queued_at: 6 }),
+  'it holds a build-mode-state checkpoint': (f, refused) =>
+    f.store.recordStageEvent(refused.id, 'build-mode-state', JSON.stringify({ runId: refused.id })),
+  'it carries a PR receipt of its own': (f, refused) => f.store.update(refused.id, { pr: PR + 1 }),
+}
+for (const [fault, apply] of Object.entries(preparationFaults)) {
+  test(`a preparation-refused card attempt passes over only in its exact shape: ${fault}`, async () => {
+    const f = await world(UNFINISHED_FIX)
+    const { refused, retry } = await afterPreparationRefusedRetry(f)
     await apply(f, refused)
     expect(publishedRetryHandoff(f.store, f.store.get(retry.id)!)).toBeNull()
     expect(refusal(await f.launch(f.store.get(retry.id)!))).toContain(WRONG_BASE)
@@ -600,7 +684,8 @@ test('authority that changes after the Git observations refuses before the lifec
 
 for (const [name, setup] of [
   ['an unowned retry (no publication receipt)', (f: World) => f],
-  ['a reservation already held by another run', async (f: World) => {
+  ['an unreadable authority on a row that does not carry the adopted base pin', async (f: World) => {
+    await f.store.update(f.retry.id, { base_sha: f.published })
     await f.store.reserveBranch({ repo_path: f.repo, branch: BRANCH, run_id: 'another-run', purpose: 'salvage' }) }],
 ] as const) {
   test(`no owned authority means no hand-off and the existing add refusal: ${name}`, async () => {
@@ -617,9 +702,37 @@ for (const [name, setup] of [
   })
 }
 
-test('a host settlement witness that refuses yields no hand-off', async () => {
-  const f = await launched()
-  const before = await snapshot(f)
-  expect(await handOff(f, () => false)).toEqual({ verdict: 'none' })
-  expect(await snapshot(f)).toEqual(before)
-})
+// Outer launch adopted the branch (the row carries the predecessor's base pin),
+// but the authority cannot be re-read at preparation: that is UNKNOWN, never an
+// unchecked attach, and nothing is reserved, observed or released.
+for (const [name, setup] of [
+  ['a host settlement witness that now refuses', (_f: World) => {}],
+  ['a branch reservation now held by another run', async (f: World) => {
+    await f.store.reserveBranch({ repo_path: f.repo, branch: BRANCH, run_id: 'another-run', purpose: 'salvage' }) }],
+  ['a predecessor result that can no longer be read', (f: World) => { rmSync(f.files.result) }],
+] as const) {
+  test(`an unreadable authority after outer launch adopted the branch is UNKNOWN: ${name}`, async () => {
+    const f = await launched()
+    const handoff = publishedRetryHandoff(f.store, f.store.get(f.retry.id)!)
+    expect(handoff).not.toBeNull()
+    const files = Object.fromEntries(Object.entries(f.files).map(([key, path]) => [key, readFileSync(path, 'utf8')]))
+    await setup(f)
+    expect(readPublishedRetryHandoff(f.store, () => !name.includes('witness'), f.store.get(f.retry.id)!)).toBeNull()
+    // The retained artifacts are compared separately: one fault removes one.
+    const tree = () => snapshot({ ...f, files: {} as World['files'] })
+    const before = await tree()
+    const start = f.commands.length
+    const reached: RetainedCheckoutOutcome[] = []
+    const outcome = await handOff(f, () => !name.includes('witness'), async seen => { reached.push(seen) })
+    expect(outcome).toEqual({ verdict: 'unknown', detail: 'authority-unreadable' })
+    expect(reached).toEqual([outcome])
+    // The holder checkout and the branch ref are byte-identical; no command ran.
+    expect(await tree()).toEqual(before)
+    expect(existsSync(f.worktree)).toBe(true)
+    expect(await git(f.repo, '-C', f.repo, 'rev-parse', `refs/heads/${BRANCH}`)).toBe(f.settled)
+    expect(f.commands.slice(start)).toEqual([])
+    for (const [key, text] of Object.entries(files)) if (existsSync(f.files[key as keyof typeof f.files])) {
+      expect(readFileSync(f.files[key as keyof typeof f.files], 'utf8')).toBe(text)
+    }
+  })
+}

@@ -14,6 +14,41 @@ const oid = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const reservationPrefix = new Map([['anthropic', 'claude'], ['openai-codex', 'codex'], ['pi', 'pi']])
 
+/** The project launcher's preparation-refusal message, as `String(error)` of the
+ * throw in `prepareProjectBuild` after it recorded its worktree-add diagnostic. */
+const PREPARATION_REFUSAL_PREFIX = 'Error: Build worktree creation was not confirmed ('
+const PREPARATION_REFUSAL_SUFFIX = '; diagnostic_recorded=true)'
+/** The only stage events a retry refused at preparation records: the one
+ * worktree-add diagnostic. Every other stage (a checkpoint, a settled driver, a
+ * retry source, a recovery, an invalidated seed) means it was not that retry. */
+export const PREPARATION_REFUSAL_EVENTS: readonly string[] = ['build-worktree-add-failed']
+
+/**
+ * Whether a newer terminal card attempt is provably a retry the project
+ * launcher refused at PREPARATION, before its first worker (#1476 round 2).
+ * The launcher reserves `inner_result` before `prepare` and, when `prepare`
+ * throws, overwrites its own reservation with exactly
+ * `{ ok: false, checkpoint: 'inner-error', terminalCause }`. A driver rejection
+ * writes the same three keys, so the shape alone is not evidence: the attempt
+ * must also carry the single `build-worktree-add-failed` diagnostic that
+ * preparation records before it throws, the matching bounded refusal message,
+ * no other stage event, and no PR receipt but the card's own. The caller
+ * separately requires no attempt rows and no inner checkpoint.
+ */
+function preparationRefused(candidate: TridentRun, events: ReturnType<TridentRunStore['stageEvents']>,
+  published: number): boolean {
+  let parsed: unknown
+  try { parsed = JSON.parse(candidate.inner_result ?? 'null') } catch { return false }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return false
+  const result = parsed as Record<string, unknown>
+  const cause = result.terminalCause
+  if (!equal(Object.keys(result).sort(), ['checkpoint', 'ok', 'terminalCause']) || result.ok !== false
+    || result.checkpoint !== 'inner-error' || typeof cause !== 'string'
+    || !cause.startsWith(PREPARATION_REFUSAL_PREFIX) || !cause.endsWith(PREPARATION_REFUSAL_SUFFIX)) return false
+  if (events.length !== 1 || !PREPARATION_REFUSAL_EVENTS.includes(events[0]!.stage)) return false
+  return candidate.pr === null || candidate.pr === published
+}
+
 /** What an owned published retry may adopt at outer launch. It names the
  * predecessor's settled work; it never carries its checkpoint, round, findings,
  * approval or suite receipt. */
@@ -54,7 +89,9 @@ export type PublishedRetrySettlement = (handoff: PublishedRetryHandoff) => boole
  * - the predecessor is the card's newest terminal attempt that holds a host
  *   checkpoint, on the same project, repository, branch and PR mode, with an oid
  *   base pin; newer attempts are passed over only when each is provably a retry
- *   refused before its first worker on that same branch;
+ *   refused before its first worker on that same branch: refused at outer
+ *   launch (no inner result), or refused at preparation in exactly the shape
+ *   `preparationRefused` admits;
  * - its latest host checkpoint records a pending build or fix whose ORIGINAL
  *   request, journal, armed reservation and completed result agree, with
  *   attempt accounting completed, unfinished or `unknown` (never rewritten);
@@ -91,7 +128,8 @@ export function publishedRetryHandoff(store: TridentRunStore, run: TridentRun): 
       const seen = store.stageEvents(id)
       if (seen.some(row => row.stage === 'build-mode-state')) { prior = candidate; events = seen; break }
       if (seen.some(row => row.stage === 'build-retry-source' || row.stage === ORCHESTRATOR_RECOVERY_STAGE)
-        || store.attempts(id).length > 0 || candidate.inner_checkpoint !== null || candidate.inner_result !== null
+        || store.attempts(id).length > 0 || candidate.inner_checkpoint !== null
+        || (candidate.inner_result !== null && !preparationRefused(candidate, seen, published))
         || candidate.bound_pr !== null || (candidate.published_pr !== null && candidate.published_pr !== published)) return null
       passed.push({ run: candidate, events: seen })
     }
@@ -155,6 +193,42 @@ export function publishedRetryHandoff(store: TridentRunStore, run: TridentRun): 
     return { prior, item_id: card.item_id, priorBase: prior.base_sha, settledHead: head,
       holderWorktree: worktree, stepId: request.step_id, role, request, resultPath: request.result.path }
   } catch { return null }
+}
+
+/**
+ * Whether this run's row carries the base pin outer launch writes when it ADOPTS
+ * an owned published retry's retained branch (#1476 round 2). Outer launch
+ * persists no separate adoption marker: adoption is the one launch path that
+ * pins `base_sha` to the predecessor's own base pin. That pin alone is not
+ * distinctive, so the row must also be an owned-published fresh retry (PR mode,
+ * a positive receipt, no checkpoint, no bound PR) and the pin must equal the
+ * base pin of the card's newest same-lane attempt whose latest checkpoint still
+ * records a pending build or fix, the only predecessor the authority adopts.
+ *
+ * Preparation consults this only when the authority itself is null: a row that
+ * outer launch adopted must then refuse UNKNOWN rather than attach the branch
+ * unchecked. A read failure on such a candidate row answers true.
+ */
+export function adoptedPublishedRetryPin(store: TridentRunStore, run: TridentRun): boolean {
+  const published = run.published_pr
+  if (run.merge_mode !== 'pr' || typeof published !== 'number' || !Number.isSafeInteger(published) || published <= 0
+    || run.inner_checkpoint !== null || run.bound_pr !== null || typeof run.branch !== 'string' || run.branch.length === 0
+    || typeof run.base_sha !== 'string' || !oid.test(run.base_sha)) return false
+  try {
+    const card = store.linkedCardAttempts(run.project_slug, run.id)
+    if (!card) return false
+    for (const id of card.run_ids) {
+      if (id === run.id) continue
+      const candidate = store.get(id)
+      if (!candidate || candidate.repo_path !== run.repo_path || candidate.branch !== run.branch) continue
+      const event = store.stageEvents(id).filter(row => row.stage === 'build-mode-state').at(-1)
+      if (!event) continue
+      if (candidate.base_sha !== run.base_sha) return false
+      const pending = parseBuildModeState(event.meta ?? null, candidate, true).checkpoint.pending
+      return pending?.phase === 'build' || pending?.phase === 'fix'
+    }
+    return false
+  } catch { return true }
 }
 
 /** The composed reader: trident authority AND the host's own settlement view.

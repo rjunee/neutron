@@ -6728,6 +6728,86 @@ test('owned published retry survives an intermediate retry refused before its fi
   expect(f.db.all('SELECT * FROM code_trident_branch_reservations')).toEqual([])
 }, 120_000)
 
+// #1476 round 2: a retry that outer launch adopted but PREPARATION refused (a
+// transient UNKNOWN hand-off, or a failed attach after the predecessor's checkout
+// was already released) is a terminal card attempt whose `inner_result` is the
+// launcher's own `inner-error`. It must not end the card's recovery.
+const PREPARATION_REFUSALS = [
+  ['the predecessor checkout still present (worktree-list-unreadable)', 'present'],
+  ['the predecessor checkout already removed (one failed worktree add)', 'removed'],
+] as const
+for (const [variant, holder] of PREPARATION_REFUSALS) {
+  test(`owned published retry survives an intermediate retry refused at preparation: ${variant}`, async () => {
+    const w = await ownedPublishedRetry('unfinished-fix')
+    const { f, prior } = w
+    const before = await w.observe()
+    const refusedRetry = await w.dispatch()
+    const host = f.context.runHost
+    let injected = 0
+    f.context.runHost = Object.assign(async (...args: Parameters<typeof host>) => {
+      const argv = args[0]
+      const hit = argv[0] === 'git' && argv.includes('worktree')
+        && (holder === 'present' ? argv.includes('list') && argv.includes('--porcelain') : argv.includes('add'))
+      if (hit && injected++ === 0) return { ok: false, exit_code: 128, stdout: '', stderr: 'fatal: injected transient' }
+      return host(...args)
+    }, { writesDiffOutput: true as const })
+    const commandsBefore = f.commands.length
+    const refused = await w.launch(refusedRetry.id)
+    f.context.runHost = host
+    expect(injected).toBeGreaterThan(0)
+    expect(refused.outcome).toBeNull()
+    expect(refused.stepped.phase).toBe('failed')
+    expect(refused.stepped.failure_reason).toContain('Build worktree creation was not confirmed')
+    if (holder === 'present') expect(refused.stepped.failure_reason).toContain('handoff=unknown:worktree-list-unreadable')
+    expect(f.world.dispatches).toEqual([])
+    expect(forcing(w, f.commands.slice(commandsBefore))).toEqual([])
+    // The predecessor's checkout is still held, or was released by the lifecycle
+    // with the branch kept at the settled head.
+    expect(await exists(prior.worktree!)).toBe(holder === 'present')
+    expect(await gitOut(spawnCapture, f.repo, ['rev-parse', `refs/heads/${prior.branch}`])).toBe(w.settledHead)
+    await f.store.save(refused.stepped)
+    await buildBoardReconcileObserver(w.board, { resolveRepoWebUrl: async () => null })!(f.store.get(refusedRetry.id)!)
+    const refusedRow = f.store.get(refusedRetry.id)!
+    const refusedEvents = f.store.stageEvents(refusedRetry.id)
+    // The exact preparation-refused shape: the launcher's inner-error over its own
+    // reservation, the single worktree-add diagnostic, no attempt, no checkpoint.
+    expect(JSON.parse(refusedRow.inner_result!)).toMatchObject({ ok: false, checkpoint: 'inner-error' })
+    expect(refusedEvents.map(event => event.stage)).toEqual(['build-worktree-add-failed'])
+    expect(f.store.attempts(refusedRetry.id)).toEqual([])
+    expect(refusedRow.inner_checkpoint).toBeNull()
+    // The board observer recorded it as the card's newest terminal attempt.
+    expect(f.store.linkedCardAttempts('project', refusedRetry.id)?.run_ids[0]).toBe(refusedRetry.id)
+
+    const retry = await w.dispatch()
+    expect(retry).toMatchObject({ published_pr: 1, pr: null, inner_checkpoint: null, branch: prior.branch,
+      execution_strategy: prior.execution_strategy, task_iteration: 1, max_task_iterations: 4 })
+    const retryCommands = f.commands.length
+    const { stepped, outcome, errors } = await w.launch(retry.id)
+    expect(errors).toEqual([])
+    expect(stepped.failure_reason).toBeNull()
+    expect(outcome?.kind, outcome ? why(f, outcome) : '').toBe('merged')
+    const commands = f.commands.slice(retryCommands)
+    expect(f.world.plannerChoices).toEqual(['full'])
+    expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
+    expect(commands.some(argv => argv[0] === 'gh' && argv[2] === 'create')).toBe(false)
+    expect(commands.some(argv => argv[0] === 'gh' && argv[2] === 'merge' && argv.includes('--match-head-commit'))).toBe(true)
+    expect(f.github.prs).toMatchObject([{ number: 1, state: 'MERGED', headRefName: prior.branch }])
+    expect((await f.context.runHost(['git', '-C', f.origin, 'merge-base', '--is-ancestor', w.settledHead, 'refs/heads/main'], f.origin)).ok).toBe(true)
+    const after = f.store.get(retry.id)!
+    expect(after.base_sha).toBe(prior.base_sha)
+    expect(after.execution_strategy).toBe(prior.execution_strategy)
+    expect(forcing(w, commands)).toEqual([])
+    expect(await exists(prior.worktree!)).toBe(false)
+    // Neither predecessor is rewritten: the settled one and the refused one alike.
+    expect(await w.observe()).toEqual(before)
+    expect(f.store.get(refusedRetry.id)).toEqual(refusedRow)
+    expect(f.store.stageEvents(refusedRetry.id)).toEqual(refusedEvents)
+    expect(f.store.attempts(refusedRetry.id)).toEqual([])
+    expect(retryModeSource(f.store, f.store.get(prior.id)!)).toBeNull()
+    expect(f.db.all('SELECT * FROM code_trident_branch_reservations')).toEqual([])
+  }, 120_000)
+}
+
 test('owned published retry: a discovered-but-unowned PR sibling keeps the wrong-base refusal and is untouched', async () => {
   const w = await ownedPublishedRetry('completed-build', { owned: false })
   const { f } = w

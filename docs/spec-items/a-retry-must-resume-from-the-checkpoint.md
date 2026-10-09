@@ -91,7 +91,13 @@ card also owns a witnessed publication on that branch, the retry starts fresh
 planning on the retained branch at that settled head, keeps the predecessor's
 base pin, strategy and card task spend, and obtains its own proof, review and
 pinned merge gates. Completed and unfinished or `unknown` attempt accounting are
-both covered; neither is rewritten. The launch and checkout-handoff acceptance
+both covered; neither is rewritten. A newer card attempt that was refused
+before its first worker, at outer launch or (in its exact launcher-written
+shape) at preparation, is passed over and never becomes the retry source or
+ends the card's recovery. When the authority cannot be re-read at preparation
+on a row carrying the adopted base pin, or the owned PR head object cannot be
+read at outer launch, the retry refuses as UNKNOWN rather than attaching the
+branch or reporting a wrong base. The launch and checkout-handoff acceptance
 and its controls live in `docs/spec-items/salvage-publication-provenance.md`
 (`Owned published retry through outer launch`).
 

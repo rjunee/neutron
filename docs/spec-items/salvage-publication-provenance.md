@@ -172,7 +172,13 @@ existing authority:
   the newest such attempt; a newer attempt is passed over only when it is
   provably a retry refused before its first worker on that same branch (no
   checkpoint, no recovery, no worker accounting, and no receipt other than this
-  one). A refused retry, including a transient UNKNOWN refusal of this path,
+  one). It was refused either at outer launch (no inner result) or at
+  preparation. A preparation refusal qualifies only in its exact shape: an
+  inner result of exactly `ok: false`, `checkpoint: 'inner-error'` and the
+  bounded worktree-creation refusal as `terminalCause` (the launcher's write
+  over its own reservation), the single `build-worktree-add-failed` diagnostic
+  as its only stage event, and no PR other than this card's. A refused retry,
+  including a transient UNKNOWN refusal of this path at launch or preparation,
   never ends the card's recovery, and any other newer attempt refuses;
 - the predecessor's pending worker is settled by its original authenticated
   evidence: the host-saved request, the exact armed reservation, and a completed
@@ -184,7 +190,8 @@ existing authority:
   the predecessor's work or the branch;
 - the local branch tip equals the settled head, descends from the predecessor's
   base pin, and contains the published PR head observed OPEN on the same source
-  and target branches.
+  and target branches. A PR head object that cannot be read locally makes that
+  containment UNKNOWN, never a wrong-base verdict.
 
 The retry then pins the predecessor's base, keeps its own run identity, and
 starts fresh planning on the retained branch. Terminal phase, a process exit,
@@ -204,7 +211,12 @@ worktree at the settled head is removed without force while the branch and every
 commit are kept. A dirty, locked, unverifiable or ambiguous checkout, another
 holder, a moved branch, an unavailable reservation or a changed observation
 refuses before any branch reset, checkout deletion, forced checkout or ownership
-release, and records the existing worktree-add diagnostic. Predecessor run rows,
+release, and records the existing worktree-add diagnostic. When the authority
+cannot be re-read at preparation but the row carries the base pin outer launch
+wrote on adopting the branch (the predecessor's own pin, on an owned-published
+fresh retry whose same-lane predecessor still records a pending build or fix),
+preparation refuses as UNKNOWN before any reservation, cleanup or add; it never
+attaches that branch unchecked. Predecessor run rows,
 stage events, attempts, budgets and retained artifacts are unchanged.
 
 The retry receives current proof, review and pinned merge gates under its own
@@ -235,6 +247,28 @@ because a PR exists.
   refuses. Verify: `owned published retry survives an intermediate retry` in
   `open/__tests__/project-build-e2e.test.ts` and the intermediate cases in
   `trident/published-retry-handoff.test.ts`.
+- [x] A card whose newest terminal attempt is a retry refused at PREPARATION
+  (adopted at outer launch, then a transient UNKNOWN hand-off with the
+  predecessor checkout still present, or one failed worktree add after the
+  checkout was already released), saved and reconciled by the real board
+  observer, still reaches merged on the same PR on the next normal retry, with
+  both predecessors' rows, events and attempts unchanged. A preparation-refused
+  attempt with an extra inner-result key, a still-pending reservation, a driver
+  rejection's cause, no or two diagnostics, another stage event, a worker
+  attempt, a checkpoint or its own PR refuses. Verify: `owned published retry
+  survives an intermediate retry refused at preparation` in
+  `open/__tests__/project-build-e2e.test.ts` and the `refused at preparation`
+  and `preparation-refused card attempt` cases in
+  `trident/published-retry-handoff.test.ts`.
+- [x] An authority that cannot be re-read at preparation on a row carrying the
+  adopted base pin refuses as UNKNOWN `authority-unreadable` with the holder
+  checkout and branch ref unchanged and no command run; without that pin the
+  hand-off stays `none`. Verify: the `unreadable authority` cases in
+  `trident/published-retry-handoff.test.ts`.
+- [x] An owned PR head object that `git cat-file -e` cannot read (missing,
+  failed or killed by its watchdog) refuses outer launch as UNKNOWN, not
+  wrong-base, with nothing written. Verify: the `unreadable owned PR head`
+  cases in `trident/published-retry-handoff.test.ts`.
 - [x] With the predecessor's checkout already gone at preparation, a branch
   rewound or advanced past the settled head refuses as `branch-moved` before
   any add; at the settled head it is attached and re-checked, with no cleanup.

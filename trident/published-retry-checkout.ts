@@ -6,7 +6,7 @@ import type { BranchReservation } from './branch-reservation.ts'
 import type { TridentRunStore } from './store.ts'
 import { TRIDENT_SCRIPT_DIR } from './script-dir.ts'
 import {
-  observeOwnedPublication, readPublishedRetryHandoff,
+  adoptedPublishedRetryPin, observeOwnedPublication, readPublishedRetryHandoff,
   type PublishedRetryHandoff, type PublishedRetrySettlement,
 } from './published-retry-handoff.ts'
 
@@ -21,7 +21,7 @@ export type RetainedCheckoutRefusal =
   | 'branch-moved' | 'base-not-ancestor' | 'holder-dirty' | 'holder-unverifiable'
   | 'observation-changed' | 'cleanup-preserved'
 export type RetainedCheckoutUnknown =
-  | 'worktree-list-unreadable' | 'branch-unreadable' | 'base-ancestry-unknown'
+  | 'authority-unreadable' | 'worktree-list-unreadable' | 'branch-unreadable' | 'base-ancestry-unknown'
   | 'publication-unknown' | 'cleanup-unconfirmed' | 'post-check-failed'
 
 export type RetainedCheckoutOutcome =
@@ -90,9 +90,12 @@ const failed = (result: HostCommandResult): boolean => !result.ok || result.time
  * base-ancestry and publication checks still run and nothing is released: the
  * outcome is 'handed-off' so the caller re-checks the settled head after its add.
  *
- * 'none' means no owned published retry authority exists: the caller's path is
- * unchanged and no reservation is taken. Every other shape refuses or is
- * UNKNOWN before any mutation, except a post-cleanup check that cannot confirm
+ * 'none' means no owned published retry authority exists and outer launch did
+ * not adopt the branch: the caller's path is unchanged and no reservation is
+ * taken. When the authority cannot be re-read but the row carries the adopted
+ * base pin (`adoptedPublishedRetryPin`), the outcome is UNKNOWN
+ * `authority-unreadable` instead, again before any reservation or Git call.
+ * Every other shape refuses or is UNKNOWN before any mutation, except a post-cleanup check that cannot confirm
  * the result, which is UNKNOWN. Nothing here writes predecessor rows, events,
  * attempts, budgets or artifacts, and no reservation but this call's own is
  * ever released.
@@ -106,7 +109,18 @@ export async function withRetainedCheckoutHandoff<T>(
     return run === null ? null : readPublishedRetryHandoff(store, settled, run)
   }
   const first = read()
-  if (first === null) return body({ verdict: 'none' })
+  if (first === null) {
+    // No authority now. If outer launch nevertheless ADOPTED this branch (the row
+    // carries the predecessor's base pin), the branch it bypassed the wrong-base
+    // guard for must not be attached unchecked: that is UNKNOWN, before any
+    // reservation, cleanup or add. Otherwise the caller's path is unchanged.
+    let adopted = true
+    try {
+      const run = store.get(runId)
+      adopted = run !== null && adoptedPublishedRetryPin(store, run)
+    } catch { adopted = true }
+    return body(adopted ? { verdict: 'unknown', detail: 'authority-unreadable' } : { verdict: 'none' })
+  }
   const run = store.get(runId)!
   const repo = run.repo_path
   const branch = run.branch!

@@ -767,13 +767,19 @@ export async function prepareLaunch(
           if (pr?.verdict === 'ok') {
             const present = await opts.run_host(
               ['git', '-C', launchRun.repo_path, 'cat-file', '-e', `${pr.head}^{commit}`], launchRun.repo_path)
-            const containsPr = present.ok
-              ? await ancestry(['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', pr.head, branchTip])
-              : null
-            if (containsPr?.verdict === 'unknown') return unknownRefusal(probeDetail(containsPr.res))
+            // An unreadable PR-head object proves nothing about the branch: whether
+            // the tip contains it is UNKNOWN, never a wrong-base verdict.
+            if (!present.ok || present.timed_out === true) {
+              return unknownRefusal(present.timed_out === true
+                ? 'the owned PR head object probe was killed by its watchdog'
+                : `git cat-file -e could not read the owned PR head ${pr.head} (exit ${present.exit_code})`)
+            }
+            const containsPr = await ancestry(
+              ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', pr.head, branchTip])
+            if (containsPr.verdict === 'unknown') return unknownRefusal(probeDetail(containsPr.res))
             // The authority is re-read AFTER the Git and network observations; a
             // change in between (a writer, a new owner, an altered artifact) refuses.
-            const reread = containsPr?.verdict === 'yes' ? opts.read_published_retry_handoff(run) : null
+            const reread = containsPr.verdict === 'yes' ? opts.read_published_retry_handoff(run) : null
             if (reread !== null && isDeepStrictEqual(reread, handoff)) {
               const behind = await opts.run_host(
                 gitRangeArgv({
