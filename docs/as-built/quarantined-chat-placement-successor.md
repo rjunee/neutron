@@ -82,5 +82,32 @@ code did not change for either fixture correction.
 A separate read-only rehearsal against the deployed completed authority, registry,
 kernel identity and terminal RPC reached the authorized metadata boundary while
 leaving the journal unchanged. It did not create a replacement or perform a live
-handoff. Required canonical local checks, exact-head review and CI remain the
-publication gates; live Work Board acceptance remains open under #1416 and #1295.
+handoff. Live Work Board acceptance remains open under #1416 and #1295.
+
+Final canonical local validation ran `bash scripts/check-shared-host.sh` at
+`d9c12aa628e9473461710fbec962c3c9b68b5122` from 2026-10-09 00:42:57.801 UTC
+to 01:19:48.793 UTC. It exited 1: **FAIL**, with complete coverage, not a local
+full-suite pass. All 51 TypeScript projects passed. All 1,799 test files executed
+across 19 lanes: 28,003 tests passed, one failed, 24 skipped, and 134,741 assertions
+ran. All 178 real-HTTP files passed, including the consuming end-to-end controls.
+The sole failure was the unchanged Codex retirement fixture at
+`runtime/adapters/codex-cli/persistent/project-owner-retirement.test.ts:12`:
+reading `child.exited` threw `EBADF` from `epoll_ctl` before any retirement
+assertion. Its adjacent stronger live-process-to-retirement control passed.
+The failing file is unchanged from the branch base; the descriptor failure's
+cause remains unknown and is tracked separately in #1457. This evidence does not
+justify weakening or changing the recovery authority checks.
+
+The canonical log SHA-256 is
+`36ef1653eaf507de92106a9c6ba95628c83225d533395b795704f8155ef29b2c`.
+The measured suite input identity is
+`f57a448edd5d929fff756b2292439a3e7c068c7e9faea2793d77c22bbb3ff0e4`,
+unchanged through the run. The identity reader includes the Git revision in its
+preparation key (`open/wiring/project-build-dependencies.ts:126`). The subsequent
+documentation-only publication commit therefore has a different measured suite
+identity. No proof transfers to that revision: the local FAIL belongs to the
+tested revision above, and neither complete coverage nor this record is green
+full-suite proof. Dependency analysis exited 0 across 3,232 modules and 9,122
+dependencies, with eight existing ignored violations. Bounded native arbitration
+retains source GO while recording the local failure; exact publication-head CI
+must be green before merge. Deployment and live acceptance remain pending.
