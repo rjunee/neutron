@@ -1,7 +1,7 @@
 ---
 title: Quiesce the route-slot coverage fixture before DB close
 group: platform
-status: open
+status: done
 priority: P2
 cutover: false
 legacy_ref: "#1389"
@@ -32,8 +32,10 @@ about which fixture first emitted the historical CI error.
 - [x] A regression boots the real Open composer and holds an actually
       registered DB-using loop tick (the composed chunked-upload sweeper,
       held inside `markExpired` on a seeded expired `uploading` row) behind an
-      explicit barrier. While held, teardown is pending, graph shutdown and DB
-      close have not run, and the DB is usable. After release the real DB
+      explicit barrier, through the shared harness
+      `tests/support/held-sweeper-teardown.ts`. While held, teardown is
+      pending, graph shutdown and DB close have not run, no later cleanup has
+      been entered, and the DB is usable. After release the real DB
       write succeeds before close, teardown settles, and the loop is inactive.
       Progress is observed through ordered events, not timing.
 - [x] Over-refusal control: with every cleanup already settled, and an
