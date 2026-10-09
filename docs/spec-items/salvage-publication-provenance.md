@@ -146,3 +146,82 @@ completed-build reuse still follows the existing checkpoint and task bindings.
 - [x] Removing valid lineage inheritance or substituting an observational PR
   fails the corresponding consuming control; removing the SQL mode, chronology
   or anchor boundary fails its refusal control with the valid sibling passing.
+
+## Owned published retry through outer launch
+
+Tracked by #1476. A terminal predecessor can hold this card's witnessed
+publication while its latest host checkpoint still records a pending build or
+fix reservation: its native worker wrote the original result after the driver's
+acknowledgement was lost, or after a supported stop. That checkpoint remains
+ineligible for implementation reuse. The card's normal retry therefore starts
+fresh planning while carrying the publication receipt, strategy and task spend
+under `Card lineage after an intermediate failure`. The outer launcher refused
+such a retry as a foreign wrong-base branch before its first worker, for owned
+and unowned publications alike, and actual preparation could not add a worktree
+for a branch the predecessor's linked checkout still held.
+
+Outer launch may adopt a retained local branch that is not contained in the
+fetched base only when every fact below is re-established at launch from
+existing authority:
+
+- the run's `published_pr` is the exact same-card lineage receipt for its
+  project, repository, branch and PR mode; an observed or discovered PR never
+  qualifies;
+- the predecessor is a terminal attempt in that card's ledger for the same
+  project, repository and branch, with a valid terminal host checkpoint;
+- the predecessor's pending worker is settled by its original authenticated
+  evidence: the host-saved request, the exact armed reservation, and a completed
+  result at the canonical path that the live project-build trailer validator
+  accepts for that run, step, branch and worktree. Its attempt accounting may be
+  completed, unfinished (`ended_at` and `outcome` null) or explicitly `unknown`;
+  it is never rewritten to establish settlement;
+- no native-child lease, other worker ownership or other nonterminal run holds
+  the predecessor's work or the branch;
+- the local branch tip equals the settled head, descends from the predecessor's
+  base pin, and contains the published PR head observed OPEN on the same source
+  and target branches.
+
+The retry then pins the predecessor's base, keeps its own run identity, and
+starts fresh planning on the retained branch. Terminal phase, a process exit,
+elapsed time, a PR number or a matching branch name never establish settlement
+or ownership. Every other shape keeps the existing refusals, and an unknown Git
+observation refuses as UNKNOWN.
+
+Preparation re-establishes the same authority while holding the branch's
+existing durable reservation. When the predecessor's linked checkout still
+holds the branch, it is handed off through the existing worktree cleanup
+lifecycle: a clean, unlocked checkout that is exactly the predecessor's recorded
+worktree at the settled head is removed without force while the branch and every
+commit are kept. A dirty, locked, unverifiable or ambiguous checkout, another
+holder, a moved branch, an unavailable reservation or a changed observation
+refuses before any branch reset, checkout deletion, forced checkout or ownership
+release, and records the existing worktree-add diagnostic. Predecessor run rows,
+stage events, attempts, budgets and retained artifacts are unchanged.
+
+The retry receives current proof, review and pinned merge gates under its own
+identity. No prior approval, suite receipt, mutation proof or checkpoint carries
+because a PR exists.
+
+- [ ] The real board retry, through `dispatchBoardBoundBuild`, the outer launcher
+  and actual project preparation with the predecessor checkout still present,
+  reaches merged on the same PR with its published commits retained, fresh
+  planning, and the consumed strategy and task spend. Cover a completed attempt
+  whose driver acknowledgement was lost and an unfinished or `unknown` attempt
+  settled by its original authenticated result. Verify: `owned published retry`
+  cases in `open/__tests__/project-build-e2e.test.ts`.
+- [ ] The discovered-but-unowned sibling remains refused at outer launch, with
+  its PR, branch and checkout untouched and no worker dispatched.
+- [ ] Missing or altered request, result, reservation or publication authority;
+  an active native writer; another live owner; a dirty, locked or ambiguous
+  retained checkout; changed repository, card or branch; unknown Git
+  observations; and concurrent reservation acquisition each refuse without
+  branch reset, checkout deletion, forced checkout or ownership release.
+  Verify: `trident/published-retry-handoff.test.ts` and the preparation
+  controls in `open/__tests__/project-build-e2e.test.ts`.
+- [ ] The predecessor's pending checkpoint is still refused as a retry source;
+  the retry imports no checkpoint, approval or suite receipt. Verify:
+  `trident/build-mode-state.test.ts`.
+- [ ] Refusing every retry fails the owned positive; granting publication from
+  discovery fails the unowned negative; bypassing retained-checkout ownership or
+  settlement fails its active or unknown control. Each mutation is restored and
+  the focused suites pass again.

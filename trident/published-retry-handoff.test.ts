@@ -1,0 +1,314 @@
+/**
+ * Owned published retry through outer launch (#1476) — direct real-Git cases.
+ *
+ * The predecessor is a terminal PR-mode attempt whose latest host checkpoint
+ * still records a pending build or fix reservation while its original worker
+ * wrote a completed result. Its linked checkout still holds the branch, which
+ * carries the published PR head and (for a fix) an unpushed settled commit. The
+ * card's fresh retry carries the same-card publication receipt. `prepareLaunch`
+ * is the real outer launch seam; Git and the stores are real; only the GitHub
+ * PR read and the origin URL spelling are answered by the host stub.
+ */
+import { afterEach, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
+import { TridentRunStore, type TridentRun } from './store.ts'
+import { TridentAttemptLedger, type AttemptOutcome } from './attempt-ledger.ts'
+import { WorkBoardStore } from '@neutronai/work-board/store.ts'
+import { spawnCapture, type HostCommandResult } from './git-mode.ts'
+import { prepareLaunch, type PreparedLaunch } from './launch-preparation.ts'
+import { publishedRetryHandoff, readPublishedRetryHandoff } from './published-retry-handoff.ts'
+import { retryModeSource } from './build-mode-state.ts'
+
+const GIT_ID = ['-c', 'user.name=Trident Test', '-c', 'user.email=trident-test@neutron.local', '-c', 'commit.gpgsign=false']
+const cleanups: (() => void)[] = []
+afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup() })
+const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const PR = 7
+const BRANCH = 'trident/owned-published-retry'
+const REMOTE = 'https://github.com/example/project.git'
+
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const res = await spawnCapture(['git', ...GIT_ID, ...args], cwd)
+  if (!res.ok) throw new Error(`git ${args.join(' ')} failed: ${res.stderr || res.stdout}`)
+  return res.stdout.trim()
+}
+async function commit(repo: string, name: string): Promise<string> {
+  writeFileSync(join(repo, name), `${name}\n`)
+  await git(repo, '-C', repo, 'add', '-A')
+  await git(repo, '-C', repo, 'commit', '-qm', name)
+  return git(repo, '-C', repo, 'rev-parse', 'HEAD')
+}
+
+type Shape = { phase: 'build' | 'fix'; outcome: AttemptOutcome | null; ended: boolean; terminal: 'failed' | 'stopped' }
+const COMPLETED_BUILD: Shape = { phase: 'build', outcome: 'completed', ended: true, terminal: 'failed' }
+const UNFINISHED_FIX: Shape = { phase: 'fix', outcome: null, ended: false, terminal: 'stopped' }
+const UNKNOWN_FIX: Shape = { phase: 'fix', outcome: 'unknown', ended: true, terminal: 'failed' }
+
+async function world(shape: Shape = COMPLETED_BUILD, options: { published?: number | null; priorReceipt?: number | null } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'published-retry-handoff-'))
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+  const origin = join(dir, 'origin.git')
+  const repo = join(dir, 'repo')
+  const other = join(dir, 'other')
+  await git(dir, 'init', '--bare', '-q', '--initial-branch=main', origin)
+  await git(dir, 'clone', '-q', origin, repo)
+  const base = await commit(repo, 'seed')
+  await git(repo, '-C', repo, 'push', '-q', 'origin', 'main')
+  // The predecessor's linked checkout still holds the branch.
+  const worktree = join(repo, '.trident-worktrees', 'prior')
+  await git(repo, '-C', repo, 'worktree', 'add', '-q', '-b', BRANCH, worktree, base)
+  const published = await commit(worktree, 'published-build')
+  await git(worktree, '-C', worktree, 'push', '-q', 'origin', BRANCH)
+  // A settled fix commit the native worker left unpushed after the stop.
+  const settled = shape.phase === 'fix' ? await commit(worktree, 'settled-fix') : published
+  // Main moves on, so the retained branch is NOT contained in the fetched base.
+  await git(dir, 'clone', '-q', origin, other)
+  await commit(other, 'main-advance')
+  await git(other, '-C', other, 'push', '-q', 'origin', 'main')
+  // Observed before launch, so the launch's own base fetch is a no-op ref-wise.
+  await git(repo, '-C', repo, 'fetch', '-q', 'origin')
+
+  seedMigratedDb(join(dir, 'project.db'))
+  const db = ProjectDb.open(join(dir, 'project.db'))
+  cleanups.unshift(() => db.close())
+  const store = new TridentRunStore(db)
+  const board = new WorkBoardStore(db)
+  const ledger = new TridentAttemptLedger(db)
+  const card = await board.create('project', { title: 'owned published retry' })
+  const task = 'Repair the owned published retry lifecycle'
+  const prior = await store.create({ slug: 'owned-published-retry', project_slug: 'project', repo_path: repo, task,
+    branch: BRANCH, merge_mode: 'pr', execution_strategy: 'single' })
+  await board.attachRun('project', card.id, prior.id)
+  await store.update(prior.id, { worktree, base_sha: base, pr: PR,
+    published_pr: options.priorReceipt === undefined ? PR : options.priorReceipt })
+
+  const root = join(dir, 'builds', encodeURIComponent(prior.id))
+  mkdirSync(root, { recursive: true })
+  const role = shape.phase
+  const step = shape.phase === 'build' ? `${prior.id}:build:0` : `${prior.id}:fix:1`
+  const request = { model_id: 'opus', effort: 'high', cwd: worktree, writable: true, network: true,
+    tools: 'edit-and-run', thread: null, budget: { wall_ms: 1000 },
+    brief: { path: join(root, `${role}.strategy-v3.brief.${role}.host`), integrity: 'brief' },
+    result: { schema: 'project-build', path: join(root, `${role}.result`) },
+    run_id: prior.id, step_id: step, role, needs_approval_decision: false }
+  const files = {
+    journal: join(root, `attempt-request-${digest([prior.id, step, 'dispatch'])}.json`),
+    reservation: join(root, `claude-step-${digest([prior.id, step])}.json`),
+    result: request.result.path,
+  }
+  writeFileSync(files.journal, JSON.stringify({ request, provider: 'anthropic', placement: 'in-repl',
+    attribution: { phase: role, task_id: `${prior.id}:task:0`, head_sha: published, review_seat: null, requested_model: 'opus' } }))
+  writeFileSync(files.reservation, JSON.stringify(request) + '\n#dispatch-armed\n')
+  writeFileSync(files.result, JSON.stringify({ schema: 'project-build', run_id: prior.id, step_id: step, kind: 'completed',
+    result: { head: settled, diff: 'diff', pr: { number: PR, head: published, state: 'OPEN' }, payload: {
+      worktreePath: worktree, branch: BRANCH, commitSha: settled, prNumber: PR, diffFile: 'diff',
+      testsPassed: false, mutationClaim: null, suiteOutcome: 'deferred' } } }))
+  const key = { run_id: prior.id, step_id: step, attempt_id: 'dispatch' }
+  await ledger.admit({ ...key, phase: 'build', task_id: `${prior.id}:task:0`, head_sha: published, role,
+    review_seat: null, provider: 'anthropic', requested_model: 'opus', resolved_model: 'opus', placement: 'in-repl', queued_at: 1 })
+  await ledger.lifecycle(key, { prepared_at: 2, started_at: 3,
+    ...(shape.ended ? { ended_at: 4 } : {}), ...(shape.outcome !== null ? { outcome: shape.outcome } : {}) })
+  const checkpoint = shape.phase === 'build'
+    ? { head: null, stage: 'built', round: 0, replansUsed: 0, findings: [], previousFindings: [] }
+    : { head: published, stage: 'rejected', round: 1, replansUsed: 0,
+      findings: [{ kind: 'code', actionable: true, text: 'fix it' }], previousFindings: [] }
+  await store.recordStageEvent(prior.id, 'build-mode-state', JSON.stringify({ runId: prior.id, branch: BRANCH, base,
+    repo, worktree, projectSlug: 'project', mergeMode: 'pr', iteration: 0, checkpoint: { ...checkpoint,
+      pending: { phase: role, step_id: step, recovery: { request, inputs: { workers: { [role]: { provider: 'anthropic', request } } },
+        round: checkpoint.round, snapshot: { head: checkpoint.head ?? base, diff: '', pr: null }, previous: null, findings: [],
+        planner: 'full', plan: null, executionStrategy: 'single', previousReview: null, reviewBaseline: 'none' } } } }))
+  await store.update(prior.id, { phase: shape.terminal })
+  await board.detachRun('project', prior.id, 'failed', { pr: PR, pr_url: null })
+
+  const retry = await store.create({ slug: 'owned-published-retry', project_slug: 'project', repo_path: repo, task,
+    branch: BRANCH, merge_mode: 'pr', execution_strategy: 'single',
+    published_pr: options.published === undefined ? PR : options.published })
+  await board.attachRun('project', card.id, retry.id)
+
+  const prs = new Map<number, Record<string, unknown>>([[PR, { number: PR, url: `https://github.com/example/project/pull/${PR}`,
+    headRefOid: published, state: 'OPEN', headRefName: BRANCH, baseRefName: 'main', isCrossRepository: false }]])
+  const faults: { gitExit?: { match: (argv: string[]) => boolean; result: HostCommandResult } } = {}
+  const commands: string[][] = []
+  const run_host = Object.assign(async (argv: string[], cwd?: string): Promise<HostCommandResult> => {
+    commands.push(argv)
+    if (faults.gitExit?.match(argv)) return faults.gitExit.result
+    if (argv[0] === 'gh' && argv[1] === 'pr' && argv[2] === 'view') {
+      const pr = prs.get(Number(argv[3]))
+      return pr ? { ok: true, stdout: JSON.stringify(pr), stderr: '', exit_code: 0 }
+        : { ok: false, stdout: '', stderr: 'no pull requests found', exit_code: 1 }
+    }
+    if (argv.includes('remote') && argv.includes('get-url')) return { ok: true, stdout: `${REMOTE}\n`, stderr: '', exit_code: 0 }
+    return spawnCapture(argv, cwd)
+  }, { writesDiffOutput: true as const })
+  const observe = async () => ({
+    refs: await git(repo, '-C', repo, 'for-each-ref', '--format=%(refname) %(objectname)'),
+    worktrees: await git(repo, '-C', repo, 'worktree', 'list', '--porcelain'),
+    status: await git(worktree, '-C', worktree, 'status', '--porcelain'),
+    prior: store.get(prior.id), events: store.stageEvents(prior.id), attempts: store.attempts(prior.id),
+  })
+  let settledWitness = (): boolean => true
+  const launch = (run: TridentRun = store.get(retry.id)!, reader = (r: TridentRun) =>
+    readPublishedRetryHandoff(store, () => settledWitness(), r)) => prepareLaunch(run, {
+    run_host, sleep: async () => {}, list_stage_events: id => store.stageEvents(id),
+    read_published_retry_handoff: reader,
+  }, {
+    resolveBase: async () => 'main', detectExistingPr: async () => null, mint: () => 'wf-retry',
+    failedRun: (r, reason) => ({ ...r, phase: 'failed', failure_reason: reason }),
+    resumeHeadUnreadable: (r, cause) => ({ ...r, phase: 'failed', failure_reason: cause }),
+    resolveResumeLiveHead: async () => '', resumeHeadDecides: () => false,
+  })
+  return { dir, db, store, board, ledger, card, prior: store.get(prior.id)!, retry: store.get(retry.id)!, repo, worktree,
+    base, published, settled, files, prs, faults, commands, observe, launch, root, request,
+    setWitness: (fn: () => boolean) => { settledWitness = fn } }
+}
+
+const refusal = (outcome: unknown): string =>
+  (outcome as { run?: TridentRun }).run?.failure_reason ?? ''
+const prepared = (outcome: unknown): PreparedLaunch => {
+  expect((outcome as { run?: TridentRun }).run?.failure_reason ?? null).toBeNull()
+  return outcome as PreparedLaunch
+}
+const WRONG_BASE = "refusing to build on another lane's work"
+
+for (const [name, shape] of [['completed accounting with a lost driver acknowledgement', COMPLETED_BUILD],
+  ['unfinished accounting (ended_at and outcome null) of a fix stopped through the supported control', UNFINISHED_FIX],
+  ['an explicitly unknown fix attempt', UNKNOWN_FIX]] as const) {
+  test(`owned published retry adopts the retained branch at outer launch: ${name}`, async () => {
+    const f = await world(shape)
+    const before = await f.observe()
+    const outcome = prepared(await f.launch())
+    expect(outcome.base_sha).toBe(f.base)
+    expect(outcome.pinnedRun.base_sha).toBe(f.base)
+    expect(outcome.pinnedRun.base_behind).toBe(1)
+    expect(outcome.resume_checkpoint).toBeNull()
+    expect(outcome.resume_checkpoint_head).toBeNull()
+    expect(outcome.resume_findings).toBeNull()
+    // Nothing moved: refs, linked checkouts, the checkout's files and every predecessor row.
+    expect(await f.observe()).toEqual(before)
+    // The pending checkpoint is still not a retry source.
+    expect(retryModeSource(f.store, f.prior)).toBeNull()
+  })
+}
+
+test('the reproduced refusal: without the composed authority the same retry is refused as another lane', async () => {
+  const f = await world(UNFINISHED_FIX)
+  const before = await f.observe()
+  expect(refusal(await f.launch(undefined, () => null))).toContain(WRONG_BASE)
+  expect(await f.observe()).toEqual(before)
+})
+
+for (const unowned of ['no receipt', 'observed pr only', 'discovered receipt mismatch'] as const) {
+  test(`an unowned publication keeps the wrong-base refusal: ${unowned}`, async () => {
+    const f = await world(COMPLETED_BUILD, unowned === 'no receipt' ? { published: null }
+      : unowned === 'observed pr only' ? { published: null, priorReceipt: null } : { published: PR + 1 })
+    if (unowned === 'discovered receipt mismatch') f.prs.set(PR + 1, { ...f.prs.get(PR)!, number: PR + 1 })
+    const before = await f.observe()
+    expect(publishedRetryHandoff(f.store, f.retry)).toBeNull()
+    expect(refusal(await f.launch())).toContain(WRONG_BASE)
+    expect(await f.observe()).toEqual(before)
+  })
+}
+
+const authorityFaults: Record<string, (f: Awaited<ReturnType<typeof world>>) => Promise<void> | void> = {
+  'missing journal': f => rmSync(f.files.journal),
+  'altered request journal': f => writeFileSync(f.files.journal, JSON.stringify({ request: { ...f.request, model_id: 'other' },
+    provider: 'anthropic', placement: 'in-repl' })),
+  'missing result': f => rmSync(f.files.result),
+  'altered result head': async f => writeFileSync(f.files.result, (await Bun.file(f.files.result).text()).replaceAll(f.settled, f.base)),
+  'blocked result': async f => writeFileSync(f.files.result, JSON.stringify({ ...JSON.parse(await Bun.file(f.files.result).text()),
+    kind: 'blocked', on: 'stopped' })),
+  'unarmed reservation': f => writeFileSync(f.files.reservation, JSON.stringify(f.request) + '\n'),
+  'missing reservation': f => rmSync(f.files.reservation),
+  'failed attempt outcome': async f => { await f.db.run(`UPDATE code_trident_attempts SET outcome = 'failed', ended_at = 9 WHERE run_id = ?`, [f.prior.id]) },
+  'nonterminal predecessor': async f => {
+    await f.db.run(`UPDATE code_trident_runs SET phase = 'task-build', slug = 'prior-live' WHERE id = ?`, [f.prior.id])
+  },
+  'predecessor completed as done': async f => { await f.store.update(f.prior.id, { phase: 'done' }) },
+  'changed repository': async f => { await f.db.run('UPDATE code_trident_runs SET repo_path = ? WHERE id = ?', [join(f.dir, 'other'), f.prior.id]) },
+  'changed branch': async f => { await f.store.update(f.prior.id, { branch: 'trident/another' }) },
+  'changed card': async f => {
+    const card = await f.board.create('project', { title: 'another card' })
+    await f.board.attachRun('project', card.id, f.retry.id)
+    await f.db.run('UPDATE work_board_items SET linked_run_id = NULL WHERE id = ?', [f.card.id])
+  },
+  'another live owner': async f => {
+    await f.store.create({ slug: 'sibling', project_slug: 'project', repo_path: f.repo, task: 'sibling', branch: BRANCH, merge_mode: 'pr' })
+  },
+  'reservation held by another run': async f => { await f.store.reserveBranch({ repo_path: f.repo, branch: BRANCH, run_id: 'another-run', purpose: 'salvage' }) },
+  'another unfinished predecessor worker': async f => {
+    const key = { run_id: f.prior.id, step_id: `${f.prior.id}:review:1:head:${f.settled}`, attempt_id: 'dispatch' }
+    await f.ledger.admit({ ...key, phase: 'review_rubric', task_id: `${f.prior.id}:task:0`, head_sha: f.settled, role: 'review',
+      review_seat: null, provider: 'anthropic', requested_model: 'opus', resolved_model: 'opus', placement: 'in-repl', queued_at: 5 })
+  },
+  'host settlement witness refuses (live lease or invalid trailer)': f => f.setWitness(() => false),
+}
+for (const [fault, apply] of Object.entries(authorityFaults)) {
+  test(`owned published retry refuses without mutation: ${fault}`, async () => {
+    const f = await world(UNFINISHED_FIX)
+    await apply(f)
+    const before = await f.observe()
+    const outcome = await f.launch()
+    expect(refusal(outcome)).toContain(WRONG_BASE)
+    expect(await f.observe()).toEqual(before)
+  })
+}
+
+test('owned published retry refuses when the branch tip is not the settled head', async () => {
+  const f = await world(UNFINISHED_FIX)
+  await commit(f.worktree, 'foreign-after-settlement')
+  expect(refusal(await f.launch())).toContain(WRONG_BASE)
+})
+
+for (const pr of ['closed', 'wrong branch', 'not contained', 'unreadable'] as const) {
+  test(`owned published retry refuses an owned PR that is ${pr}`, async () => {
+    const f = await world(UNFINISHED_FIX)
+    if (pr === 'closed') f.prs.set(PR, { ...f.prs.get(PR)!, state: 'CLOSED' })
+    if (pr === 'wrong branch') f.prs.set(PR, { ...f.prs.get(PR)!, headRefName: 'trident/elsewhere' })
+    if (pr === 'not contained') f.prs.set(PR, { ...f.prs.get(PR)!, headRefOid: await git(f.dir, '-C', join(f.dir, 'other'), 'rev-parse', 'HEAD') })
+    if (pr === 'unreadable') f.prs.delete(PR)
+    const before = await f.observe()
+    const reason = refusal(await f.launch())
+    expect(reason).toContain(pr === 'unreadable' ? 'UNKNOWN authorises nothing' : WRONG_BASE)
+    expect(await f.observe()).toEqual(before)
+  })
+}
+
+for (const failure of ['exit 128', 'watchdog timeout'] as const) {
+  test(`an unknown ancestry observation refuses as UNKNOWN: ${failure}`, async () => {
+    const f = await world(UNFINISHED_FIX)
+    f.faults.gitExit = {
+      match: argv => argv.includes('--is-ancestor') && argv.at(-2) === f.base,
+      result: failure === 'exit 128'
+        ? { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+        : { ok: false, stdout: '', stderr: '', exit_code: 124, timed_out: true },
+    }
+    const before = await f.observe()
+    const reason = refusal(await f.launch())
+    expect(reason).toContain('owned published retry could NOT be established')
+    expect(reason).toContain('UNKNOWN authorises nothing')
+    expect(await f.observe()).toEqual(before)
+  })
+}
+
+test('an authority that changes between the first read and the post-observation re-read refuses', async () => {
+  const f = await world(UNFINISHED_FIX)
+  let reads = 0
+  const outcome = await f.launch(undefined, run => {
+    reads++
+    const handoff = readPublishedRetryHandoff(f.store, () => true, run)
+    return handoff && reads > 1 ? { ...handoff, settledHead: f.base } : handoff
+  })
+  expect(reads).toBe(2)
+  expect(refusal(outcome)).toContain(WRONG_BASE)
+})
+
+test('seeded or recovery launches never consult the published retry authority', async () => {
+  const f = await world(COMPLETED_BUILD)
+  await f.store.recordStageEvent(f.retry.id, 'build-retry-source', JSON.stringify({ priorRunId: f.prior.id }))
+  expect(publishedRetryHandoff(f.store, f.retry)).toBeNull()
+})

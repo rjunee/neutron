@@ -139,6 +139,14 @@ export interface MiscCompositionInput {
      */
     drain_dispatch_holds?: () => Promise<void>
     /**
+     * #1476 — the host half of owned published retry settlement: the live
+     * project-build trailer validator and admission leases, which only the
+     * composer can see. Trident composes it with its own exact authority at
+     * outer launch. Absent → no retained branch is ever adopted (the existing
+     * wrong-base refusal), so a missing composition cannot grant anything.
+     */
+    published_retry_settled?: import('@neutronai/trident/published-retry-handoff.ts').PublishedRetrySettlement
+    /**
      * M1 UX REDESIGN — the LIVE-PROGRESS observer (see
      * `trident/tick.ts` `TridentTransitionHook`). Fired once per tick for every
      * run whose observable progress advanced (a checkpoint crossing
