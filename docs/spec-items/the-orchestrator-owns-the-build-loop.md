@@ -93,6 +93,26 @@ is the thing being rebuilt.
       reading the old file top to bottom — and pin each. A gate silently lost in a rewrite
       is the most likely real defect in this whole item.
 
+- [ ] **A child discovered after observation can discharge original ownership.**
+      For a terminal run with an `unknown` canonical native attempt, an original
+      authenticated `submission-started` dispatch may recover its unique child
+      through the exact surviving native parent's canonical transcript location.
+      The full first-request envelope must match; original session, PID and kernel
+      birth identity must survive, including after gateway wrapper adoption.
+      Require the original canonical armed reservation and the ordinary validated
+      completed or blocked result before releasing only the exact lease. Recheck
+      parent and child binding before release. Preserve all dispatch records,
+      attempts, results, workflow state and budgets; send no native input.
+      Missing, foreign, duplicate or malformed binding, altered request/signature,
+      parent/process replacement, changed lease/reservation/result, unresolved
+      parents and ongoing work retain ownership. An unrelated lease survives and
+      repeated reconciliation is idempotent. A sibling planner's real host
+      capability must refuse before recovery and become usable afterward.
+      Verify: `bun test open/wiring/__tests__/claude-native-dispatch-boot.test.ts`
+      (late submission controls, planner consumption, Open startup and periodic
+      recovery), and existing passive recovery consumers in
+      `open/__tests__/project-build-e2e.test.ts`, with bidirectional mutations.
+
 - [ ] **Invalidated review evidence can settle its original child's ownership.**
       Passive reconciliation of a terminal run releases only the exact native
       review or synthesis lease when its original signed dispatch, canonical

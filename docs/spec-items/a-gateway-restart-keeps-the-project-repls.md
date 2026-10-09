@@ -524,9 +524,18 @@ alone is not a workflow-continuation receipt.
 A native child may finish after the host stops observing its bounded request.
 The failed workflow remains failed. Startup and periodic recovery inspect such
 terminal runs without dispatching another actor or synthesizing a conversation.
-The original signed child-bound dispatch must authenticate the full stored
-lease and request; the canonical attempt must agree on provider, placement,
-role and model. An exact armed reservation and a result at the canonical role
+The original signed dispatch must authenticate the full stored lease and request;
+the canonical attempt must agree on provider, placement, role and model. A signed
+`child-bound` record already supplies child identity. For `submission-started`
+with an `unknown` canonical attempt, passive recovery may instead observe one
+unique child whose first transcript envelope binds the full original request.
+The transcript location comes from the authoritative live parent, whose original
+session id, PID and kernel birth identity must match. Gateway adoption may change
+the wrapper generation while retaining that exact native process. Recheck the
+live parent and unique binding before release; unresolved, replaced, foreign,
+missing, duplicate or malformed evidence retains ownership. Transcript usage or
+an `end_turn` record alone never establishes completion, and observation never
+rewrites the signed journal into `child-bound`. An exact armed reservation and a result at the canonical role
 path must then pass the same envelope and payload validators as live execution.
 This uses the existing validated-result completion contract, not parent-process
 death: the persistent project REPL can remain alive after its native task ends.
