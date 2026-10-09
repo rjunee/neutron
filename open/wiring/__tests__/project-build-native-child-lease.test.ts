@@ -12,6 +12,7 @@ import * as capacity from '@neutronai/runtime/workers/claude-capacity-client.ts'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { setTimeout as delay } from 'node:timers/promises'
 import * as fs from 'node:fs'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
@@ -195,10 +196,18 @@ test('consuming recovery releases an authenticated original pre-input refusal af
   expect(f.observedDuringTurn).toEqual([])
 })
 
-test('consuming recovery retains submitted work and a forged not-submitted flag cannot release it', async () => {
+test.each([0, 75])('consuming recovery retains submitted work and a forged not-submitted flag cannot release it (%sms acknowledgement)', async acknowledgementMs => {
   const f = await fixture(); f.registerSession(); await Promise.resolve()
   await writeFile(f.request.result.path, '{}')
-  expect((await f.captured().actingTurn(f.turn())).kind).toBe('turn-ended')
+  if (acknowledgementMs > 0) {
+    const session = await pool.get(`lease-session-${f.row.id}`)!
+    const submit = session!.child.submitLine!
+    session!.child.submitLine = async (...args) => { await submit(...args); await delay(acknowledgementMs) }
+  }
+  // This checks submitted authority and forgery, not deadline expiry. The delayed
+  // acknowledgement proves that scheduling beyond the 50ms uncertainty budget
+  // cannot accidentally turn this positive control into an unknown outcome.
+  expect((await f.captured().actingTurn({ ...f.turn(), timeout_ms: 5_000 })).kind).toBe('turn-ended')
   expect(f.childLeases()).toHaveLength(1)
   const state = join(f.context.stateRoot, encodeURIComponent(f.row.id))
   const receipt = readClaudeNativeDispatchReceipt(state, f.request) as SignedNativeDispatchRecord

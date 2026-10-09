@@ -65,6 +65,20 @@ ordinary input remains refused and the lease stays unchanged. Replacing the real
 chat census with a constant false was assertion-killed, and the restored control
 passed. Open typechecking passed again after the test-only correction.
 
+A later full batch passed every new control but exposed an existing positive
+receipt-recovery test using the fixture's 50ms uncertainty budget. Its original
+failure recorded only `unknown`, not the detail. A controlled 75ms native
+acknowledgement reproduced `Claude trailer not observed before cancellation or
+host budget expiry`; a 5-second budget reached `turn-ended` with the same signed
+submission phase, one input and retained lease. Only that non-deadline positive
+now uses the file's existing 5-second precedent, for both immediate and delayed
+acknowledgements. All original receipt-forgery, lease, input, spawn and recovery
+assertions remain, as do the short-deadline uncertainty controls. Restoring the
+short positive budget was assertion-killed. The corrected canonical ordered
+100-file batch passed 1,473 tests and 6,621 assertions; the restored focused file
+passed eight tests and 54 assertions, and Open typechecking passed. Production
+code did not change for either fixture correction.
+
 A separate read-only rehearsal against the deployed completed authority, registry,
 kernel identity and terminal RPC reached the authorized metadata boundary while
 leaving the journal unchanged. It did not create a replacement or perform a live
