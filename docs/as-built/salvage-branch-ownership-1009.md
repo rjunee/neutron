@@ -24,8 +24,8 @@ outside them. Normal completion and exceptions release the exact token.
 An interrupted claim remains held across process/database reopening and cannot
 be stolen by age or a different token. This change does not provide automatic
 recovery of an interrupted branch reservation or settle native-child ownership.
-Ordinary held cards remain queued and retry after the operation releases its
-claim; unrelated branches remain available. Recovery contention returns a typed
+Ordinary held cards remain queued and can be retried after the operation
+releases its claim; unrelated branches remain available. Recovery contention returns a typed
 refusal without changing the card or consuming its one-use source: a competing
 refusal write would invalidate the winning admission's captured card version.
 The same authorized recovery succeeds after the holder releases its claim.
