@@ -4,15 +4,19 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, projectInstalledTreeIdentity, projectSuiteIdentity, projectSuiteIdentityMeasurement as measureSuiteIdentity } from '../wiring/project-build-dependencies.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { isolatePackageLauncherEnvironment } from './package-launcher-fixture-env.ts'
 
 const roots: string[] = []
 let outerShard: string | undefined
+let restoreLauncherEnvironment: () => void
 beforeEach(() => {
+  restoreLauncherEnvironment = isolatePackageLauncherEnvironment()
   // CI shards this test file; the nested fixture represents a complete suite.
   outerShard = process.env.NEUTRON_TEST_SHARD
   delete process.env.NEUTRON_TEST_SHARD
 })
 afterEach(() => {
+  restoreLauncherEnvironment()
   if (outerShard === undefined) delete process.env.NEUTRON_TEST_SHARD
   else process.env.NEUTRON_TEST_SHARD = outerShard
 })
