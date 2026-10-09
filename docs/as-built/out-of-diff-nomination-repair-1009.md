@@ -44,9 +44,30 @@ fixture assigned `undefined` to an optional property under
 suite was not started. Both resets now delete the optional property. The failed
 receipt remains failed.
 
+The corrected candidate, `ed524131e69f052ca0dfd9433f15885fee294259`, completed
+`bash scripts/check-shared-host.sh` with the canonical jobs=4/chunk-size=100
+profile. Lint and all 51 TypeScript configurations passed. The coverage audit
+recorded all 1,800 discovered files executed: 1,557 general, 22 database, 43
+device and 178 HTTP files. Summing the final batch summaries gives 28,012 passed,
+24 skipped and one failed. The sole failure is the previously recorded #1457
+`EBADF`/`epoll_ctl` at
+`runtime/adapters/codex-cli/persistent/project-owner-retirement.test.ts:12`,
+while accessing `child.exited`; its cause remains unproved. The complete local
+gate exited 1 and remains **FAIL**. Its measured suite input identity stayed
+`6a6eabae249cceba50c684698f0c9c3923d9eba253adedf9dcfbc217a760ea95`.
+
+All 603 project-build consuming cases passed within that full run, including
+the five new fresh/retry nomination cases. The database and device lanes passed
+504 and 434 cases respectively. `bash scripts/ci/depcruise.sh` reported no new
+violations (eight known violations ignored). The full local privacy scan exited
+1 with 452 findings, including the untracked worktree metadata pointer; none of
+the five changed files is named in its report. This is not a clean privacy
+receipt, and exact-head CI remains required.
+
 Independent native and bounded cross-model reviews approved the initial code.
 Non-blocking review notes are tracked in #1467. The corrected 20-case consuming
-matrix passed again with 324 assertions. The corrected local
-check, final-head review, CI, deployment and a fresh unattended Work Board retry
-remain pending at this stage. Focused test results
-are not live autonomous acceptance; #1416 and the cutover acceptance stay open.
+matrix also passed separately with 324 assertions. Only this validation record
+changed after the corrected complete local check. Final-head review, CI,
+deployment and a fresh unattended Work Board retry remain pending at this stage.
+These results are not live autonomous acceptance; #1416 and cutover acceptance
+stay open.
