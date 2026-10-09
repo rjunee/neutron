@@ -736,10 +736,33 @@ quarantined input; opening it does not redispatch the retired workflow. Permanen
 run/step denial survives new tokens, generations, gateway restart and duplicate
 requests. Normal parent lifecycle and composer guards remain authoritative.
 
+On a project-workspace backend, completed quarantine must also release the exact
+historical Chat placement claim without closing its pane. A prepared quarantine
+marker is insufficient: require the canonical completed operation, retained signed
+preparation, exact scope/session/parent generation and current process identity,
+and the unique registry-to-pane join. Revalidate the live workspace owner token,
+Chat pane placement and journal revision before a durable metadata-only compare
+and update. Keep the old pane and process, transcript, registry row, unrelated
+workers and other scopes unchanged. Record this as quarantined Chat history,
+separate from dead-owner shell relics; no automatic relic cleanup may close it.
+A manager restarted between relinquishment and fresh placement must recover the
+same available Chat slot. The normal registered backend and lifecycle then place
+one fresh native conversation without resume or replay. Another live owner,
+Codex ownership, ambiguous registry, changed process/pane/journal, incomplete
+operation or unavailable authority refuses without changing ownership.
+
+
 - [ ] A complete zero-admission original scope can be quarantined and its exact
       terminal planner lease consumed with parent process and unknown native
       outcome preserved. A fresh conversation can perform new canonical work
       without loading the quarantined input; unrelated sessions remain usable.
+- [ ] The production conversation wrapper, scope lifecycle and project-workspace
+      manager consume a completed quarantine and create one fresh registered Chat
+      while preserving the old live pane. A restarted manager retains that result.
+      Prepared-only, wrong-scope/session/process/pane, unrelated live-owner and
+      journal-race controls refuse. Removing completed authority or exact identity
+      checks must fail opposing controls; disabling relinquishment must fail the
+      valid fresh-conversation path.
 - [ ] Any admission in current or archived history, missing/corrupt history,
       mismatched routing/source/session/lease or forged authority refuses.
       Positive historical-admission controls must fail an omission mutation.

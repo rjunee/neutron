@@ -1,3 +1,4 @@
+import { completedConversationQuarantine } from './wiring/never-admitted-planner-retirement.ts'
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
@@ -1293,6 +1294,8 @@ export function buildOpenGraphComposer(
     const ownerTopicRoots = [webTopicId(OWNER_USER_ID), appWsTopicId(OWNER_USER_ID)]
     const projectScopeLifecycle = createProjectScopeLifecycle({
       admission: projectAdmission,
+      completedConversationQuarantine: (scope, sessionId) => completedConversationQuarantine(
+        { authority: options.nativeHostRecoveryAuthority, admission: projectAdmission }, scope, sessionId),
       isConversationQuarantined: sessionId => projectAdmission.maintenance.isConversationQuarantined(sessionId),
       liveness: () => livenessHolder.surface,
       // Read-only awake evidence beyond the leases: pending tool approvals (no

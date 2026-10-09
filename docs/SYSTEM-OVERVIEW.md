@@ -102,7 +102,13 @@ recovery keeps the fences and leases.
 The quarantined parent is detached without process termination, registry deletion
 or native input. Adoption, continuation, watchdog replacement and pending-input
 replay refuse its identity. Canonical subsequent work resolves a fresh conversation
-and native session, preserving the old transcript and pane. Preparation refuses
+and native session, preserving the old transcript and pane. On project-workspace
+backends, the completed canonical operation and unique preserved registry/pane
+identity license a metadata-only Chat handoff. The manager rechecks the live
+workspace, pane and process identities under its journal comparison, retains the
+old pane in distinct quarantined history, and makes the Chat slot available even
+after manager restart. A preparation marker alone cannot release that claim;
+quarantined history is excluded from dead-shell cleanup. Preparation refuses
 unrelated or ambiguous work; its only occupied-slot allowance positively matches
 the exact retained workspace. The private capacity authority also refuses any
 current or future relay registration for the quarantined conversation. See the

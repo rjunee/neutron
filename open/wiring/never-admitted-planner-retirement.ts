@@ -8,6 +8,7 @@ import { inspectConversationQuarantine, quarantinePersistentConversation } from 
 import { readClaudeNativeDispatchReceipt, verifyNativeDispatchSubmissionStarted, type SignedNativeDispatchRecord } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { verifyNeverAdmittedPlannerRetirement, verifyNeverAdmittedPlannerPreparation, type NeverAdmittedPlannerRetirement, type NeverAdmittedPlannerAuthority } from '@neutronai/runtime/workers/never-admitted-planner-retirement.ts'
 import { plannerRetirementDigest, verifyPlannerAuthorityRetirement } from '@neutronai/runtime/workers/planner-authority-retirement.ts'
+import type { CompletedConversationQuarantine } from '@neutronai/runtime/adapters/claude-code/persistent/quarantined-chat.ts'
 import type { AdmissionLeaseRow } from '@neutronai/gateway/project-admission-store.ts'
 import { appWsProjectTopicId } from '@neutronai/wire-types/topic-id.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
@@ -62,6 +63,29 @@ function conversationAuthority(options: PlannerAuthorityRetirementOptions, body:
           operationId: retirementOperationId, authorizationDigest: plannerRetirementDigest(authorization), nativeLoop: 'unknown', outcome: 'unknown' })) return
     }
     return entries.map(entry => entry.lease)
+  } catch { return }
+}
+
+/** A read-only lifecycle grant from an already committed recovery, never from
+ * the earlier quarantine tombstone. The installation supplies both trust pins. */
+export function completedConversationQuarantine(options: Pick<PlannerAuthorityRetirementOptions, 'authority' | 'admission'>,
+  projectId: string | null, sessionId: string, capacity: ClaudeCapacityPin | undefined = loadClaudeCapacityPin()):
+  CompletedConversationQuarantine | undefined {
+  try {
+    const authority = options.authority
+    if (!authority || !capacity) return
+    const row = options.admission.maintenance.completedConversationQuarantine(
+      { ownerHandle: options.admission.ownerHandle, projectId }, sessionId)
+    if (!row) return
+    const preparation: unknown = JSON.parse(row.authorization), completion = JSON.parse(row.completion)
+    if (!verifyNeverAdmittedPlannerPreparation(preparation, authority, capacity)
+      || preparation.body.operationId !== row.operationId || preparation.body.parent.sessionId !== sessionId
+      || preparation.body.lease.scope.ownerHandle !== options.admission.ownerHandle
+      || preparation.body.lease.scope.projectId !== projectId
+      || completion.version !== 1 || completion.kind !== 'planner-authority-retirement-consumed'
+      || completion.operationId !== row.operationId || completion.nativeLoop !== 'unknown' || completion.outcome !== 'unknown'
+      || typeof completion.authorizationDigest !== 'string' || !/^[a-f0-9]{64}$/.test(completion.authorizationDigest)) return
+    return { operationId: row.operationId, parent: preparation.body.parent }
   } catch { return }
 }
 

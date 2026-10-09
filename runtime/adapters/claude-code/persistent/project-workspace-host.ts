@@ -1,7 +1,7 @@
 import { isAbsolute } from 'node:path'
 import { createHerdrRpc } from './herdr-client.ts'
 import { HerdrHost, type HerdrHostDeps } from './herdr-host.ts'
-import { ProjectWorkspaceManager, type ChatInspection, type ProjectPanePlacement, type WorkspaceRetirement } from './project-workspaces.ts'
+import { ProjectWorkspaceManager, type ChatInspection, type ProjectPanePlacement, type WorkspaceRetirement, type QuarantinedChatIdentity } from './project-workspaces.ts'
 import type { PtyHost, PtySpawnOpts } from './pty-host.ts'
 
 /** Serializable across the durable Codex helper boundary. Null alone is General. */
@@ -22,12 +22,14 @@ export interface ConversationTerminal {
   placementFor(conversationProjectId: string | null): ProjectPanePlacement
   /** #1226 sleep: a READ-ONLY sample of the scope's Chat slot through the shared
    * manager. Present only with the strict host; it never closes anything. */
+  relinquishQuarantinedChat?(scope: string | null, identity: QuarantinedChatIdentity, authorized: () => boolean): Promise<boolean>
   inspectChat?(conversationProjectId: string | null): Promise<ChatInspection>
   retireEmptyWorkspace?(conversationProjectId: string | null, expected: ChatInspection, canRetire?: () => boolean): Promise<WorkspaceRetirement>
 }
 
 /** The strict host's read-only Chat inspection (#1226 sleep). */
 export interface ProjectChatInspector {
+  relinquishQuarantinedChat?(placement: ProjectPanePlacement, identity: QuarantinedChatIdentity, authorized: () => boolean): Promise<boolean>
   relinquishDeadChat?(placement: ProjectPanePlacement, pane: string, commit: () => boolean): Promise<boolean>
   inspectChat(placement: ProjectPanePlacement): Promise<ChatInspection>
   retireEmptyWorkspace?(placement: ProjectPanePlacement, expected: ChatInspection, canRetire?: () => boolean): Promise<WorkspaceRetirement>
@@ -48,6 +50,10 @@ export function createProjectWorkspaceHost(journalPath: string,
     async relinquishDeadChat(placement: ProjectPanePlacement, pane: string, commit: () => boolean): Promise<boolean> {
       const client = await (deps.connect ?? (async () => createHerdrRpc()))()
       return manager.relinquishDeadChat(client, placement, pane, commit)
+    }
+    async relinquishQuarantinedChat(placement: ProjectPanePlacement, identity: QuarantinedChatIdentity, authorized: () => boolean): Promise<boolean> {
+      const client = await (deps.connect ?? (async () => createHerdrRpc()))()
+      return manager.relinquishQuarantinedChat(client, placement, identity, authorized)
     }
     override async spawn(argv: string[], options: PtySpawnOpts) {
       if (options.projectPlacement === undefined) throw new Error('Project workspace host requires explicit placement')

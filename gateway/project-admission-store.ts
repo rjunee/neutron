@@ -51,6 +51,18 @@ export class ProjectAdmissionStore {
     return Boolean(this.db.get('SELECT 1 FROM native_conversation_quarantines WHERE session_id = ?', [sessionId]));
   }
 
+  /** Only the atomic completed consumer can authorize a fresh terminal slot.
+   * A preparation tombstone alone still denies reuse but cannot release Chat. */
+  completedConversationQuarantine(scope: ProjectAdmissionScope, sessionId: string):
+    { operationId: string; authorization: string; completion: string } | undefined {
+    const row = this.db.get<{ operation_id: string; authorization: string; completion: string }>(`
+      SELECT q.operation_id, q.authorization, r.completion FROM native_conversation_quarantines q
+      JOIN planner_authority_retirements r ON r.operation_id = q.operation_id
+        AND r.scope_key = q.scope_key AND r.authorization = q.authorization
+      WHERE q.session_id = ? AND q.scope_key = ? AND r.completion IS NOT NULL`, [sessionId, scopeKey(scope)]);
+    return row ? { operationId: row.operation_id, authorization: row.authorization, completion: row.completion } : undefined;
+  }
+
   isConversationRetired(scope: ProjectAdmissionScope, workRef: string): boolean {
     return Boolean(this.db.get('SELECT 1 FROM conversation_admission_retirements WHERE scope_key = ? AND work_ref = ?', [scopeKey(scope), workRef]));
   }
