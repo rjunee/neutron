@@ -147,6 +147,7 @@ branch is cut (standard §3.1, §3.2).
 | [`build-timeline-core`](build-timeline-core.md) | Distribute portable PR build observability as a Core after cutover | P2 | — · needs-spec |
 | [`owner-installable-mcp-servers`](owner-installable-mcp-servers.md) | Owner-installable MCP servers | P2 | yes |
 | [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) | Scope agent tool state to the active project everywhere | P2 | — · needs-spec |
+| [`route-fixture-quiesce`](route-fixture-quiesce.md) | Quiesce the route-slot coverage fixture before DB close | P2 | — |
 | [`stale-approval-is-re-raised`](stale-approval-is-re-raised.md) | Re-raise forgotten ritual approvals at a bounded daily cadence | P2 | — |
 | [`start-the-comments-agent-watcher-loop`](start-the-comments-agent-watcher-loop.md) | Start the dormant comments AgentWatcher loop | P2 | — |
 | [`hitl-prompt-user-enforcement-policy`](hitl-prompt-user-enforcement-policy.md) | Lock the HITL prompt-user enforcement policy | P3 | — |
