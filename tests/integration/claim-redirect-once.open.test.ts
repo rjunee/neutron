@@ -38,6 +38,7 @@ import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation
 import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
+import { drainRealmodeCleanups } from '@neutronai/gateway/index.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
@@ -50,19 +51,31 @@ import {
   buildScaffoldMaterializer,
   ensureProjectRow,
 } from '@neutronai/gateway/wiring/project-create.ts'
+import {
+  bootCapturingSweeperLoop,
+  expectQuiescedTeardown,
+  runHeldSweeperTeardown,
+  runTracedTeardown,
+} from '../support/held-sweeper-teardown.ts'
 
 const GENERAL_TOPIC = 'app:owner'
 const CLAIM_URL = 'https://auth.managed.example/claim'
 
 let home: IsolatedHome
 let db: ProjectDb
+let dbClosed = false
 let servers: Array<{ close: () => Promise<void> }> = []
 let priorCookieSecret: string | undefined
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+type Composition = Awaited<ReturnType<ReturnType<typeof buildOpenGraphComposer>>>
+
 interface Boot {
   base: string
+  composition: Composition
+  graph: Awaited<ReturnType<typeof composeProductionGraph>>
+  /** Memoized: a second call (afterEach after an explicit close) is a no-op. */
   close: () => Promise<void>
 }
 
@@ -89,18 +102,20 @@ async function boot(): Promise<Boot> {
     fetch: (req, srv) => graph.fetch!(req, srv),
     websocket: graph.websocket!,
   })
+  let closing: Promise<void> | null = null
   const b: Boot = {
     base: `http://127.0.0.1:${server.port}`,
-    close: async () => {
-      await server.stop(true)
-      for (const c of composition.realmode_cleanups ?? []) {
-        try {
-          c()
-        } catch {
-          /* teardown */
-        }
-      }
-      await graph.shutdown()
+    composition,
+    graph,
+    close: () => {
+      closing ??= (async () => {
+        await server.stop(true)
+        // AWAIT every composed cleanup (e.g. the upload sweeper's quiescing
+        // stop) before the graph shuts down and `closeFixture` closes the DB.
+        await drainRealmodeCleanups(composition.realmode_cleanups ?? [])
+        await graph.shutdown()
+      })()
+      return closing
     },
   }
   servers.push(b)
@@ -143,6 +158,7 @@ beforeEach(async () => {
   home = createIsolatedHome({ slug: 'owner' })
   seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+  dbClosed = false
   // The owner has FINISHED onboarding — the state the loop occurred in.
   db.raw().run(
     `INSERT INTO onboarding_state (project_slug, user_id, phase, phase_state_json,
@@ -152,13 +168,39 @@ beforeEach(async () => {
   )
 })
 
-afterEach(async () => {
-  for (const s of servers) await s.close().catch(() => {})
+/**
+ * The fixture's DB-close owner: close every booted stack (each awaits its
+ * composed cleanups), THEN close the shared DB exactly once. Idempotent.
+ * Every stack is closed and the DB closed even when one `Boot.close` rejects;
+ * the FIRST such rejection is then rethrown, so a failing stack teardown is
+ * observable (the held-sweeper harness records it as `teardownError`).
+ */
+async function closeFixture(): Promise<void> {
+  const open = servers
   servers = []
-  db.close()
-  home.restore()
-  if (priorCookieSecret === undefined) delete process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
-  else process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = priorCookieSecret
+  let firstError: { err: unknown } | null = null
+  for (const s of open) {
+    try {
+      await s.close()
+    } catch (err) {
+      firstError ??= { err }
+    }
+  }
+  if (!dbClosed) {
+    dbClosed = true
+    db.close()
+  }
+  if (firstError !== null) throw firstError.err
+}
+
+afterEach(async () => {
+  try {
+    await closeFixture()
+  } finally {
+    home.restore()
+    if (priorCookieSecret === undefined) delete process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
+    else process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = priorCookieSecret
+  }
 })
 
 describe('Managed claim redirect — at most once per OWNER, not per page load', () => {
@@ -283,5 +325,64 @@ describe('#374 Defect 2a — the LIVE-emit finalize is at-most-once with the rec
     const boot1 = await boot()
     const reconnectCount = await connectAndCountCompleted(boot1.base)
     expect(reconnectCount).toBe(0)
+  }, 45_000)
+})
+
+/**
+ * #1389 follow-up — this file's teardown must QUIESCE the composed loops before
+ * the DB closes. Driven through `closeFixture()`, the exact DB-close owner the
+ * afterEach runs (Boot.close drains the composed cleanups, then the DB closes),
+ * with a REAL composer loop's DB-using tick held at a barrier. See
+ * tests/support/held-sweeper-teardown.ts for the harness and its self-test.
+ */
+describe('fixture teardown quiesces composed loops before DB close', () => {
+  test('a held sweeper tick keeps closeFixture pending, the DB open, and later cleanups unentered until it lands', async () => {
+    const { value: stack, loop } = await bootCapturingSweeperLoop(() => boot())
+    const report = await runHeldSweeperTeardown({
+      composition: stack.composition,
+      graph: stack.graph,
+      db,
+      loop,
+      teardown: closeFixture,
+    })
+    expectQuiescedTeardown(report)
+  }, 45_000)
+
+  test('an earlier rejecting and throwing cleanup neither skips the held cleanup nor lets the DB close early', async () => {
+    const { value: stack, loop } = await bootCapturingSweeperLoop(() => boot())
+    const cleanups = stack.composition.realmode_cleanups!
+    cleanups.unshift(
+      async () => {
+        throw new Error('injected-reject')
+      },
+      () => {
+        throw new Error('injected-throw')
+      },
+    )
+    const report = await runHeldSweeperTeardown({
+      composition: stack.composition,
+      graph: stack.graph,
+      db,
+      loop,
+      teardown: closeFixture,
+    })
+    expectQuiescedTeardown(report)
+    expect(report.trace.indexOf('cleanup:0:reject')).toBeGreaterThanOrEqual(0)
+    expect(report.trace.indexOf('cleanup:1:reject')).toBeGreaterThan(report.trace.indexOf('cleanup:0:reject'))
+    expect(report.trace.indexOf('loop:stop-entered')).toBeGreaterThan(report.trace.indexOf('cleanup:1:reject'))
+    expect(report.sweeperIndex!).toBeGreaterThan(1)
+  }, 45_000)
+
+  test('an empty cleanup list still shuts the graph down and closes the DB', async () => {
+    const stack = await boot()
+    const cleanups = stack.composition.realmode_cleanups!
+    // Stop the composed loops while the DB is open and no tick is in flight,
+    // leaving the fixture an EMPTY list to drain.
+    await drainRealmodeCleanups(cleanups.splice(0, cleanups.length))
+    expect(cleanups).toHaveLength(0)
+    const result = await runTracedTeardown({ graph: stack.graph, db, teardown: closeFixture })
+    expect(result.teardownError).toBeNull()
+    expect(result.trace).toEqual(['graph:shutdown', 'db:close', 'teardown:settled'])
+    expect(result.dbClosedAfter).toBe(true)
   }, 45_000)
 })
