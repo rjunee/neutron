@@ -80,6 +80,31 @@ completed head, original review round, strategy, iteration spend and baseline.
 Verify: `trident/gates/review-panel.test.ts`, `trident/build-run.test.ts`, and
 `open/__tests__/project-build-e2e.test.ts` (settled rate-limit cross-run retry).
 
+### Settled pending predecessor of an owned publication
+
+Tracked by #1476. A terminal predecessor whose latest checkpoint still records a
+pending build or fix reservation is not a retry source, even when its original
+authenticated result establishes that the worker settled. Settlement proves the
+writer stopped and names the head it left; it does not authorize reusing the
+unfinished checkpoint, its round, findings, approval or suite receipt. When the
+card also owns a witnessed publication on that branch, the retry starts fresh
+planning on the retained branch at that settled head, keeps the predecessor's
+base pin, strategy and card task spend, and obtains its own proof, review and
+pinned merge gates. Completed and unfinished or `unknown` attempt accounting are
+both covered; neither is rewritten. A newer card attempt that was refused
+before its first worker, at outer launch or (in its exact launcher-written
+shape) at preparation, is passed over and never becomes the retry source or
+ends the card's recovery. When the authority cannot be re-read at preparation
+on a row carrying the adopted base pin, or the owned PR head object cannot be
+read at outer launch, the retry refuses as UNKNOWN rather than attaching the
+branch or reporting a wrong base. The launch and checkout-handoff acceptance
+and its controls live in `docs/spec-items/salvage-publication-provenance.md`
+(`Owned published retry through outer launch`).
+
+Verify: `trident/build-mode-state.test.ts`,
+`trident/published-retry-handoff.test.ts`, and
+`open/__tests__/project-build-e2e.test.ts` (owned published retry).
+
 ### Existing continuity criteria
 
 All three are met. #628 once ticked all three on evidence that did not hold; the

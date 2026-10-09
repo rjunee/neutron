@@ -1,4 +1,5 @@
 import { completedConversationQuarantine } from './wiring/never-admitted-planner-retirement.ts'
+import { publishedRetrySettlement } from './wiring/published-retry-settlement.ts'
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import { buildSubstrateWorkflowFire, buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
@@ -1253,6 +1254,10 @@ export function buildOpenGraphComposer(
     // build-lease release composed into all three terminal chains all read it. It
     // needs only the database and the owner handle.
     const projectAdmission = new ProjectAdmission({ db, ownerHandle: owner_handle, bootId: randomUUID() })
+    // #1476 — the ONE host settlement witness for an owned published retry (the
+    // live trailer validator and every admission lease), consumed by outer launch
+    // and by project preparation's retained-checkout hand-off alike.
+    const publishedRetrySettled = publishedRetrySettlement({ admission: projectAdmission, runs: new TridentRunStore(db) })
     // This must finish before substrates, workflow replay, or chat reconstruction
     // can act. Without authority, prepared recovery gates and child leases survive.
     const hostTerminations = await reconcileNativeHostTerminations({
@@ -1419,6 +1424,8 @@ export function buildOpenGraphComposer(
                 // `'general'` sentinel on the line above.
                 nativeChildAdmission: projectAdmission.forNativeChild(
                   workBoardProjectIdForKey(project_slug, input.run.project_slug) ?? null),
+                // #1476 — the same witness outer launch consumed; preparation re-reads it.
+                publishedRetrySettled,
                 spawnProjectSession: async projectId => {
                   const projectSubstrate = makeProjectLiveAgentSubstrate(projectId)
                   if (projectSubstrate === null) throw new Error('Project conversation substrate is unavailable')
@@ -7658,6 +7665,9 @@ export function buildOpenGraphComposer(
               // cadence — the only trigger a worktree-only `branch_live` hold
               // can ever have (a pid exiting fires no terminal observer).
               drain_dispatch_holds: () => tridentHoldSweep(),
+              // #1476 — the host settlement witness for an owned published
+              // retry: the live trailer validator and every admission lease.
+              published_retry_settled: publishedRetrySettled,
               // PULL launcher-death detection covers missed push events instead
               // of leaving the lane occupied until the 90-minute reaper.
               probe_launcher_alive: buildTridentLauncherLivenessProbe(),
