@@ -29,8 +29,9 @@ assertions; the review-source suite passed 63 tests with 408 assertions. Root
 and Trident TypeScript checks passed. Four isolated must-fail mutations were
 rejected: restoring the invalidation veto, bypassing request-hash comparison,
 bypassing terminal payload validation, and removing review-source invalidation
-refusal. All mutated sources were restored afterward. The full suite and live
-deployment acceptance remain delivery work; this slice does not establish
+refusal. All mutated sources were restored afterward. For combined full-suite validation, see
+[salvage branch ownership](salvage-branch-ownership-1009.md). Full validation and
+live deployment acceptance remain delivery work; this slice does not establish
 unattended build completion.
 
 The changed-file corpus and commit-message leak checks passed. The full local

@@ -92,7 +92,7 @@ is the thing being rebuilt.
       still refuses the invalidated verdict.
       Verify: `bun test open/wiring/__tests__/claude-native-dispatch-boot.test.ts`
       (including actual Open startup and periodic recovery, planner consumption,
-      verdict refusal and both-direction mutation controls).
+      verdict refusal and paired acceptance/refusal controls).
 
 - [x] **Pending terminal decisions receive bounded fair selection.** With a finite,
       stable inbox and settling observer attempts, five older refused wakes cannot

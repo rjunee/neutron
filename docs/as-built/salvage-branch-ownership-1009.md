@@ -60,6 +60,17 @@ corrupt-recovery and concurrent-authority cases passed after correction.
 Nonblocking review follow-ups are recorded in #1471. The existing subprocess
 setup failure tracked by #1457 was also reproduced.
 
-The complete corrected shared-host check and final reviews/CI remain pending; their exact
-receipts will be recorded before publication. This source change alone does not
+The original shared-host run executed all 1,801 discovered files, with
+28,017 passes, 24 skips and 7 failures. The seven failures were the three
+migration expectations, two recovery-race consumers, an ordinary-salvage
+fixture missing the reservation seam, and the existing #1457 subprocess error.
+All 51 typechecks passed. Documentation edits during that run also made its
+final clean-tree identity unavailable, so it does not establish a stable-input
+suite receipt. The failures and that rejection remain recorded.
+
+The corrected branch and the companion invalidated-review ownership repair are
+integrated for one complete frozen-tree validation and release. Native and
+bounded cross-model source reviews approve the combined source. The complete
+corrected shared-host check, final receipt review and exact-head CI remain
+pending; their exact receipts will be recorded before publication. This source change alone does not
 establish deployed unattended single, sequence or concurrent acceptance.
