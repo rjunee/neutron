@@ -56,6 +56,22 @@ is the thing being rebuilt.
       Verify: `bun test runtime/workers/claude-composer.test.ts runtime/workers/claude-acting-turn.test.ts`
       and `bun test open/__tests__/project-build-e2e.test.ts -t 'adopted project composer'`.
 
+- [x] **A dispatch queued during Claude compaction retains bounded observation.**
+      After submission, an exact current-session queue entry, absorbed command,
+      or queued-command attachment beyond the captured transcript byte boundary
+      keeps observing the same request under its original wall budget. Queue
+      evidence alone neither transfers the parent input slot nor completes work.
+      Historical commands, foreign or missing session identities, embedded
+      notifications, changed payloads and removed commands without observed
+      consumption cannot extend the launch probe. Cancellation, expiry, trailer
+      validation, transcript replacement checks and uniquely bound child ownership
+      remain enforced; no replay or replacement budget is created.
+      Verify: `bun test runtime/workers/claude-acting-turn.test.ts` and
+      `bun test open/__tests__/project-build-e2e.test.ts -t 'queued native build dispatch'`.
+      The consuming harness reaches merge for exact queued evidence and retains an
+      unknown outcome and native lease for foreign-session or notification decoys.
+      This bounded offline proof does not establish unattended live acceptance.
+
 - [ ] **A headless worker never talks to the owner.** It returns "blocked on X" to the
       orchestrator, which decides whether that reaches him. Asserted by a test in which a
       worker attempts to ask and the attempt is refused or routed — and its complement, that
