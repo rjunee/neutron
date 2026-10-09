@@ -11,18 +11,22 @@ cutover: true
 ## Live branch ownership
 
 Tracked by #1469. Every stranded reconciliation must reserve the shared Git
-repository (including linked worktrees and path aliases) and branch before inspecting or changing its checkout, replaying commits, publishing,
+repository (including linked worktrees and path aliases) and branch before
+inspecting or changing its checkout, replaying commits, publishing,
 or recording the resulting publication. It must refuse another nonterminal run
 on that branch, across project scopes, and refuse unknown ownership. Ownership
 queries must be complete. Admission holds the same durable reservation before
-branch-dependent retry/publication reads through the run-row commit. Git and
-network work must not hold an open database transaction.
+branch-dependent retry/publication reads through the run-row commit. Checkout capture, replay, publication and network calls must not hold an open
+database transaction; bounded Git identity reads may run inside acquisition.
 
 Normal completion or an exception releases the exact reservation. A crash does
 not authorize expiring or stealing one: an outstanding Git command may survive
 its caller. Such a branch remains explicitly held until its operation is settled;
 unrelated branches remain available. This reservation does not authenticate a
-native child's completion or weaken immutable review-input checks.
+native child's completion or weaken immutable review-input checks. A recovery
+request refused solely because another operation holds the branch must leave
+the card and one-use source unchanged; the same authorized request may proceed
+after release. Verify: `trident/orchestrator-recovery.test.ts`.
 
 - [ ] A real-Git startup sweep with an old failed row and a live review on the
   same branch leaves local/remote refs, checkout and review checkpoint unchanged,

@@ -703,7 +703,7 @@ interface QueueOutcome {
 interface DispatchLeaseSlot {
   lease: DispatchAdmitted | null
   kept: boolean
-  branch: BranchReservation | null
+  branch: BranchReservation | 'held' | null
 }
 
 /**
@@ -728,7 +728,7 @@ export async function dispatchBoardBoundBuild(
   try {
     return await dispatchUnderAdmission(input, deps, slot)
   } finally {
-    if (slot.branch) await deps.store.releaseBranch(slot.branch).catch(error => {
+    if (slot.branch && slot.branch !== 'held') await deps.store.releaseBranch(slot.branch).catch(error => {
       log.warn('dispatch_branch_release_failed', { error: String(error) })
     })
     if (slot.lease !== null && !slot.kept) {
@@ -782,12 +782,14 @@ export async function dispatchOrchestratorRecovery(
   } catch (error) {
     result = { ok: false, code: 'backend_error', message: error instanceof Error ? error.message : 'Recovery evidence is unreadable' }
   } finally {
-    if (slot.branch) await deps.store.releaseBranch(slot.branch).catch(error => {
+    if (slot.branch && slot.branch !== 'held') await deps.store.releaseBranch(slot.branch).catch(error => {
       log.warn('dispatch_branch_release_failed', { error: String(error) })
     })
     if (slot.lease !== null && !slot.kept) await slot.lease.release()
   }
-  if (!result.ok && authenticated && card && ['failed', 'blocked', 'upcoming'].includes(card.status)) {
+  // Contention is not a rejected recovery decision. Recording it on the card
+  // would invalidate the concurrent owner's captured card version before commit.
+  if (!result.ok && slot.branch !== 'held' && authenticated && card && ['failed', 'blocked', 'upcoming'].includes(card.status)) {
     const saved = await deps.board.recordRecoveryRefusal?.(deps.project_slug, card.id,
       { linked_run_id: card.linked_run_id, status: card.status as 'failed' | 'blocked' | 'upcoming', updated_at: card.updated_at }, result.message)
     if (!saved) result = { ...result, message: `${result.message} Card refusal was not saved because the binding changed or storage was unavailable.` }
@@ -1357,9 +1359,12 @@ async function dispatchUnderAdmission(
 
   try {
     slot.branch = await deps.store.reserveBranch({ repo_path, branch, run_id: runId, purpose: 'admission' })
-    if (!slot.branch) return await refuseBranchLive(
-      `Refused: branch ${branch} is reserved by an admission or salvage operation. ` +
-      'The card can retry when that operation has settled; elapsed time does not release ownership.', null)
+    if (!slot.branch) {
+      slot.branch = 'held'
+      return await refuseBranchLive(
+        `Refused: branch ${branch} is reserved by an admission or salvage operation. ` +
+        'The card can retry when that operation has settled; elapsed time does not release ownership.', null)
+    }
   } catch (error) {
     return { ok: false, code: 'backend_error', message: `Branch ownership is unknown: ${String(error)}` }
   }

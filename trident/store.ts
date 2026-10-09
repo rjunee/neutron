@@ -1109,8 +1109,8 @@ export class TridentRunStore {
     return releaseBranch(this.db, reservation)
   }
 
-  /** Excludes admission across connections without holding SQLite across Git.
-   * The full branch census runs inside the claim transaction; unknown refuses. */
+  /** Excludes admission across connections; only bounded Git identity reads
+   * run inside the claim transaction with the full census. Unknown refuses. */
   async withSalvageReservation(
     run: TridentRun, body: () => Promise<TridentRun | null>,
   ): Promise<TridentRun | null> {

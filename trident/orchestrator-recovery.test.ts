@@ -133,6 +133,22 @@ test('parallel exact recovery decisions admit only one successor and do not over
   expect(f.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM code_trident_orchestrator_recoveries')?.count).toBe(1)
 })
 
+test('a held branch defers recovery without changing its card or consuming its source', async () => {
+  const f = await fixture()
+  const before = f.board.get('project', f.card.id)
+  const reservation = await f.store.reserveBranch({ repo_path: f.dir, branch: f.prior.branch!,
+    run_id: f.prior.id, purpose: 'salvage' })
+  expect(reservation).not.toBeNull()
+  try {
+    const refused = await dispatchOrchestratorRecovery(f.request, f.invocation(), f.deps)
+    expect(refused).toMatchObject({ ok: false, code: 'branch_live' })
+    expect(f.board.get('project', f.card.id)).toEqual(before)
+    expect(f.store.listNonTerminal()).toHaveLength(0)
+    expect(f.db.get<{ count: number }>('SELECT COUNT(*) AS count FROM code_trident_orchestrator_recoveries')?.count).toBe(0)
+  } finally { await f.store.releaseBranch(reservation!) }
+  expect((await dispatchOrchestratorRecovery(f.request, f.invocation(), f.deps)).ok).toBe(true)
+})
+
 test('a newer substantive same-card attempt vetoes recovery of the older rejected source', async () => {
   const f = await fixture()
   const later = await f.store.create({ slug: 'newer', task: TASK, project_slug: 'project',

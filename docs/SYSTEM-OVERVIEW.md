@@ -6968,7 +6968,8 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   0170), keyed by Git common directory and branch. Admission holds it from
   branch-dependent preparation through run insertion; salvage holds it through
   complete live-owner checking, capture, replay, publication and receipt storage.
-  Git/network work does not hold a database transaction. Completion releases the
+  Mutation/network work does not hold a database transaction; bounded Git identity
+  reads run during acquisition. Completion releases the
   exact token. An interrupted claim remains held rather than expiring; this
   mechanism does not automatically settle interrupted commands or native children.
 - **Persistence** — `code_trident_runs` (migration 0077): one row per

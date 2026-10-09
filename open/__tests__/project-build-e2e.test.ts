@@ -2418,6 +2418,7 @@ async function launchAuthorizedRecovery(
   const launcher = createProjectLauncher({ store: s.f.store, onError: error => errors.push(error),
     prepare: async input => { s.f.input.run = input.run; return s.f.prepare() } })
   const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: s.f.input.db_path,
+    with_salvage_reservation: (run, body) => s.f.store.withSalvageReservation(run, body),
     base_branch: 'main', run_host: Object.assign(s.f.context.runHost, { writesDiffOutput: true as const }),
     read_run: id => s.f.store.get(id),
     list_stage_events: id => s.f.store.stageEvents(id),
@@ -2536,6 +2537,7 @@ test('remote movement between launch probes cannot falsify an authorized seed in
     return host(...args)
   }, { writesDiffOutput: true as const })
   const orch = buildTridentOrchestrator({
+    with_salvage_reservation: (run, body) => s.f.store.withSalvageReservation(run, body),
     fire_workflow: async () => { throw new Error('second-probe drift must refuse before worker fire') },
     db_path: s.f.input.db_path, base_branch: 'main',
     run_host: Object.assign(s.f.context.runHost, { writesDiffOutput: true as const }),
@@ -2593,6 +2595,7 @@ test('a corrupt imported recovery checkpoint refuses before the outer publisher 
     return host(...args)
   }, { writesDiffOutput: true as const })
   const orch = buildTridentOrchestrator({
+    with_salvage_reservation: (run, body) => s.f.store.withSalvageReservation(run, body),
     fire_workflow: async () => { throw Error('corrupt recovery state must not fire workers') },
     db_path: s.f.input.db_path, base_branch: 'main', run_host: guardedHost,
     read_run: id => s.f.store.get(id), list_stage_events: id => s.f.store.stageEvents(id),
@@ -2637,6 +2640,7 @@ test('restart sweep still salvages an ordinary failed build with real unpushed G
     return f.context.runHost(...args)
   }, { writesDiffOutput: true as const })
   const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('sweep must not fire workers') },
+    with_salvage_reservation: (run, body) => f.store.withSalvageReservation(run, body),
     db_path: f.input.db_path, base_branch: 'main', run_host: runHost, sleep: async () => {},
     recovery_salvage_protected: id => f.store.isOrchestratorRecoverySalvageProtected(id),
     persist_refire_reset: async (id, patch) => { await f.store.update(id, patch) },
@@ -2862,6 +2866,7 @@ test(`a ${fault} after admission refuses at launch without workers and keeps the
     }, { writesDiffOutput: true as const })
   }
   const orch = buildTridentOrchestrator({
+    with_salvage_reservation: (run, body) => s.f.store.withSalvageReservation(run, body),
     fire_workflow: async () => { throw new Error('recovery launch must refuse before any worker') },
     db_path: s.f.input.db_path, base_branch: 'main',
     run_host: Object.assign(s.f.context.runHost, { writesDiffOutput: true as const }),
@@ -3203,6 +3208,7 @@ test('a pre-fire failed recovery successor cannot be re-dispatched as an ordinar
     return originalHost(...args)
   }, { writesDiffOutput: true as const })
   const orch = buildTridentOrchestrator({
+    with_salvage_reservation: (run, body) => s.f.store.withSalvageReservation(run, body),
     fire_workflow: async () => { throw Error('generic pre-fire recovery refusal must not fire') },
     db_path: s.f.input.db_path, base_branch: 'main', run_host: guardedHost, sleep: async () => {},
     read_run: id => s.f.store.get(id), list_stage_events: id => s.f.store.stageEvents(id),
@@ -6428,6 +6434,7 @@ async function restartThroughGateway(f: Awaited<ReturnType<typeof fixture>>) {
     return f.prepare()
   } })
   const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    with_salvage_reservation: (run, body) => f.store.withSalvageReservation(run, body),
     base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
     read_run: id => f.store.get(id), list_stage_events: id => f.store.stageEvents(id),
     begin_project_build_driver_recovery: (id, reservation) => f.store.beginProjectBuildDriverRecovery(id, reservation),
@@ -6468,6 +6475,7 @@ async function launchThroughGateway(f: Awaited<ReturnType<typeof fixture>>, runI
     return f.prepare()
   } })
   const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    with_salvage_reservation: (run, body) => f.store.withSalvageReservation(run, body),
     base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
     read_run: id => f.store.get(id), list_stage_events: id => f.store.stageEvents(id),
     begin_project_build_driver_recovery: (id, reservation) => f.store.beginProjectBuildDriverRecovery(id, reservation),
@@ -8411,6 +8419,7 @@ for (const scenario of ['no-progress', 'repeat', 'decreasing', 'host-only', 'hos
     return f.prepare()
   } })
   const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    with_salvage_reservation: (run, body) => f.store.withSalvageReservation(run, body),
     base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
     read_run: id => f.store.get(id), sleep: async () => {} })
   if (interrupted) {
@@ -8901,6 +8910,7 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
     return options
   } })
   const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    with_salvage_reservation: (run, body) => f.store.withSalvageReservation(run, body),
     base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
     read_run: id => f.store.get(id), sleep: async () => {} })
   const advanced = await orch.step(dispatched.run)
@@ -9017,6 +9027,7 @@ test(`an orchestrated ${mergeMode} retry survives launch falsification: ${scenar
       ? { ok: false, stdout: '', stderr: 'Simulated base fetch failure', exit_code: 1, timed_out: false }
       : f.context.runHost(...args), { writesDiffOutput: true as const })
   const orch = buildTridentOrchestrator({ fire_workflow: launcher, db_path: f.input.db_path,
+    with_salvage_reservation: (run, body) => f.store.withSalvageReservation(run, body),
     base_branch: 'main', run_host: runHost, read_run: id => f.store.get(id), sleep: async () => {} })
   const advanced = await orch.step(dispatched.run)
   expect(await f.store.saveIfActive(advanced.run)).toBe(true)
