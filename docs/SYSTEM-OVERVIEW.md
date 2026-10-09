@@ -6963,6 +6963,14 @@ for the autonomous Forge → Argus → merge pipeline, ported from the legacy ha
 `/trident` skill. It is foundational runtime, not a Core. PR-2 landed the
 state-machine skeleton; **PR-3 wired the real agentic loop** (below).
 
+- **Branch ownership during salvage** — admission and stranded reconciliation
+  share a durable reservation in `code_trident_branch_reservations` (migration
+  0170), keyed by Git common directory and branch. Admission holds it from
+  branch-dependent preparation through run insertion; salvage holds it through
+  complete live-owner checking, capture, replay, publication and receipt storage.
+  Git/network work does not hold a database transaction. Completion releases the
+  exact token. An interrupted claim remains held rather than expiring; this
+  mechanism does not automatically settle interrupted commands or native children.
 - **Persistence** — `code_trident_runs` (migration 0077): one row per
   pipeline. The SQLite translation of the legacy harness's per-run JSON state file. The
   in-flight sub-agent's id + status live ON the row (`subagent_run_id` /

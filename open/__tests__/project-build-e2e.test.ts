@@ -6337,6 +6337,7 @@ for (const owned of [true, false]) for (const intermediate of [false, true]) tes
   }, { writesDiffOutput: true as const })
   const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('No build dispatch during salvage') },
     db_path: f.input.db_path, base_branch: 'main', run_host: salvageHost, sleep: async () => {},
+    with_salvage_reservation: (run, body) => f.store.withSalvageReservation(run, body),
     persist_refire_reset: async (id, patch) => { await f.store.update(id, patch) },
     leak_preflight: async input => ({ status: 'clean', head: input.head, findings: [], skipped_rules: [], attempts: 0, note: 'fixture scanner' }) })
   const salvaged = await orch.reconcile_stranded({ ...prior, phase: 'failed', failure_reason: 'proof infrastructure unavailable' })

@@ -1,12 +1,44 @@
 ---
 title: Preserve publication ownership when salvaging a failed build
 group: trident
-status: done
+status: open
 priority: P0
 cutover: true
 ---
 
 # Salvage publication provenance
+
+## Live branch ownership
+
+Tracked by #1469. Every stranded reconciliation must reserve the shared Git
+repository (including linked worktrees and path aliases) and branch before inspecting or changing its checkout, replaying commits, publishing,
+or recording the resulting publication. It must refuse another nonterminal run
+on that branch, across project scopes, and refuse unknown ownership. Ownership
+queries must be complete. Admission holds the same durable reservation before
+branch-dependent retry/publication reads through the run-row commit. Git and
+network work must not hold an open database transaction.
+
+Normal completion or an exception releases the exact reservation. A crash does
+not authorize expiring or stealing one: an outstanding Git command may survive
+its caller. Such a branch remains explicitly held until its operation is settled;
+unrelated branches remain available. This reservation does not authenticate a
+native child's completion or weaken immutable review-input checks.
+
+- [ ] A real-Git startup sweep with an old failed row and a live review on the
+  same branch leaves local/remote refs, checkout and review checkpoint unchanged,
+  including when main advanced and the failed row has no recorded PR.
+  Verify: `trident/stranded-salvage-realgit.test.ts`.
+- [ ] Unowned failed work still publishes and retains its receipt. Unknown
+  ownership, direct reconciliation and a live owner in another project refuse.
+- [ ] Pausing either admission or salvage excludes the other across separate
+  database connections; normal release admits the waiting retry. A retained
+  reservation remains held across reopening the database, while another branch
+  remains usable. Verify: `trident/branch-reservation.test.ts` and the real-Git
+  consuming controls above.
+- [ ] A missing reservation seam cannot perform salvage writes. Removing the
+  guard fails the live-owner control; refusing all salvage fails the unowned
+  publication control. The deployed repair is followed by fresh unattended
+  Work Board acceptance under the original single/sequence/concurrent contract.
 
 Tracked by #1217. The locked pivot retains
 the publication and pinned merge gates

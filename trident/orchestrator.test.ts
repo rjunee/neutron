@@ -292,6 +292,7 @@ function buildHarness(opts: {
     db_path: join(tmp, 'project.db'),
     list_stage_events: id => store.stageEvents(id),
     run_host: writingHost,
+    with_salvage_reservation: (run, body) => store.withSalvageReservation(run, body),
     now,
     // The resume head-read retries are SPACED in production (a `pr`-mode read is a
     // network call). The suite injects a no-op wait so those attempts stay free.
@@ -4008,7 +4009,7 @@ describe('sweepStrandedFailures', () => {
     ).resolves.toBeUndefined()
   })
 
-  test('a reused branch owned by a live run disables only worktree inspection', async () => {
+  test('a reused branch owned by a live run refuses all salvage writes', async () => {
     const failed = await failedPr('reused-branch')
     await store.create({
       slug: 'replacement-run',
@@ -4019,32 +4020,16 @@ describe('sweepStrandedFailures', () => {
       merge_mode: 'pr',
       branch: failed.branch,
     })
-    let inspectWorktree: boolean | undefined
-
-    await sweepStrandedFailures({
-      store,
-      reconcile: async (_run, options) => {
-        inspectWorktree = options?.inspect_worktree
-        return null
-      },
-    })
-
-    expect(inspectWorktree).toBe(false)
+    let calls = 0
+    await sweepStrandedFailures({ store, reconcile: async () => { calls++; return null } })
+    expect(calls).toBe(0)
   })
 
   test('a failed branch with no live owner enables startup worktree inspection', async () => {
     await failedPr('available-branch')
-    let inspectWorktree: boolean | undefined
-
-    await sweepStrandedFailures({
-      store,
-      reconcile: async (_run, options) => {
-        inspectWorktree = options?.inspect_worktree
-        return null
-      },
-    })
-
-    expect(inspectWorktree).toBe(true)
+    let calls = 0
+    await sweepStrandedFailures({ store, reconcile: async () => { calls++; return null } })
+    expect(calls).toBe(1)
   })
 
   test('the same branch string in another project and repository is not a live owner', async () => {
@@ -4058,17 +4043,9 @@ describe('sweepStrandedFailures', () => {
       merge_mode: 'pr',
       branch: failed.branch,
     })
-    let inspectWorktree: boolean | undefined
-
-    await sweepStrandedFailures({
-      store,
-      reconcile: async (_run, options) => {
-        inspectWorktree = options?.inspect_worktree
-        return null
-      },
-    })
-
-    expect(inspectWorktree).toBe(true)
+    let calls = 0
+    await sweepStrandedFailures({ store, reconcile: async () => { calls++; return null } })
+    expect(calls).toBe(1)
   })
 })
 

@@ -2728,6 +2728,7 @@ describe('createIfClaimsAvailable — the branch/slug conflict is a refusal, not
     expect(admission.ok).toBe(false)
     if (admission.ok) return
     expect(admission.conflict).toBe('branch')
+    if (admission.conflict !== 'branch') throw new Error('expected the live branch owner')
     expect(admission.holding_run.id).toBe(holder.id)
     // …and nothing was inserted behind the refusal.
     expect(

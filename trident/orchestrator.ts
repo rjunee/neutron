@@ -209,6 +209,8 @@ export interface BuildTridentOrchestratorOptions {
   record_recovery_refusal?: (run_id: string, reason: string) => Promise<void>
   /** Durable recovery lineage cannot authorize ordinary stranded publication. */
   recovery_salvage_protected?: (run_id: string) => boolean
+  /** Required for salvage: holds durable branch exclusion through every write. */
+  with_salvage_reservation?: (run: TridentRun, body: () => Promise<TridentRun | null>) => Promise<TridentRun | null>
   /** Review-only executor seam. Production uses `executeBoundReview`; tests may
    *  inject a recording executor without running a live review panel. */
   execute_bound_review?: typeof executeBoundReview
@@ -752,9 +754,7 @@ export function truncateStageReason(reason: string): string {
 }
 
 export interface StrandedReconcileOptions {
-  /** False when the boot sweep observed another live run on this branch (or
-   * could not establish that no such run exists). Commit publication remains
-   * enabled; only inspection of a possibly-live checkout/stash is suppressed. */
+  /** False refuses all salvage writes, including commit-only publication. */
   inspect_worktree?: boolean
 }
 
@@ -768,7 +768,7 @@ export interface StrandedFailureSweepDeps {
 
 function strandedWorktreeScope(run: TridentRun): string {
   const branch = run.branch ?? `trident/${run.slug}`
-  return JSON.stringify([run.project_slug, resolve(run.repo_path), branch])
+  return JSON.stringify([resolve(run.repo_path), branch])
 }
 
 /** Best-effort boot reconciliation for failed PR-mode runs. A broken row, git
@@ -787,18 +787,16 @@ export async function sweepStrandedFailures({
   try {
     liveWorktreeScopes = new Set(store.listNonTerminal(10_000).map(strandedWorktreeScope))
   } catch {
-    // Failure to establish liveness fails CLOSED for checkout inspection while
-    // still allowing the existing commit-only reconciliation below.
+    // Unknown ownership cannot authorize any salvage operation.
+    return
   }
   for (const row of rows) {
     try {
       // The one-use recovery claim reserves publication for the governed
       // recovery loop. Neither its source nor successor may use boot salvage.
       if (store.isOrchestratorRecoverySalvageProtected(row.id)) continue
-      const salvaged = await reconcile(row, {
-        inspect_worktree:
-          liveWorktreeScopes !== null && !liveWorktreeScopes.has(strandedWorktreeScope(row)),
-      })
+      if (liveWorktreeScopes === null || liveWorktreeScopes.has(strandedWorktreeScope(row))) continue
+      const salvaged = await reconcile(row)
       if (salvaged === null) continue
       await store.update(row.id, {
         pr: salvaged.pr,
@@ -1518,6 +1516,16 @@ export function buildTridentOrchestrator(
     run: TridentRun,
     options: StrandedReconcileOptions = {},
   ): Promise<TridentRun | null> {
+    if (options.inspect_worktree === false || !opts.with_salvage_reservation) return null
+    try {
+      return await opts.with_salvage_reservation(run, () => reconcileReserved(run))
+    } catch (err) {
+      salvageFailureNotes.set(run, (err instanceof Error ? err.message : String(err)).slice(0, 150))
+      return null
+    }
+  }
+
+  async function reconcileReserved(run: TridentRun): Promise<TridentRun | null> {
     try {
       // Immediate failure and direct reconciliation use the same durable
       // predicate as startup. Failure prose is not publication authority.
@@ -1563,9 +1571,7 @@ export function buildTridentOrchestrator(
       const anchoredDisposition = await anchoredSnapshotDisposition(run)
       const disposition =
         anchoredDisposition ??
-        (options.inspect_worktree === false
-          ? { kind: 'none' as const }
-          : await captureWorktreeDisposition(run, branch))
+        await captureWorktreeDisposition(run, branch)
 
       const appendDisposition = (reason: string): string => {
         if (disposition.kind === 'dirty') {

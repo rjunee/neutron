@@ -98,6 +98,7 @@ import { isTerminalPhase } from './state-machine.ts'
 import type { DispatchHoldInput, DispatchHoldPayload, DispatchHoldStore } from './dispatch-holds.ts'
 import type { DispatchAdmission, DispatchAdmitted } from './dispatch-admission.ts'
 import { deriveClaimedPaths } from './claimed-paths.ts'
+import { canonicalRepositoryPath, type BranchReservation } from './branch-reservation.ts'
 import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 import { DEFAULT_MAX_TASK_ITERATIONS, isTaskCap, isTaskIteration } from './task-budget.ts'
@@ -702,6 +703,7 @@ interface QueueOutcome {
 interface DispatchLeaseSlot {
   lease: DispatchAdmitted | null
   kept: boolean
+  branch: BranchReservation | null
 }
 
 /**
@@ -722,10 +724,13 @@ export async function dispatchBoardBoundBuild(
   input: BoardBoundBuildInput,
   deps: BoardBoundBuildDeps,
 ): Promise<BoardBoundBuildResult> {
-  const slot: DispatchLeaseSlot = { lease: null, kept: false }
+  const slot: DispatchLeaseSlot = { lease: null, kept: false, branch: null }
   try {
     return await dispatchUnderAdmission(input, deps, slot)
   } finally {
+    if (slot.branch) await deps.store.releaseBranch(slot.branch).catch(error => {
+      log.warn('dispatch_branch_release_failed', { error: String(error) })
+    })
     if (slot.lease !== null && !slot.kept) {
       await slot.lease.release().catch((err: unknown) => {
         log.warn('dispatch_project_lease_release_failed', {
@@ -744,7 +749,7 @@ export async function dispatchOrchestratorRecovery(
   invocation: OrchestratorRecoveryInvocation,
   deps: BoardBoundBuildDeps,
 ): Promise<BoardBoundBuildResult> {
-  const slot: DispatchLeaseSlot = { lease: null, kept: false }
+  const slot: DispatchLeaseSlot = { lease: null, kept: false, branch: null }
   let card: ReturnType<TridentRunStore['recoveryCard']> = null
   let authenticated = false
   const assertAuthority = () => validateProjectChatOrchestratorAuthority(invocation?.authority,
@@ -777,6 +782,9 @@ export async function dispatchOrchestratorRecovery(
   } catch (error) {
     result = { ok: false, code: 'backend_error', message: error instanceof Error ? error.message : 'Recovery evidence is unreadable' }
   } finally {
+    if (slot.branch) await deps.store.releaseBranch(slot.branch).catch(error => {
+      log.warn('dispatch_branch_release_failed', { error: String(error) })
+    })
     if (slot.lease !== null && !slot.kept) await slot.lease.release()
   }
   if (!result.ok && authenticated && card && ['failed', 'blocked', 'upcoming'].includes(card.status)) {
@@ -1249,16 +1257,7 @@ async function dispatchUnderAdmission(
 
   const slug = slugifyTask(input.task)
   const branch = recovery?.branch ?? `trident/${slug}`
-  if (recovery) {
-    if (repo_path !== recovery.repo_path || merge_mode !== 'pr')
-      return { ok: false, code: 'backend_error', message: 'Recovery repository no longer matches its original source.' }
-    try {
-      Object.assign(recovery, await verifyRecoveryRemote({ repo_path, branch, published_pr: recovery.request.published_pr },
-        recovery.request.expected_head, credentialedRunner ?? spawnCapture))
-    } catch (error) {
-      return { ok: false, code: 'backend_error', message: error instanceof Error ? error.message : 'Recovery remote is unreadable.' }
-    }
-  }
+
 
   /**
    * THE ONE `branch_live` REFUSAL, composed in one place — the tail that says
@@ -1353,6 +1352,25 @@ async function dispatchUnderAdmission(
             },
           }
         : {}),
+    }
+  }
+
+  try {
+    slot.branch = await deps.store.reserveBranch({ repo_path, branch, run_id: runId, purpose: 'admission' })
+    if (!slot.branch) return await refuseBranchLive(
+      `Refused: branch ${branch} is reserved by an admission or salvage operation. ` +
+      'The card can retry when that operation has settled; elapsed time does not release ownership.', null)
+  } catch (error) {
+    return { ok: false, code: 'backend_error', message: `Branch ownership is unknown: ${String(error)}` }
+  }
+  if (recovery) {
+    if (repo_path !== recovery.repo_path || merge_mode !== 'pr')
+      return { ok: false, code: 'backend_error', message: 'Recovery repository no longer matches its original source.' }
+    try {
+      Object.assign(recovery, await verifyRecoveryRemote({ repo_path, branch, published_pr: recovery.request.published_pr },
+        recovery.request.expected_head, credentialedRunner ?? spawnCapture))
+    } catch (error) {
+      return { ok: false, code: 'backend_error', message: error instanceof Error ? error.message : 'Recovery remote is unreadable.' }
     }
   }
 
@@ -1963,8 +1981,9 @@ async function dispatchUnderAdmission(
       head: typedSource.state.checkpoint.head!,
     }, recovery ? { decision: recovery, assertAuthority: assertRecoveryAuthority!, bind: (tx, run) => deps.board.attachRecoveryRunInTransaction!(tx,
       deps.project_slug, item.id, run.id, { linked_run_id: recovery.current_run_id,
-        status: recovery.card_status as 'failed' | 'blocked' | 'upcoming', updated_at: recovery.card_updated_at }) } : undefined)
+        status: recovery.card_status as 'failed' | 'blocked' | 'upcoming', updated_at: recovery.card_updated_at }) } : undefined, slot.branch)
     if (!admission.ok) {
+      if (admission.conflict === 'reservation') return await refuseBranchLive(`Refused: branch ${branch} is reserved by another operation.`, null)
       if (admission.conflict === 'branch') {
         // THE RACE THE GATE ABOVE CANNOT WIN (Argus r7 BLOCKER). Gate (4b) read
         // the live rows, then awaited the worktree probe; a competing dispatch
@@ -1984,7 +2003,7 @@ async function dispatchUnderAdmission(
         // branch nothing holds. The refusal and the queue behaviour are identical
         // either way; only the diagnosis sentence changes.
         const holder = admission.holding_run
-        const sameBranch = holder.repo_path === repo_path && holder.branch === branch
+        const sameBranch = canonicalRepositoryPath(holder.repo_path) === canonicalRepositoryPath(repo_path) && holder.branch === branch
         return await refuseBranchLive(
           `Refused: ${
             sameBranch
