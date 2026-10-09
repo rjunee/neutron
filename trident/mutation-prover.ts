@@ -4818,13 +4818,21 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     }
   }
   if (!files.includes(input.claim.file)) {
+    const reason = `mutation proof rejected: the nominated file ${input.claim.file} is not in this branch's diff — ` +
+      'a mutation of a file the PR does not change certifies nothing about this merge'
+    // The nomination remains rejected. A known, surviving executable target
+    // permits the existing bounded worker correction, never an exemption or proof.
+    const executable = legalMutationTargets(files, deleted).some(file => EXECUTABLE_SOURCE.test(file))
+    if (executable && !await headStillAt(input, pinnedSha)) {
+      return { ok: false, reason: 'mutation proof rejected: the branch moved while nomination repair was being decided',
+        exempt: false, evidence: null }
+    }
     return {
       ok: false,
-      reason:
-        `mutation proof rejected: the nominated file ${input.claim.file} is not in this branch's diff — ` +
-        'a mutation of a file the PR does not change certifies nothing about this merge',
+      reason,
       exempt: false,
       evidence: null,
+      ...(executable ? { repair: { kind: 'invalid-nomination' as const, detail: reason } } : {}),
     }
   }
 
