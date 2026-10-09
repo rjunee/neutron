@@ -1068,10 +1068,15 @@ for (const scenario of ['raw', 'pasted', 'pasted blocks', 'wrong id', 'embedded'
   })
 }
 
-for (const scenario of ['enqueue', 'absorbed', 'attachment', 'foreign absorbed', 'foreign attachment', 'late child', 'cancelled', 'budget', 'wrong trailer',
+const queuedDispatchScenarios = ['enqueue', 'absorbed', 'attachment', 'foreign absorbed', 'foreign attachment', 'late child', 'cancelled', 'budget', 'wrong trailer',
   'historical', 'other session', 'missing session', 'wrong payload', 'notification', 'embedded', 'wrong id',
-  'unknown operation', 'removed', 'foreign removal', 'other attachment'] as const) {
-  test(`queued dispatch survives compaction without replay: ${scenario}`, async () => {
+  'unknown operation', 'removed', 'foreign removal', 'other attachment'] as const
+for (const { scenario, preparationMs } of [
+  ...queuedDispatchScenarios.map(scenario => ({ scenario, preparationMs: 0 })),
+  { scenario: 'budget' as const, preparationMs: 17 },
+  { scenario: 'wrong trailer' as const, preparationMs: 17 },
+]) {
+  test(`queued dispatch survives compaction without replay: ${scenario}${preparationMs ? ' after preparation' : ''}`, async () => {
     const f = await fixture()
     f.binding.projects_dir = join(f.dir, 'projects')
     const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
@@ -1080,7 +1085,7 @@ for (const scenario of ['enqueue', 'absorbed', 'attachment', 'foreign absorbed',
     const queued = (text: string) => ({ type: 'queue-operation', operation: 'enqueue', sessionId: 'session',
       content: `\n\n<pasted_content id="fixture">\n${text}\n</pasted_content id="fixture">\n\n` })
     let historicalDispatch = ''
-    let now = 0, yielded = 0, released = 0
+    let now = 0, yielded = 0, released = 0, offered = 0
     const controller = new AbortController()
     f.input.signal = controller.signal
     f.input.request = { ...f.input.request, writable: false, tools: 'read-only', budget: { wall_ms: 180_000 } }
@@ -1136,15 +1141,22 @@ for (const scenario of ['enqueue', 'absorbed', 'attachment', 'foreign absorbed',
         // boundary. Submission asserts identity so this historical control cannot
         // pass merely because its synthetic prompt differs from the real request.
         await writeFile(transcript, encode({ type: 'user', message: { content: 'earlier ☃' } }) + encode(queued(historicalDispatch)))
-        return actingTurn(input)
+        // Preparation spends the runner's wall budget before this call. Measure
+        // that remaining allowance and keep the zero-wait queue on our logical
+        // clock, so real filesystem jitter cannot add time to the observation.
+        const { dispatchBudget: _realClockBudget, ...logicalInput } = input
+        offered = Math.min(input.timeout_ms, f.input.request.budget.wall_ms - preparationMs)
+        return actingTurn({ ...logicalInput, timeout_ms: offered })
       }, headless: {}, trailer: { schemas: new Map([['v1', value => (value as { verdict?: string }).verdict === 'APPROVE']]), metadata: () => undefined } })
     const outcome = await runners.inRepl!.run(f.input.request, 'in-repl', controller.signal)
+    expect(offered).toBeGreaterThan(120_000)
+    expect(offered).toBeLessThanOrEqual(f.input.request.budget.wall_ms - preparationMs)
     if (['enqueue', 'absorbed', 'attachment', 'late child', 'foreign removal'].includes(scenario)) {
       expect(outcome).toMatchObject({ kind: 'completed', result: { verdict: 'APPROVE' } })
       expect(now).toBe(120_000)
     } else {
       expect(outcome.kind).toBe('unknown')
-      expect(now).toBe(scenario === 'cancelled' ? 60_000 : ['budget', 'wrong trailer'].includes(scenario) ? 180_000 : DISPATCH_TIMEOUT_MS)
+      expect(now).toBe(scenario === 'cancelled' ? 60_000 : ['budget', 'wrong trailer'].includes(scenario) ? offered : DISPATCH_TIMEOUT_MS)
     }
     expect(f.commands).toHaveLength(1)
     expect(released).toBe(1)

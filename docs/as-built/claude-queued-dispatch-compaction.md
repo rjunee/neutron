@@ -48,6 +48,20 @@ Open check. That attempt was stopped before the full suite while applying the
 review correction. The corrected Open package typecheck passed. These partial
 results are not a full local validation receipt.
 
+The combined candidate's full local check later exposed an incorrect exact-time
+assertion in this new matrix: the actor received less than the nominal wall
+budget after runner preparation, but the fixture expected the nominal deadline.
+The fixture also mixed the runner's real-clock queue budget with the actor's
+logical clock. The correction asserts expiry at the actual offered allowance and
+uses the actor's logical-clock budget, following the existing dispatch-evidence
+fixture. Two additional cases impose a synthetic 17 ms preparation debit; both
+failed before the correction while foreign/absent-session controls passed.
+Afterward the entire acting-turn file passed: 133 tests, zero failures and 72,676
+assertions. The runtime typecheck and lint passed; independent source review returned
+GO. Production deadlines, cancellation, identity refusals, submission counts and
+child-only slot transfer are unchanged. These affected checks do not establish a
+final-head local full-suite pass.
+
 The local archive purity scan reported 451 findings on the candidate and its
 unchanged base, with identical reported findings and totals. The scanner truncates
 individual findings, so this comparison does not establish equality of every
