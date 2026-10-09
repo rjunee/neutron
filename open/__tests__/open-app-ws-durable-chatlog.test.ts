@@ -756,22 +756,33 @@ async function driveHeldClose(h: Harness, loop: HeldLoop): Promise<QuiesceReport
   let tickP: Promise<{ ran: boolean; skipped: boolean }> | null = null
   let teardownP: Promise<void> | null = null
   try {
-    // Count + trace every registered cleanup; a rejection is RETHROWN so the
-    // drain's continue-after-rejection is what is exercised.
+    // Count + trace every registered cleanup; a failure is RETHROWN so the
+    // drain's continue-after-rejection is what is exercised. The wrapper is NOT
+    // async: a cleanup that throws synchronously still throws synchronously at
+    // the drain's `await cleanup()` call (traced `reject-sync`), and only a
+    // returned promise is chained (traced `settle` / `reject`).
     restorers.push(() => { for (let i = 0; i < originals.length && i < cleanups.length; i++) cleanups[i] = originals[i]! })
     for (let i = 0; i < cleanups.length; i++) {
       const original = originals[i]!
-      cleanups[i] = async (): Promise<void> => {
+      cleanups[i] = (): void | Promise<void> => {
         counts[i] = (counts[i] ?? 0) + 1
         st.currentIndex = i
         trace.push(`cleanup:${i}:enter`)
+        let result: void | Promise<void>
         try {
-          await original()
-          trace.push(`cleanup:${i}:settle`)
+          result = original()
         } catch (err) {
-          trace.push(`cleanup:${i}:reject`)
+          trace.push(`cleanup:${i}:reject-sync`)
           throw err
         }
+        if (!(result instanceof Promise)) {
+          trace.push(`cleanup:${i}:settle`)
+          return result
+        }
+        return result.then(
+          () => { trace.push(`cleanup:${i}:settle`) },
+          (err: unknown) => { trace.push(`cleanup:${i}:reject`); throw err },
+        )
       }
     }
 
@@ -911,7 +922,10 @@ describe('durable chat-log harness close quiesces composed loops before DB close
 
   test('an earlier rejecting cleanup does not skip the later held cleanup or close the DB early', async () => {
     const { h, loop } = await startHarnessCapturingSweeper()
-    // Registered AHEAD of every composed cleanup: one async rejection, one sync throw.
+    // Registered AHEAD of every composed cleanup: one async rejection, and one
+    // cleanup that throws SYNCHRONOUSLY. driveHeldClose's counting wrapper is
+    // sync-transparent, so the drain's `await cleanup()` receives a real sync
+    // throw (not a rejected promise) from cleanup 1.
     h.composition.realmode_cleanups!.unshift(
       async () => { throw new Error('earlier-async-reject') },
       () => { throw new Error('earlier-sync-throw') },
@@ -925,20 +939,28 @@ describe('durable chat-log harness close quiesces composed loops before DB close
     expect(at('cleanup:0:reject')).toBeLessThan(at('cleanup:1:enter'))
     // Presence first: indexOf returns -1 for a missing event, which would pass the
     // ordering assertion below vacuously.
-    expect(at('cleanup:1:reject')).toBeGreaterThanOrEqual(0)
-    expect(at('cleanup:1:reject')).toBeLessThan(at('loop:stop-entered'))
+    expect(at('cleanup:1:reject-sync')).toBeGreaterThanOrEqual(0)
+    expect(at('cleanup:1:reject-sync')).toBeLessThan(at('loop:stop-entered'))
+    // The async rejection settled as a rejection, the sync throw never produced a promise.
+    expect(at('cleanup:0:reject-sync')).toBe(-1)
+    expect(at('cleanup:1:reject')).toBe(-1)
     expect(report.sweeperIndex).toBeGreaterThan(1)
     expect(report.counts[0]).toBe(1)
     expect(report.counts[1]).toBe(1)
   }, 30_000)
 
   test('an empty cleanup list still closes normally (control)', async () => {
-    const { h } = await startHarnessCapturingSweeper()
+    const { h, loop } = await startHarnessCapturingSweeper()
+    const sweeper = h.composition.loop_registry?.get(SWEEPER_LOOP)
+    expect(sweeper?.isActive?.()).toBe(true)
     const list = h.composition.realmode_cleanups!
     const saved = list.splice(0, list.length)
     // Quiesce the composed loops OUTSIDE the close under test so nothing leaks
     // or touches the DB after it closes.
     await drainRealmodeCleanups(saved)
+    // Premise: the composed loops really quiesced before the close under test.
+    expect(sweeper?.isActive?.()).toBe(false)
+    expect(loop.stats().running).toBe(false)
     const trace: string[] = []
     const graphOwn = h.graph as { shutdown: () => Promise<void> }
     const hadOwnShutdown = Object.prototype.hasOwnProperty.call(h.graph, 'shutdown')
