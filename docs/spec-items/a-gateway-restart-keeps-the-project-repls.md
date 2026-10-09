@@ -530,6 +530,12 @@ role and model. An exact armed reservation and a result at the canonical role
 path must then pass the same envelope and payload validators as live execution.
 This uses the existing validated-result completion contract, not parent-process
 death: the persistent project REPL can remain alive after its native task ends.
+For panel review and synthesis, `input-changed` invalidation vetoes verdict
+acceptance, not terminal ownership discharge. The original receipt must still
+bind its canonical request hash and bytes; the signed dispatch, reservation and
+result must still validate. Reconciliation preserves the invalidation and cannot
+adopt the verdict. The consuming criterion is in
+[the orchestrator contract](the-orchestrator-owns-the-build-loop.md#acceptance).
 
 - [ ] A late completed or blocked result releases only its original token and
       generation; duplicate identities and other project leases survive. Repeated

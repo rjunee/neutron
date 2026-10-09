@@ -98,7 +98,9 @@ async function canonicalResultPath(state: string, request: BoundedWorkRequest): 
   const paths = projectReviewArtifacts(state, identity)
   if (request.result.path !== paths.result || request.brief.path !== paths.brief) return false
   const receipt = await readReviewReceipt(paths.directory, identity)
-  if (!receipt || receipt.invalidated
+  // Invalidation vetoes verdict acceptance, not completion of its original child.
+  // Ownership still requires the exact request and a validated terminal trailer.
+  if (!receipt
     || receipt.requestHash !== createHash('sha256').update(JSON.stringify(request)).digest('hex')) return false
   return JSON.stringify(await readReviewJson(join(paths.directory, 'request.json'))) === JSON.stringify(request)
 }

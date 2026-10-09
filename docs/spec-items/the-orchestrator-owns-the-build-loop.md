@@ -77,6 +77,23 @@ is the thing being rebuilt.
       reading the old file top to bottom — and pin each. A gate silently lost in a rewrite
       is the most likely real defect in this whole item.
 
+- [ ] **Invalidated review evidence can settle its original child's ownership.**
+      Passive reconciliation of a terminal run releases only the exact native
+      review or synthesis lease when its original signed dispatch, canonical
+      attempt, request hash and bytes, artifact paths, armed reservation and
+      completed or blocked result all validate. An `input-changed` review receipt
+      remains invalidated and unusable as a verdict. Reconciliation preserves
+      receipt, result, run, attempt, checkpoint and budget; it dispatches no actor.
+      Missing, malformed, foreign, unauthenticated or nonterminal evidence retains
+      ownership even when the review receipt is invalidated. Duplicate identities
+      and unrelated leases survive; repeated reconciliation is idempotent.
+      A planner blocked by that abandoned child's census can acquire its existing
+      host operations after exact reconciliation, while review-source consumption
+      still refuses the invalidated verdict.
+      Verify: `bun test open/wiring/__tests__/claude-native-dispatch-boot.test.ts`
+      (including actual Open startup and periodic recovery, planner consumption,
+      verdict refusal and both-direction mutation controls).
+
 - [x] **Pending terminal decisions receive bounded fair selection.** With a finite,
       stable inbox and settling observer attempts, five older refused wakes cannot
       indefinitely exclude a sixth ready project. Each sweep attempts at most five
