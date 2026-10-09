@@ -29,6 +29,18 @@ export interface PublishedRetryHandoff {
   resultPath: string
 }
 
+/** The run fields the authority reads. Outer launch hands it the tick's
+ * snapshot of the row; an unrelated write to any other column (a heartbeat,
+ * a progress stamp) between that read and this step must not turn an owned
+ * retry into a refusal, while any change to these fields still refuses. */
+function authorityFields(run: TridentRun | null) {
+  return run === null ? null : {
+    id: run.id, phase: run.phase, project_slug: run.project_slug, repo_path: run.repo_path, branch: run.branch,
+    merge_mode: run.merge_mode, published_pr: run.published_pr, bound_pr: run.bound_pr,
+    inner_checkpoint: run.inner_checkpoint, base_sha: run.base_sha,
+  }
+}
+
 /** Composition-supplied settlement facts only the host process can observe:
  * the live trailer validator and native-child leases. Absent means refused. */
 export type PublishedRetrySettlement = (handoff: PublishedRetryHandoff) => boolean
@@ -39,8 +51,10 @@ export type PublishedRetrySettlement = (handoff: PublishedRetryHandoff) => boole
  * re-read here; no field is trusted from dispatch except as a value to match.
  *
  * - the run's `published_pr` is the exact same-card lineage receipt;
- * - the predecessor is the card's latest terminal attempt on the same project,
- *   repository, branch and PR mode, with an oid base pin;
+ * - the predecessor is the card's newest terminal attempt that holds a host
+ *   checkpoint, on the same project, repository, branch and PR mode, with an oid
+ *   base pin; newer attempts are passed over only when each is provably a retry
+ *   refused before its first worker on that same branch;
  * - its latest host checkpoint records a pending build or fix whose ORIGINAL
  *   request, journal, armed reservation and completed result agree, with
  *   attempt accounting completed, unfinished or `unknown` (never rewritten);
@@ -57,18 +71,36 @@ export function publishedRetryHandoff(store: TridentRunStore, run: TridentRun): 
     const ownEvents = store.stageEvents(run.id)
     if (ownEvents.some(event => event.stage === 'build-retry-source' || event.stage === ORCHESTRATOR_RECOVERY_STAGE
       || event.stage === 'build-mode-state') || store.orchestratorRecovery(run.id) !== null) return null
-    const card = store.linkedCardPredecessor(run.project_slug, run.id)
-    if (!card || card.prior_run_id === run.id) return null
-    const prior = store.get(card.prior_run_id)
-    if (!prior || !['failed', 'stopped'].includes(prior.phase) || prior.project_slug !== run.project_slug
-      || prior.repo_path !== run.repo_path || prior.branch !== run.branch || prior.merge_mode !== 'pr'
-      || !prior.base_sha || !oid.test(prior.base_sha) || store.orchestratorRecovery(prior.id) !== null) return null
+    const card = store.linkedCardAttempts(run.project_slug, run.id)
+    if (!card) return null
+    // The predecessor is the card's newest terminal attempt that holds a host
+    // checkpoint. A newer attempt is passed over only when it is provably a
+    // retry refused before its first worker on this same branch: terminal, no
+    // checkpoint, no recovery, no worker accounting, and either no receipt or
+    // this exact one. A refused retry (including a transient UNKNOWN refusal of
+    // this very path) must not end the card's recovery; anything else refuses.
+    const sameLane = (candidate: TridentRun) => ['failed', 'stopped'].includes(candidate.phase)
+      && candidate.project_slug === run.project_slug && candidate.repo_path === run.repo_path
+      && candidate.branch === run.branch && candidate.merge_mode === 'pr' && store.orchestratorRecovery(candidate.id) === null
+    const passed: { run: TridentRun; events: ReturnType<TridentRunStore['stageEvents']> }[] = []
+    let prior: TridentRun | null = null
+    let events: ReturnType<TridentRunStore['stageEvents']> = []
+    for (const id of card.run_ids) {
+      const candidate = id === run.id ? null : store.get(id)
+      if (!candidate || !sameLane(candidate)) return null
+      const seen = store.stageEvents(id)
+      if (seen.some(row => row.stage === 'build-mode-state')) { prior = candidate; events = seen; break }
+      if (seen.some(row => row.stage === 'build-retry-source' || row.stage === ORCHESTRATOR_RECOVERY_STAGE)
+        || store.attempts(id).length > 0 || candidate.inner_checkpoint !== null || candidate.inner_result !== null
+        || candidate.bound_pr !== null || (candidate.published_pr !== null && candidate.published_pr !== published)) return null
+      passed.push({ run: candidate, events: seen })
+    }
+    if (!prior || !prior.base_sha || !oid.test(prior.base_sha)) return null
     // The receipt dispatch carried, re-derived from the same exact link.
     const receipt = prior.published_pr ?? store.earlierCardPublication(
       run.project_slug, card.item_id, prior.id, run.repo_path, run.branch)
     if (receipt !== published) return null
 
-    const events = store.stageEvents(prior.id)
     const event = events.filter(row => row.stage === 'build-mode-state').at(-1)
     if (!event) return null
     const state = parseBuildModeState(event.meta ?? null, prior, true)
@@ -116,7 +148,10 @@ export function publishedRetryHandoff(store: TridentRunStore, run: TridentRun): 
 
     if (store.branchOwnedByAnother(run.id, run.repo_path, run.branch)) return null
     if (!evidence.stable() || !equal(store.get(prior.id), prior) || !equal(store.stageEvents(prior.id), events)
-      || !equal(store.attempts(prior.id), attempts) || !equal(store.get(run.id), run)) return null
+      || !equal(store.attempts(prior.id), attempts) || !equal(authorityFields(store.get(run.id)), authorityFields(run))
+      || !equal(store.linkedCardAttempts(run.project_slug, run.id), card)
+      || passed.some(skipped => !equal(store.get(skipped.run.id), skipped.run)
+        || !equal(store.stageEvents(skipped.run.id), skipped.events) || store.attempts(skipped.run.id).length > 0)) return null
     return { prior, item_id: card.item_id, priorBase: prior.base_sha, settledHead: head,
       holderWorktree: worktree, stepId: request.step_id, role, request, resultPath: request.result.path }
   } catch { return null }

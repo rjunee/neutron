@@ -325,6 +325,72 @@ test('an authority that changes between the first read and the post-observation 
   expect(refusal(outcome)).toContain(WRONG_BASE)
 })
 
+// A retry refused at outer launch before its first worker (the incident's own
+// refused retry, or a transient UNKNOWN refusal of this path) becomes the card's
+// newest terminal attempt. It must not end the card's recovery.
+async function afterRefusedRetry(f: Awaited<ReturnType<typeof world>>, patch: Partial<TridentRun> = {}) {
+  const refused = f.retry
+  expect(refusal(await f.launch(undefined, () => null))).toContain(WRONG_BASE)
+  await f.store.update(refused.id, { phase: 'failed', failure_reason: 'refused at outer launch', base_sha: f.base, ...patch })
+  await f.board.detachRun('project', refused.id, 'failed', { pr: null, pr_url: null })
+  const retry = await f.store.create({ slug: 'owned-published-retry', project_slug: 'project', repo_path: f.repo,
+    task: refused.task, branch: BRANCH, merge_mode: 'pr', execution_strategy: 'single', published_pr: PR })
+  await f.board.attachRun('project', f.card.id, retry.id)
+  return { refused: f.store.get(refused.id)!, retry: f.store.get(retry.id)! }
+}
+
+for (const [name, shape] of [['unfinished fix', UNFINISHED_FIX], ['completed build', COMPLETED_BUILD]] as const) {
+  test(`an intermediate retry refused before its first worker does not end recovery: ${name}`, async () => {
+    const f = await world(shape)
+    const { refused, retry } = await afterRefusedRetry(f)
+    const handoff = publishedRetryHandoff(f.store, retry)
+    expect(handoff?.prior.id).toBe(f.prior.id)
+    expect(handoff?.settledHead).toBe(f.settled)
+    const before = await f.observe()
+    const outcome = prepared(await f.launch(retry))
+    expect(outcome.pinnedRun.base_sha).toBe(f.base)
+    expect(await f.observe()).toEqual(before)
+    // The passed-over attempt is read, never rewritten.
+    expect(f.store.get(refused.id)).toEqual(refused)
+  })
+}
+
+const intermediateFaults: Record<string, (f: Awaited<ReturnType<typeof world>>, refused: TridentRun) => Promise<unknown>> = {
+  'it dispatched a worker': (f, refused) => f.ledger.admit({ run_id: refused.id, step_id: `${refused.id}:build:0`,
+    attempt_id: 'dispatch', phase: 'build', task_id: `${refused.id}:task:0`, head_sha: f.settled, role: 'build',
+    review_seat: null, provider: 'anthropic', requested_model: 'opus', resolved_model: 'opus', placement: 'in-repl', queued_at: 6 }),
+  'it carries another receipt': (f, refused) => f.store.update(refused.id, { published_pr: PR + 1 }),
+  'it ran on another branch': (f, refused) => f.store.update(refused.id, { branch: 'trident/elsewhere' }),
+  'it was seeded from a checkpoint': (f, refused) =>
+    f.store.recordStageEvent(refused.id, 'build-retry-source', JSON.stringify({ priorRunId: f.prior.id })),
+  'it holds an inner checkpoint': (f, refused) => f.store.update(refused.id, { inner_checkpoint: 'forge-done' }),
+}
+for (const [fault, apply] of Object.entries(intermediateFaults)) {
+  test(`a newer card attempt that is not provably a refused retry ends the authority: ${fault}`, async () => {
+    const f = await world(UNFINISHED_FIX)
+    const { refused, retry } = await afterRefusedRetry(f)
+    await apply(f, refused)
+    expect(publishedRetryHandoff(f.store, f.store.get(retry.id)!)).toBeNull()
+    expect(refusal(await f.launch(f.store.get(retry.id)!))).toContain(WRONG_BASE)
+  })
+}
+
+test("outer launch's tick snapshot may lag the row in fields the authority does not read", async () => {
+  // Production hands prepareLaunch the row the tick listed at the start of its
+  // sweep; a heartbeat-style write since then must not refuse an owned retry.
+  const f = await world(UNFINISHED_FIX)
+  const stored = f.store.get(f.retry.id)!
+  prepared(await f.launch({ ...stored, last_advanced_at: '2000-01-01T00:00:00.000Z', round: stored.round + 1 }))
+})
+
+test("outer launch's tick snapshot that disagrees on an authority field refuses", async () => {
+  const f = await world(UNFINISHED_FIX)
+  await f.store.update(f.retry.id, { published_pr: null })
+  const before = await f.observe()
+  expect(refusal(await f.launch({ ...f.store.get(f.retry.id)!, published_pr: PR }))).toContain(WRONG_BASE)
+  expect(await f.observe()).toEqual(before)
+})
+
 test('seeded or recovery launches never consult the published retry authority', async () => {
   const f = await world(COMPLETED_BUILD)
   await f.store.recordStageEvent(f.retry.id, 'build-retry-source', JSON.stringify({ priorRunId: f.prior.id }))
@@ -395,6 +461,45 @@ for (const [name, shape] of [['completed accounting with a lost driver acknowled
     expect(after.files).toEqual(before.files)
     expect(f.commands.some(argv => argv.includes('--force') || argv.includes('-B') || argv.includes('reset')
       || argv.includes('-D'))).toBe(false)
+  })
+}
+
+// The predecessor's checkout can already be gone by preparation (released after
+// outer launch). The same authority, settled-head and publication checks still
+// apply; nothing is released, and the caller's attach is re-checked.
+test('preparation with no remaining holder still requires the settled head and attaches it', async () => {
+  const f = await launched()
+  await git(f.repo, '-C', f.repo, 'worktree', 'remove', f.worktree)
+  const target = f.store.get(f.retry.id)!.worktree!
+  const start = f.commands.length
+  const outcome = await handOff(f, () => true, async outcome => {
+    if (outcome.verdict === 'handed-off') await git(f.repo, '-C', f.repo, 'worktree', 'add', '-q', '--', target, BRANCH)
+  })
+  expect(outcome).toMatchObject({ verdict: 'handed-off', handoff: { settledHead: f.settled } })
+  expect(f.commands.slice(start).some(argv => argv.some(arg => arg.endsWith('worktree-cleanup.sh')))).toBe(false)
+  expect(f.commands.slice(start).some(argv => argv[0] === 'gh' && argv[2] === 'view')).toBe(true)
+  expect(await git(target, '-C', target, 'rev-parse', 'HEAD')).toBe(f.settled)
+})
+
+for (const [name, move] of [
+  ['the branch rewound past the settled commit', (f: World) => git(f.repo, '-C', f.repo, 'update-ref', `refs/heads/${BRANCH}`, f.published)],
+  ['the branch advanced past the settled commit', async (f: World) => {
+    const tree = await git(f.repo, '-C', f.repo, 'rev-parse', `${f.settled}^{tree}`)
+    const next = await git(f.repo, '-C', f.repo, 'commit-tree', tree, '-p', f.settled, '-m', 'after-settlement')
+    await git(f.repo, '-C', f.repo, 'update-ref', `refs/heads/${BRANCH}`, next)
+  }],
+] as const) {
+  test(`preparation with no remaining holder refuses a moved branch without mutation: ${name}`, async () => {
+    const f = await launched()
+    await git(f.repo, '-C', f.repo, 'worktree', 'remove', f.worktree)
+    await move(f)
+    const before = await snapshot(f)
+    const start = f.commands.length
+    let reached = false
+    expect(await handOff(f, () => true, async () => { reached = true })).toEqual({ verdict: 'refused', detail: 'branch-moved' })
+    expect(reached).toBe(true)
+    expect(await snapshot(f)).toEqual(before)
+    expect(destructive(f.commands.slice(start))).toEqual([])
   })
 }
 

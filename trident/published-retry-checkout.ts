@@ -77,13 +77,18 @@ const failed = (result: HostCommandResult): boolean => !result.ok || result.time
  * Actual preparation adds the retry's worktree on the branch its terminal
  * predecessor retained, and Git refuses that while the predecessor's linked
  * checkout still holds the branch. The outer launch authority
- * (`readPublishedRetryHandoff`) is re-established here while this run holds
- * the branch's durable reservation; only then does the EXISTING worktree
+ * (`readPublishedRetryHandoff`) is re-established here while this call holds
+ * its own durable `salvage`-purpose reservation of the branch (acquired here,
+ * released when `body` returns); only then does the EXISTING worktree
  * lifecycle (`worktree-cleanup.sh keep-branch`: a plain `git worktree remove`
  * of a clean tree, never `--force`, never a branch deletion) release the one
  * checkout that is exactly the predecessor's recorded worktree at the settled
  * head. `body` runs while the reservation is still held, so the caller's
  * `git worktree add` of the existing branch happens under the same exclusion.
+ *
+ * When no checkout holds the branch any more, the same authority, settled-head,
+ * base-ancestry and publication checks still run and nothing is released: the
+ * outcome is 'handed-off' so the caller re-checks the settled head after its add.
  *
  * 'none' means no owned published retry authority exists: the caller's path is
  * unchanged and no reservation is taken. Every other shape refuses or is
@@ -131,17 +136,22 @@ export async function withRetainedCheckoutHandoff<T>(
       if (failed(tipRead)) return { verdict: 'unknown', detail: 'branch-unreadable' }
       const tip = tipRead.stdout.trim()
       if (parsed.mainHolds) return { verdict: 'refused', detail: 'main-worktree-holds-branch' }
-      if (parsed.holders.length === 0) return { verdict: 'none' }
       if (parsed.holders.length > 1) return { verdict: 'refused', detail: 'multiple-holders' }
-      const holder = parsed.holders[0]!
-      if (holder.locked) return { verdict: 'refused', detail: 'holder-locked' }
-      if (holder.prunable) return { verdict: 'refused', detail: 'holder-prunable' }
-      const real = realpath(holder.path)
-      if (real === null || real !== realpath(handoff.holderWorktree)) return { verdict: 'refused', detail: 'holder-not-recorded-worktree' }
+      const holder = parsed.holders[0] ?? null
+      const real = holder === null ? null : realpath(holder.path)
+      if (holder !== null) {
+        if (holder.locked) return { verdict: 'refused', detail: 'holder-locked' }
+        if (holder.prunable) return { verdict: 'refused', detail: 'holder-prunable' }
+        if (real === null || real !== realpath(handoff.holderWorktree)) return { verdict: 'refused', detail: 'holder-not-recorded-worktree' }
+      }
+      // The branch itself must still be the settled head, whether or not a
+      // checkout still holds it: with no holder the caller attaches the branch
+      // as it stands, so a moved tip would build on an unapproved head.
       if (tip !== handoff.settledHead) return { verdict: 'refused', detail: 'branch-moved' }
       const descends = await git(['merge-base', '--is-ancestor', handoff.priorBase, tip])
       if (descends.timed_out === true || (!descends.ok && descends.exit_code !== 1)) return { verdict: 'unknown', detail: 'base-ancestry-unknown' }
       if (!descends.ok) return { verdict: 'refused', detail: 'base-not-ancestor' }
+      if (holder === null) return { listing: listed.stdout, holders: [], mainHolds: false, tip, holderHead: '', status: '' }
       const top = await git(['rev-parse', '--show-toplevel'], holder.path)
       if (failed(top) || realpath(top.stdout.trim()) !== real) return { verdict: 'refused', detail: 'holder-not-worktree-root' }
       const head = await git(['rev-parse', '--verify', 'HEAD^{commit}'], holder.path)
@@ -169,6 +179,12 @@ export async function withRetainedCheckoutHandoff<T>(
     if (isOutcome(again)) return again.verdict === 'unknown' ? again : { verdict: 'refused', detail: 'observation-changed' }
     const reread = read()
     if (!equal(again, before) || reread === null || !equal(reread, handoff)) return { verdict: 'refused', detail: 'observation-changed' }
+
+    // No checkout holds the branch (the predecessor's was already released): there
+    // is nothing for the lifecycle to remove, and the branch was proven above to be
+    // the settled head carrying the owned PR head. The caller's attach of the
+    // existing branch then re-checks the settled head, as for a released holder.
+    if (before.holders.length === 0) return { verdict: 'handed-off', handoff }
 
     const holder = before.holders[0]!.path
     const cleanup = await runHost(['bash', join(TRIDENT_SCRIPT_DIR, 'worktree-cleanup.sh'), repo, branch, 'keep-branch'], repo)

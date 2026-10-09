@@ -6637,6 +6637,52 @@ for (const [shape, name] of OWNED_RETRY_SHAPES) {
   }, 120_000)
 }
 
+test('owned published retry survives an intermediate retry refused before its first worker', async () => {
+  // The incident's own card: a retry was refused at outer launch, so the card's
+  // newest terminal attempt has no checkpoint. Here the refusal is this path's
+  // own transient UNKNOWN (the owned PR could not be read once). The refused run
+  // is saved and reconciled by the real board observer; the next normal retry
+  // must still reach the settled predecessor and merge.
+  const w = await ownedPublishedRetry('unfinished-fix')
+  const { f, prior } = w
+  const before = await w.observe()
+  const refusedRetry = await w.dispatch()
+  const host = f.context.runHost
+  let failures = 0
+  f.context.runHost = Object.assign(async (...args: Parameters<typeof host>) => {
+    const argv = args[0]
+    if (argv[0] === 'gh' && argv[1] === 'pr' && argv[2] === 'view' && failures++ === 0) {
+      return { ok: false, exit_code: 1, stdout: '', stderr: 'HTTP 502: transient' }
+    }
+    return host(...args)
+  }, { writesDiffOutput: true as const })
+  const refused = await w.launch(refusedRetry.id)
+  expect(refused.outcome).toBeNull()
+  expect(refused.stepped.failure_reason).toContain('UNKNOWN authorises nothing')
+  expect(f.world.dispatches).toEqual([])
+  await f.store.save(refused.stepped)
+  await buildBoardReconcileObserver(w.board, { resolveRepoWebUrl: async () => null })!(f.store.get(refusedRetry.id)!)
+  expect(f.store.attempts(refusedRetry.id)).toEqual([])
+
+  const retry = await w.dispatch()
+  expect(retry).toMatchObject({ published_pr: 1, inner_checkpoint: null, branch: prior.branch,
+    execution_strategy: prior.execution_strategy })
+  const commandsBefore = f.commands.length
+  const { stepped, outcome, errors } = await w.launch(retry.id)
+  expect(errors).toEqual([])
+  expect(stepped.failure_reason).toBeNull()
+  expect(outcome?.kind, outcome ? why(f, outcome) : '').toBe('merged')
+  const commands = f.commands.slice(commandsBefore)
+  expect(f.world.plannerChoices).toEqual(['full'])
+  expect(commands.some(argv => argv[0] === 'gh' && argv[2] === 'create')).toBe(false)
+  expect(f.github.prs).toMatchObject([{ number: 1, state: 'MERGED', headRefName: prior.branch }])
+  expect((await f.context.runHost(['git', '-C', f.origin, 'merge-base', '--is-ancestor', w.settledHead, 'refs/heads/main'], f.origin)).ok).toBe(true)
+  expect(f.store.get(retry.id)!.base_sha).toBe(prior.base_sha)
+  expect(forcing(w, commands)).toEqual([])
+  expect(await w.observe()).toEqual(before)
+  expect(f.db.all('SELECT * FROM code_trident_branch_reservations')).toEqual([])
+}, 120_000)
+
 test('owned published retry: a discovered-but-unowned PR sibling keeps the wrong-base refusal and is untouched', async () => {
   const w = await ownedPublishedRetry('completed-build', { owned: false })
   const { f } = w
@@ -6783,9 +6829,12 @@ async function launchThroughGateway(f: Awaited<ReturnType<typeof fixture>>, runI
     begin_project_build_driver_recovery: (id, reservation) => f.store.beginProjectBuildDriverRecovery(id, reservation),
     sleep: async () => {}, ...extra })
   const advanced = await orch.step(f.store.get(runId)!)
-  if (advanced.run.phase === 'failed') return { stepped: advanced.run, outcome: null, errors }
+  // Restored as soon as this launch is done, so a later launch in the same test
+  // (a retry after a refused one) wraps the real writer, not this spy.
+  if (advanced.run.phase === 'failed') { recording.mockRestore(); return { stepped: advanced.run, outcome: null, errors } }
   expect(await f.store.saveIfActive(advanced.run)).toBe(true)
   await completion
+  recording.mockRestore()
   return { stepped: advanced.run, errors,
     outcome: JSON.parse(f.store.get(runId)!.inner_result!).projectBuild as ProjectBuildOutcome }
 }

@@ -1223,16 +1223,16 @@ export class TridentRunStore {
     ).get(project, item) ?? null
   }
 
-  /** The single card whose exact link names this run, and that card's latest
-   * terminal attempt. A duplicate link or an empty ledger answers null. */
-  linkedCardPredecessor(project: string, runId: string): { item_id: string; prior_run_id: string } | null {
+  /** The single card whose exact link names this run, and that card's terminal
+   * attempts, newest first. A duplicate link or an empty ledger answers null. */
+  linkedCardAttempts(project: string, runId: string): { item_id: string; run_ids: string[] } | null {
     const items = this.db.all<{ id: string }>(
       'SELECT id FROM work_board_items WHERE project_slug = ? AND linked_run_id = ?', [project, runId])
     if (items.length !== 1) return null
-    const attempt = this.db.get<{ run_id: string }>(
+    const attempts = this.db.all<{ run_id: string }>(
       `SELECT run_id FROM work_board_terminal_attempts WHERE project_slug = ? AND item_id = ?
-        ORDER BY rowid DESC LIMIT 1`, [project, items[0]!.id])
-    return attempt ? { item_id: items[0]!.id, prior_run_id: attempt.run_id } : null
+        ORDER BY rowid DESC`, [project, items[0]!.id])
+    return attempts.length > 0 ? { item_id: items[0]!.id, run_ids: attempts.map(row => row.run_id) } : null
   }
 
   /** Whether another nonterminal run or a reservation held for another run

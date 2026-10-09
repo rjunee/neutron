@@ -168,7 +168,12 @@ existing authority:
   project, repository, branch and PR mode; an observed or discovered PR never
   qualifies;
 - the predecessor is a terminal attempt in that card's ledger for the same
-  project, repository and branch, with a valid terminal host checkpoint;
+  project, repository and branch, with a valid terminal host checkpoint. It is
+  the newest such attempt; a newer attempt is passed over only when it is
+  provably a retry refused before its first worker on that same branch (no
+  checkpoint, no recovery, no worker accounting, and no receipt other than this
+  one). A refused retry, including a transient UNKNOWN refusal of this path,
+  never ends the card's recovery, and any other newer attempt refuses;
 - the predecessor's pending worker is settled by its original authenticated
   evidence: the host-saved request, the exact armed reservation, and a completed
   result at the canonical path that the live project-build trailer validator
@@ -187,9 +192,13 @@ elapsed time, a PR number or a matching branch name never establish settlement
 or ownership. Every other shape keeps the existing refusals, and an unknown Git
 observation refuses as UNKNOWN.
 
-Preparation re-establishes the same authority while holding the branch's
-existing durable reservation. When the predecessor's linked checkout still
-holds the branch, it is handed off through the existing worktree cleanup
+Preparation re-establishes the same authority while holding its own durable
+`salvage`-purpose reservation of the branch, acquired for the hand-off and
+released once the worktree add returns; a reservation already held by any other
+run refuses. The branch tip must still be the settled head, descend from the
+base pin and contain the owned PR head observed OPEN, whether or not a checkout
+still holds the branch, and the attached worktree is re-checked at the settled
+head. When the predecessor's linked checkout still holds the branch, it is handed off through the existing worktree cleanup
 lifecycle: a clean, unlocked checkout that is exactly the predecessor's recorded
 worktree at the settled head is removed without force while the branch and every
 commit are kept. A dirty, locked, unverifiable or ambiguous checkout, another
@@ -218,6 +227,23 @@ because a PR exists.
   branch reset, checkout deletion, forced checkout or ownership release.
   Verify: `trident/published-retry-handoff.test.ts` and the preparation
   controls in `open/__tests__/project-build-e2e.test.ts`.
+- [x] A card whose newest terminal attempt is a retry refused before its first
+  worker (here a transient UNKNOWN refusal of this path, saved and reconciled by
+  the real board observer) still reaches merged on the next normal retry. A
+  newer attempt that dispatched a worker, carries another receipt, ran on
+  another branch, was seeded from a checkpoint or holds an inner checkpoint
+  refuses. Verify: `owned published retry survives an intermediate retry` in
+  `open/__tests__/project-build-e2e.test.ts` and the intermediate cases in
+  `trident/published-retry-handoff.test.ts`.
+- [x] With the predecessor's checkout already gone at preparation, a branch
+  rewound or advanced past the settled head refuses as `branch-moved` before
+  any add; at the settled head it is attached and re-checked, with no cleanup.
+  Verify: the `no remaining holder` cases in
+  `trident/published-retry-handoff.test.ts`.
+- [x] Outer launch's tick snapshot of the retry may lag the stored row in
+  columns the authority does not read; a disagreement in a column it does read
+  refuses. Verify: the `tick snapshot` cases in
+  `trident/published-retry-handoff.test.ts`.
 - [x] The predecessor's pending checkpoint is still refused as a retry source;
   the retry imports no checkpoint, approval or suite receipt. Verify:
   `trident/build-mode-state.test.ts`.
