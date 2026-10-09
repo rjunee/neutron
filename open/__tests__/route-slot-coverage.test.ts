@@ -75,6 +75,7 @@ import {
   UNMOUNTED_SLOTS,
   type RouteSlotBaselineEntry,
 } from './route-slot-coverage-inventory.ts'
+import { teardownComposedFixture } from './route-slot-fixture-teardown.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
@@ -201,15 +202,7 @@ async function probeComposedSurfaces(): Promise<void> {
       controlStatus: control.status,
     }
   } finally {
-    for (const cleanup of composition.realmode_cleanups ?? []) {
-      try {
-        cleanup()
-      } catch {
-        /* best-effort */
-      }
-    }
-    await graph.shutdown()
-    db.close()
+    await teardownComposedFixture({ cleanups: composition.realmode_cleanups, graph, db })
   }
 }
 
