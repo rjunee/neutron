@@ -24,6 +24,11 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
+import { drainRealmodeCleanups } from '@neutronai/gateway/index.ts'
+import { ChunkedUploadSweeper } from '@neutronai/gateway/upload/chunked-upload-sweeper.ts'
+import { SqliteUploadSessionStore } from '@neutronai/gateway/upload/upload-session-store.ts'
+import { SupervisedLoop } from '@neutronai/loop'
+import type { LoopDescriptor } from '@neutronai/loop'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -114,10 +119,17 @@ interface ActivityBody {
   turn_in_flight: boolean
 }
 
+/** The composition the REAL Open composer returns for this fixture. */
+type OpenComposition = Awaited<ReturnType<ReturnType<typeof buildOpenGraphComposer>>>
+
 async function withComposition(
   body: (c: {
     handler: (req: Request) => Promise<Response | null>
     get: (path: string) => Promise<Response | null>
+    /** The fixture-owned DB this composition runs on (closed by the fixture). */
+    db: ProjectDb
+    /** The composed object, including its `realmode_cleanups` + `loop_registry`. */
+    composition: OpenComposition
   }) => Promise<void>,
 ): Promise<void> {
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
@@ -144,15 +156,16 @@ async function withComposition(
             headers: { authorization: 'Bearer owner' },
           }),
         ),
+      db,
+      composition,
     })
   } finally {
-    for (const cleanup of composition.realmode_cleanups ?? []) {
-      try {
-        cleanup()
-      } catch {
-        /* best-effort */
-      }
-    }
+    // Quiesce BEFORE close: the production drain awaits every registered
+    // cleanup in forward order (each loop's quiescing stop() waits for its
+    // in-flight tick) and continues past a rejecting one, so no composed loop
+    // can still be writing when the DB closes. A body failure still propagates
+    // after this finally completes.
+    await drainRealmodeCleanups(composition.realmode_cleanups ?? [])
     db.close()
   }
 }
@@ -341,4 +354,372 @@ describe('Activity Inspector — served end-to-end through the real Open compose
       expect(bad?.status).toBe(400)
     })
   })
+})
+
+// ─── Teardown quiescence: the fixture drains BEFORE it closes its DB ───────────
+//
+// `withComposition` boots the REAL composer, which arms real DB-using loops. Its
+// teardown must await the production drain (`drainRealmodeCleanups`) so every
+// loop's quiescing stop() lets an in-flight tick finish its DB write BEFORE
+// `db.close()`. These cases hold a real composed tick behind an explicit barrier
+// and observe the teardown's ordered progress — no fixed microtask flushing, no
+// synthetic loop. All instrumentation is local to this file on purpose.
+
+/** The composed upload sweeper's SupervisedLoop identity (open/wiring/uploads.ts). */
+const SWEEPER_LOOP = 'chunked-upload-sweeper'
+/** The seeded, already-expired `uploading` row the held tick must process. */
+const HELD_UPLOAD_ID = 'held-expired-1'
+/** Labelled guard deadline: a hang reports as a NAMED wait, not a test timeout. */
+const WAIT_GUARD_MS = 10_000
+
+interface Deferred {
+  promise: Promise<void>
+  release: () => void
+}
+
+function deferred(): Deferred {
+  let release!: () => void
+  const promise = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  return { promise, release }
+}
+
+/** Ordered event log whose waits are resolved by the push itself (no polling). */
+interface Recorder {
+  events: string[]
+  push(event: string): void
+  has(event: string): boolean
+  count(event: string): number
+  waitFor(event: string): Promise<void>
+}
+
+function recorder(): Recorder {
+  const events: string[] = []
+  const waiters = new Map<string, Array<() => void>>()
+  return {
+    events,
+    push(event) {
+      events.push(event)
+      const pending = waiters.get(event)
+      if (pending === undefined) return
+      waiters.delete(event)
+      for (const wake of pending) wake()
+    },
+    has: (event) => events.includes(event),
+    count: (event) => events.filter((e) => e === event).length,
+    waitFor(event) {
+      if (events.includes(event)) return Promise.resolve()
+      return new Promise<void>((resolve, reject) => {
+        const guard = setTimeout(() => {
+          reject(
+            new Error(
+              `waitFor('${event}') passed its ${WAIT_GUARD_MS}ms guard deadline; events so far: ${events.join(' > ')}`,
+            ),
+          )
+        }, WAIT_GUARD_MS)
+        const list = waiters.get(event) ?? []
+        list.push(() => {
+          clearTimeout(guard)
+          resolve()
+        })
+        waiters.set(event, list)
+      })
+    },
+  }
+}
+
+/** Instance-level close probe: records WHEN the fixture closes its DB. */
+function armDbClose(db: ProjectDb, rec: Recorder): void {
+  const realClose = db.close.bind(db)
+  db.close = () => {
+    rec.push('db:closed')
+    realClose()
+  }
+}
+
+/**
+ * Replace every REGISTERED cleanup IN PLACE with a counting wrapper, before
+ * teardown begins, so the fixture's own drain is what is counted. Positive
+ * control: a composition with no registered cleanup would make the count vacuous.
+ */
+function countCleanups(composition: OpenComposition): number[] {
+  const cleanups = composition.realmode_cleanups
+  expect(cleanups).toBeDefined()
+  const counts: number[] = []
+  cleanups!.forEach((orig, i) => {
+    counts[i] = 0
+    cleanups![i] = () => {
+      counts[i] = (counts[i] ?? 0) + 1
+      return orig()
+    }
+  })
+  expect(counts.length).toBeGreaterThan(0)
+  return counts
+}
+
+/**
+ * Prototype instrumentation for the composed upload sweeper, installed BEFORE the
+ * composer runs (module identity matches what open/wiring/uploads.ts imports):
+ *  - captures the sweeper's SupervisedLoop by its IDENTITY (its name);
+ *  - holds the real `SqliteUploadSessionStore.markExpired` write for the seeded
+ *    row behind `gate`, then runs the original and records its real result;
+ *  - records the sweeper's quiescing stop() start/end as teardown progress.
+ * `restore()` must run in the test's finally.
+ */
+interface SweeperProbe {
+  loop(): SupervisedLoop | null
+  restore(): void
+}
+
+function installSweeperProbe(rec: Recorder, gate: Promise<void>): SweeperProbe {
+  const realStart = SupervisedLoop.prototype.start
+  const realMarkExpired = SqliteUploadSessionStore.prototype.markExpired
+  const realStop = ChunkedUploadSweeper.prototype.stop
+  let captured: SupervisedLoop | null = null
+
+  SupervisedLoop.prototype.start = function probedStart(this: SupervisedLoop): void {
+    if ((this as unknown as { name: string }).name === SWEEPER_LOOP) captured = this
+    return realStart.call(this)
+  }
+  SqliteUploadSessionStore.prototype.markExpired = async function probedMarkExpired(
+    this: SqliteUploadSessionStore,
+    upload_id: string,
+  ): Promise<boolean> {
+    if (upload_id !== HELD_UPLOAD_ID) return realMarkExpired.call(this, upload_id)
+    rec.push('markExpired:entered')
+    await gate
+    try {
+      const result = await realMarkExpired.call(this, upload_id)
+      rec.push(`markExpired:wrote:${String(result)}`)
+      return result
+    } catch (err) {
+      rec.push('markExpired:threw')
+      throw err
+    }
+  }
+  ChunkedUploadSweeper.prototype.stop = async function probedStop(
+    this: ChunkedUploadSweeper,
+  ): Promise<void> {
+    rec.push('sweeper.stop:start')
+    await realStop.call(this)
+    rec.push('sweeper.stop:end')
+  }
+
+  return {
+    loop: () => captured,
+    restore() {
+      SupervisedLoop.prototype.start = realStart
+      SqliteUploadSessionStore.prototype.markExpired = realMarkExpired
+      ChunkedUploadSweeper.prototype.stop = realStop
+    },
+  }
+}
+
+function heldRowStatus(db: ProjectDb): string | undefined {
+  return db.get<{ status: string }, [string]>(
+    'SELECT status FROM upload_sessions WHERE upload_id = ?',
+    [HELD_UPLOAD_ID],
+  )?.status
+}
+
+describe('withComposition quiesces the composed loops before it closes the DB', () => {
+  for (const outcome of ['returns', 'throws'] as const) {
+    test(
+      `a held real sweeper tick finishes its DB write before close (body ${outcome})`,
+      async () => {
+        const rec = recorder()
+        const tick = deferred()
+        const probe = installSweeperProbe(rec, tick.promise)
+        const bodyFailure = new Error('body-failure')
+        let bodyErr: unknown = null
+        let heldDb: ProjectDb | null = null
+        let sweeperDescriptor: LoopDescriptor | undefined
+        let counts: number[] = []
+        let settled: Promise<void> = Promise.resolve()
+        try {
+          const run = withComposition(async ({ db, composition }) => {
+            heldDb = db
+            armDbClose(db, rec)
+            counts = countCleanups(composition)
+
+            // The composed loop is live and is the one the probe captured.
+            sweeperDescriptor = composition.loop_registry?.get(SWEEPER_LOOP)
+            expect(sweeperDescriptor?.isActive?.()).toBe(true)
+            const loop = probe.loop()
+            expect(loop).not.toBeNull()
+
+            // Seed a KNOWN expired row that is still `uploading`.
+            const store = new SqliteUploadSessionStore(db)
+            const now = Date.now()
+            await store.create({
+              upload_id: HELD_UPLOAD_ID,
+              project_slug: 'owner',
+              source: 'chatgpt',
+              filename: 'x.zip',
+              total_bytes: 10,
+              mime_type: 'application/zip',
+              created_at: now - 120_000,
+              expires_at: now - 60_000,
+            })
+            expect((await store.get(HELD_UPLOAD_ID))?.status).toBe('uploading')
+            const expired = await store.listExpiredUploading(Date.now(), 100)
+            expect(expired.map((r) => r.upload_id)).toContain(HELD_UPLOAD_ID)
+
+            // Drive the REAL composed loop tick; it enters the held write.
+            void loop!.runOnce()
+            await rec.waitFor('markExpired:entered')
+            if (outcome === 'throws') throw bodyFailure
+          })
+          settled = run.then(
+            () => rec.push('teardown:settled'),
+            (err: unknown) => {
+              bodyErr = err
+              rec.push('teardown:settled')
+            },
+          )
+
+          // Teardown has reached the sweeper's quiescing stop() while the tick is held.
+          await rec.waitFor('sweeper.stop:start')
+          expect(rec.has('markExpired:entered')).toBe(true)
+          expect({
+            teardownSettledWhileHeld: rec.has('teardown:settled'),
+            dbClosedWhileHeld: rec.has('db:closed'),
+          }).toEqual({ teardownSettledWhileHeld: false, dbClosedWhileHeld: false })
+          // The DB is still open and usable while the tick is held.
+          expect(heldRowStatus(heldDb!)).toBe('uploading')
+
+          tick.release()
+          await settled
+
+          // The held write committed before close, and close preceded settlement.
+          const order = [
+            'markExpired:entered',
+            'sweeper.stop:start',
+            'markExpired:wrote:true',
+            'sweeper.stop:end',
+            'db:closed',
+            'teardown:settled',
+          ]
+          const positions = order.map((e) => rec.events.indexOf(e))
+          expect({ teardownOrder: positions.every((p, i) => p >= 0 && (i === 0 || p > positions[i - 1]!)) }).toEqual({
+            teardownOrder: true,
+          })
+          expect(rec.has('markExpired:threw')).toBe(false)
+          expect(rec.count('db:closed')).toBe(1)
+
+          // The loop is inactive, and each registered cleanup ran exactly once.
+          expect(sweeperDescriptor?.isActive?.()).toBe(false)
+          expect({ cleanupRunsPerTeardown: counts }).toEqual({
+            cleanupRunsPerTeardown: counts.map(() => 1),
+          })
+
+          // The real write landed: reopen the file and read the row.
+          const verify = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
+          try {
+            expect(heldRowStatus(verify)).toBe('expired')
+          } finally {
+            verify.close()
+          }
+
+          if (outcome === 'throws') expect(bodyErr).toBe(bodyFailure)
+          else expect(bodyErr).toBeNull()
+        } finally {
+          tick.release()
+          await settled
+          probe.restore()
+        }
+      },
+      30_000,
+    )
+  }
+
+  test('a rejecting cleanup does not skip a later held one or close early', async () => {
+    const rec = recorder()
+    const gate = deferred()
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    let heldDb: ProjectDb | null = null
+    let counts: number[] = []
+    const appended = { reject: 0, held: 0 }
+    let settled: Promise<void> = Promise.resolve()
+    let runErr: unknown = null
+    try {
+      const run = withComposition(async ({ db, composition }) => {
+        heldDb = db
+        armDbClose(db, rec)
+        counts = countCleanups(composition)
+        composition.realmode_cleanups!.push(async () => {
+          appended.reject++
+          rec.push('reject:ran')
+          throw new Error('cleanup-reject')
+        })
+        composition.realmode_cleanups!.push(async () => {
+          appended.held++
+          rec.push('held:entered')
+          await gate.promise
+          rec.push('held:released')
+        })
+      })
+      settled = run.then(
+        () => rec.push('teardown:settled'),
+        (err: unknown) => {
+          runErr = err
+          rec.push('teardown:settled')
+        },
+      )
+
+      await rec.waitFor('held:entered')
+      expect(rec.events.indexOf('reject:ran')).toBeGreaterThanOrEqual(0)
+      expect(rec.events.indexOf('reject:ran')).toBeLessThan(rec.events.indexOf('held:entered'))
+      expect({
+        teardownSettledWhileHeld: rec.has('teardown:settled'),
+        dbClosedWhileHeld: rec.has('db:closed'),
+      }).toEqual({ teardownSettledWhileHeld: false, dbClosedWhileHeld: false })
+      expect(heldDb!.get<{ one: number }>('SELECT 1 AS one')?.one).toBe(1)
+
+      gate.release()
+      await settled
+      expect(runErr).toBeNull()
+
+      const order = ['reject:ran', 'held:entered', 'held:released', 'db:closed', 'teardown:settled']
+      const positions = order.map((e) => rec.events.indexOf(e))
+      expect({ teardownOrder: positions.every((p, i) => p >= 0 && (i === 0 || p > positions[i - 1]!)) }).toEqual({
+        teardownOrder: true,
+      })
+      expect({ cleanupRunsPerTeardown: counts }).toEqual({
+        cleanupRunsPerTeardown: counts.map(() => 1),
+      })
+      expect(appended).toEqual({ reject: 1, held: 1 })
+      expect(rec.count('db:closed')).toBe(1)
+
+      await new Promise<void>((resolve) => setImmediate(resolve))
+      expect(unhandled).toEqual([])
+    } finally {
+      gate.release()
+      await settled
+      process.off('unhandledRejection', onUnhandled)
+    }
+  }, 30_000)
+
+  test('control: with no registered cleanup the fixture still closes normally', async () => {
+    const rec = recorder()
+    let sweeperDescriptor: LoopDescriptor | undefined
+    await withComposition(async ({ db, composition }) => {
+      armDbClose(db, rec)
+      sweeperDescriptor = composition.loop_registry?.get(SWEEPER_LOOP)
+      expect(sweeperDescriptor?.isActive?.()).toBe(true)
+      // Take every registered cleanup off the list and dispose of them here, so
+      // the fixture's own drain sees an empty list and no loop is live at close.
+      const saved = composition.realmode_cleanups!.splice(0)
+      expect(saved.length).toBeGreaterThan(0)
+      await drainRealmodeCleanups(saved)
+      expect(composition.realmode_cleanups).toEqual([])
+    })
+    expect(rec.count('db:closed')).toBe(1)
+    expect(sweeperDescriptor?.isActive?.()).toBe(false)
+  }, 30_000)
 })
