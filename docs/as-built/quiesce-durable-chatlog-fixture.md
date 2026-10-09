@@ -83,3 +83,30 @@ None failed by timeout, syntax or import error.
 
 The route-slot, activity-inspector and integration fixtures are separate cards.
 This change does not by itself close #1389.
+
+### Review follow-up (2026-10-09)
+
+This resumes PR #1478. Its approved head `b4763b78` is merged unchanged onto
+main, and a follow-up commit adds the two review nits:
+
+- The earlier-rejection regression now checks that `cleanup:1:reject` is present
+  (`>= 0`) before its ordering assertion. Without that, a missing event's `-1`
+  index would satisfy the `toBeLessThan` assertion vacuously.
+- The empty-cleanup control now patches `graph.shutdown` and `db.close` inside
+  its `try` and restores both in `finally`. It reassigns the original or deletes
+  the own property, the same way the held-close driver does.
+
+The checks were run again on the merged tree:
+
+- `bun test open/__tests__/open-app-ws-durable-chatlog.test.ts`: 13 pass, 0 fail.
+- Removing the drain `await` fails the held and rejection tests: while-held
+  violations contain `graph:shutdown while the tick was held`.
+- Moving `db.close()` before the drain fails the held, rejection and
+  empty-control tests with `db:close while the tick was held`. In the control
+  trace, `db:close` comes before `graph:shutdown`.
+- Duplicating the drain line fails the held and rejection tests: the
+  exact-once counts assertion receives `2`, not `1`.
+- After each mutation was reverted, the focused run was back to 13 pass.
+- `bash scripts/ci/typecheck-all.sh` fails only on `app/tsconfig.json`, the same
+  pre-existing unused `@ts-expect-error` in `app/__tests__/support/mount.tsx`.
+- `bash scripts/ci/lint.sh` passed and `git diff --check` is clean.

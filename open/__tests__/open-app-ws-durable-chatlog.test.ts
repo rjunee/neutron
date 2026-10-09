@@ -923,6 +923,9 @@ describe('durable chat-log harness close quiesces composed loops before DB close
     // Registration order kept: both earlier cleanups rejected, in order, before the sweeper stop.
     expect(at('cleanup:0:reject')).toBeGreaterThanOrEqual(0)
     expect(at('cleanup:0:reject')).toBeLessThan(at('cleanup:1:enter'))
+    // Presence first: indexOf returns -1 for a missing event, which would pass the
+    // ordering assertion below vacuously.
+    expect(at('cleanup:1:reject')).toBeGreaterThanOrEqual(0)
     expect(at('cleanup:1:reject')).toBeLessThan(at('loop:stop-entered'))
     expect(report.sweeperIndex).toBeGreaterThan(1)
     expect(report.counts[0]).toBe(1)
@@ -938,19 +941,25 @@ describe('durable chat-log harness close quiesces composed loops before DB close
     await drainRealmodeCleanups(saved)
     const trace: string[] = []
     const graphOwn = h.graph as { shutdown: () => Promise<void> }
+    const hadOwnShutdown = Object.prototype.hasOwnProperty.call(h.graph, 'shutdown')
     const realShutdown = h.graph.shutdown
-    graphOwn.shutdown = (): Promise<void> => { trace.push('graph:shutdown'); return realShutdown.call(h.graph) }
     const dbOwn = h.db as unknown as { close: () => void }
+    const hadOwnClose = Object.prototype.hasOwnProperty.call(h.db, 'close')
     const realClose = h.db.close
-    dbOwn.close = (): void => { trace.push('db:close'); realClose.call(h.db) }
     let closeError: string | null = null
     try {
+      graphOwn.shutdown = (): Promise<void> => { trace.push('graph:shutdown'); return realShutdown.call(h.graph) }
+      dbOwn.close = (): void => { trace.push('db:close'); realClose.call(h.db) }
       await h.close()
       trace.push('close:settled')
     } catch (err) {
       closeError = errText(err)
     } finally {
       harness = null
+      if (hadOwnShutdown) graphOwn.shutdown = realShutdown
+      else delete (h.graph as unknown as Record<string, unknown>)['shutdown']
+      if (hadOwnClose) dbOwn.close = realClose
+      else delete (h.db as unknown as Record<string, unknown>)['close']
     }
     expect(closeError).toBeNull()
     expect(trace).toEqual(['graph:shutdown', 'db:close', 'close:settled'])
