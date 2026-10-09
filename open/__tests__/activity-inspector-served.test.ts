@@ -385,6 +385,12 @@ function deferred(): Deferred {
   return { promise, release }
 }
 
+/** A pending wait plus a way to abandon it (clears its guard timer and waker). */
+interface Wait {
+  promise: Promise<void>
+  cancel(): void
+}
+
 /** Ordered event log whose waits are resolved by the push itself (no polling). */
 interface Recorder {
   events: string[]
@@ -392,6 +398,8 @@ interface Recorder {
   has(event: string): boolean
   count(event: string): number
   waitFor(event: string): Promise<void>
+  /** Like `waitFor`, but cancellable by a caller that stops waiting early. */
+  wait(event: string): Wait
 }
 
 function recorder(): Recorder {
@@ -409,22 +417,41 @@ function recorder(): Recorder {
     has: (event) => events.includes(event),
     count: (event) => events.filter((e) => e === event).length,
     waitFor(event) {
-      if (events.includes(event)) return Promise.resolve()
-      return new Promise<void>((resolve, reject) => {
-        const guard = setTimeout(() => {
+      return this.wait(event).promise
+    },
+    wait(event) {
+      if (events.includes(event)) return { promise: Promise.resolve(), cancel: () => {} }
+      let guard: ReturnType<typeof setTimeout> | undefined
+      let wake: (() => void) | undefined
+      const promise = new Promise<void>((resolve, reject) => {
+        guard = setTimeout(() => {
           reject(
             new Error(
               `waitFor('${event}') passed its ${WAIT_GUARD_MS}ms guard deadline; events so far: ${events.join(' > ')}`,
             ),
           )
         }, WAIT_GUARD_MS)
-        const list = waiters.get(event) ?? []
-        list.push(() => {
+        wake = () => {
           clearTimeout(guard)
           resolve()
-        })
+        }
+        const list = waiters.get(event) ?? []
+        list.push(wake)
         waiters.set(event, list)
       })
+      return {
+        promise,
+        // Abandoned (e.g. it lost the race in untilOrRunFailure): stop the guard
+        // timer and drop the waker, so no stale deadline outlives the test.
+        cancel() {
+          clearTimeout(guard)
+          const list = waiters.get(event)
+          if (list === undefined || wake === undefined) return
+          const rest = list.filter((w) => w !== wake)
+          if (rest.length === 0) waiters.delete(event)
+          else waiters.set(event, rest)
+        },
+      }
     },
   }
 }
@@ -439,26 +466,33 @@ function armDbClose(db: ProjectDb, rec: Recorder): void {
 }
 
 /**
- * Await `waiting`, but if the composition run REJECTS first with anything other
+ * Wait for `event`, but if the composition run REJECTS first with anything other
  * than the body's own `expected` failure (an in-body assertion, or the composer
  * itself), throw that error: the real cause, not a later guard-deadline timeout
- * that hides it.
+ * that hides it. Whichever way the race goes, the wait is cancelled afterwards,
+ * so a wait that lost the race leaves no guard timer running.
  */
 async function untilOrRunFailure(
-  waiting: Promise<void>,
+  rec: Recorder,
+  event: string,
   run: Promise<void>,
   expected?: unknown,
 ): Promise<void> {
-  await Promise.race([
-    waiting,
-    run.then(
-      () => waiting,
-      (err: unknown) => {
-        if (expected !== undefined && err === expected) return waiting
-        throw err
-      },
-    ),
-  ])
+  const waiting = rec.wait(event)
+  try {
+    await Promise.race([
+      waiting.promise,
+      run.then(
+        () => waiting.promise,
+        (err: unknown) => {
+          if (expected !== undefined && err === expected) return waiting.promise
+          throw err
+        },
+      ),
+    ])
+  } finally {
+    waiting.cancel()
+  }
 }
 
 /**
@@ -466,10 +500,12 @@ async function untilOrRunFailure(
  * thenable (which `await` adopts by calling its `then`) that records
  * `<label>:handled` only when a consumer attaches a rejection handler, and
  * delivers its error only through that handler, so it can never surface as an
- * unhandled rejection. The record is the positive evidence that the drain caught
- * the rejection; a process-level `unhandledRejection` listener cannot provide
- * it under `bun test`, whose runner fails the running test on an unhandled
- * rejection before any such listener can observe it.
+ * unhandled rejection. `<label>:handled` proves only that the drain consumed the
+ * rejection; that the drain then CONTINUED is proven separately, by the later
+ * cleanup entering and by the ordered events after it. A process-level
+ * `unhandledRejection` listener cannot provide this evidence under `bun test`,
+ * whose runner fails the running test on an unhandled rejection before any such
+ * listener can observe it.
  */
 function observedRejection(rec: Recorder, label: string): Promise<void> {
   rec.push(`${label}:ran`)
@@ -511,12 +547,18 @@ function countCleanups(composition: OpenComposition): number[] {
  *  - holds the real `SqliteUploadSessionStore.markExpired` write for the seeded
  *    row behind `gate`, then runs the original and records its real result;
  *  - records the sweeper's quiescing stop() start/end as teardown progress.
- * `restore()` must run in the test's finally.
+ * `restore()` is idempotent. The test calls it FIRST in its finally, before it
+ * awaits teardown, and the suite's `afterEach` calls it again for any probe still
+ * installed, so the prototypes are restored even when teardown hangs and the test
+ * is abandoned at its timeout without its finally completing.
  */
 interface SweeperProbe {
   loop(): SupervisedLoop | null
   restore(): void
 }
+
+/** Probes not yet restored; the describe's `afterEach` restores any left over. */
+const installedProbes = new Set<SweeperProbe>()
 
 function installSweeperProbe(rec: Recorder, gate: Promise<void>): SweeperProbe {
   const realStart = SupervisedLoop.prototype.start
@@ -552,14 +594,17 @@ function installSweeperProbe(rec: Recorder, gate: Promise<void>): SweeperProbe {
     rec.push('sweeper.stop:end')
   }
 
-  return {
+  const probe: SweeperProbe = {
     loop: () => captured,
     restore() {
+      if (!installedProbes.delete(probe)) return
       SupervisedLoop.prototype.start = realStart
       SqliteUploadSessionStore.prototype.markExpired = realMarkExpired
       ChunkedUploadSweeper.prototype.stop = realStop
     },
   }
+  installedProbes.add(probe)
+  return probe
 }
 
 function heldRowStatus(db: ProjectDb): string | undefined {
@@ -570,6 +615,12 @@ function heldRowStatus(db: ProjectDb): string | undefined {
 }
 
 describe('withComposition quiesces the composed loops before it closes the DB', () => {
+  // Safety net: a test abandoned at its timeout (a hung teardown) never finishes
+  // its finally, so restore any probe it left installed before the next test.
+  afterEach(() => {
+    for (const probe of [...installedProbes]) probe.restore()
+  })
+
   for (const outcome of ['returns', 'throws'] as const) {
     test(
       `a held real sweeper tick finishes its DB write before close (body ${outcome})`,
@@ -637,7 +688,7 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
           )
 
           // Teardown has reached the sweeper's quiescing stop() while the tick is held.
-          await untilOrRunFailure(rec.waitFor('sweeper.stop:start'), run, bodyFailure)
+          await untilOrRunFailure(rec, 'sweeper.stop:start', run, bodyFailure)
           surfaceUnexpected(inBodyErr)
           expect(rec.has('markExpired:entered')).toBe(true)
           expect({
@@ -684,9 +735,12 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
             verify.close()
           }
         } finally {
+          // Restore the prototypes BEFORE awaiting teardown, so a hung or failing
+          // teardown cannot leave them patched. In-flight probed calls keep the
+          // originals they captured, so restoring here cannot strand the held tick.
+          probe.restore()
           tick.release()
           await settled
-          probe.restore()
         }
       },
       30_000,
@@ -732,7 +786,7 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
         },
       )
 
-      await untilOrRunFailure(rec.waitFor('held:entered'), run)
+      await untilOrRunFailure(rec, 'held:entered', run)
       expect(rec.events.indexOf('reject:ran')).toBeGreaterThanOrEqual(0)
       expect(rec.events.indexOf('reject:ran')).toBeLessThan(rec.events.indexOf('held:entered'))
       expect({
@@ -756,8 +810,9 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
       expect(appended).toEqual({ reject: 1, held: 1 })
       expect(rec.count('db:closed')).toBe(1)
 
-      // The drain consumed the rejection (a handler was attached and it
-      // delivered there) before it moved on to the held cleanup.
+      // The drain consumed the rejection (a handler was attached and the error
+      // was delivered there). That it then continued is what the held cleanup
+      // entering, and the order asserted above, prove.
       expect(rec.count('reject:handled')).toBe(1)
       expect(rec.events.indexOf('reject:handled')).toBeLessThan(rec.events.indexOf('held:entered'))
     } finally {
