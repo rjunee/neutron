@@ -88,6 +88,10 @@ import { summarizeUsageCoverage } from '../../tests/fixtures/trident-usage-cover
 import { decodeLedger } from '../../tests/fixtures/trident-ledger-delta/decode.ts'
 // eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
 import { compareLedgerDelta } from '../../tests/fixtures/trident-ledger-delta/compare.ts'
+// eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
+import { decodeSequenceTrace, type SequenceEventKind } from '../../tests/fixtures/trident-sequence-trace/decode.ts'
+// eslint-disable-next-line import/no-relative-packages -- tests/ is root test-support, not a workspace package; no @neutronai specifier exists (same reason as the tests/support exceptions in eslint.config.mjs)
+import { validateCompletedSequence } from '../../tests/fixtures/trident-sequence-trace/validate.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import { deriveQuotaWait } from '@neutronai/trident/run-progress.ts'
 import { reconcileClaudeNativeUsage } from '../wiring/claude-native-usage-reconcile.ts'
@@ -7568,6 +7572,37 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   const main = await spawnCapture(['git', '-C', mergeMode === 'pr' ? f.origin : f.repo, 'show', 'main:NOTES.md'], f.repo)
   expect(main.stdout.trim()).toBe('seed')
 
+  // Synthetic sequence trace (tests/fixtures/trident-sequence-trace), built ONLY
+  // from host observations: the fixture run identity, the accepted plan's task
+  // count, the ledger delta's completed task, and the recovery outcome's kind and
+  // remainder. An outcome kind outside the trace grammar throws; never coerced.
+  // This is a synthetic consumer, not authentication of live run evidence.
+  const traceKind = (kind: string): SequenceEventKind => {
+    switch (kind) {
+      case 'continued': return 'continued'
+      case 'merged': return 'merged'
+      default: throw new Error(`outcome kind ${kind} has no sequence-trace event`)
+    }
+  }
+  if (outcome.kind !== 'continued') throw new Error(`recovery outcome is ${outcome.kind}, not continued`)
+  const taskCount = acceptedLedger.ledger.tasks.length
+  const firstTask = delta.after.completed
+  expect(f.world.selectedTasks[firstTask - 1]).toBe(`- [ ] ${acceptedLedger.ledger.tasks[firstTask - 1]!.label}`)
+  const observedTrace = { runId: f.row.id, taskCount, events: [
+    { task: firstTask, kind: traceKind(outcome.kind), remainingTasks: outcome.remainingTasks },
+  ] }
+  const decodedPrefix = decodeSequenceTrace(observedTrace)
+  if (!decodedPrefix.ok) throw new Error(decodedPrefix.reason)
+  // The validator's own statement that the unfinished task cannot publish.
+  expect(validateCompletedSequence(decodedPrefix.trace))
+    .toEqual({ status: 'incomplete', runId: f.row.id, taskCount: 2, completedTasks: 1, nextTask: 2 })
+  // Derivative premature merge: the observed intermediate event re-kinded merged.
+  const prematureMerge = decodeSequenceTrace({ ...observedTrace,
+    events: observedTrace.events.map(event => ({ ...event, kind: 'merged' })) })
+  if (!prematureMerge.ok) throw new Error(prematureMerge.reason)
+  expect(validateCompletedSequence(prematureMerge.trace))
+    .toEqual({ status: 'rejected', reason: 'event 0: merged before the final task' })
+
   // Recovery produced a real continuation: its next reader can build T2.
   const next = await createProjectBuildHost(await f.prepare())
   const terminal = await next.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)
@@ -7575,6 +7610,27 @@ test(`same-run task-sequence crash ${boundary} in ${mergeMode} cannot publish un
   expect(f.world.plannerChoices).toEqual(['full', 'next'])
   expect(f.world.selectedTasks).toEqual(['- [ ] T1 record the note', '- [ ] T2 record another note'])
   expect(delta.after.firstUnchecked).toBe(f.world.selectedTasks[1]!)
+  // Task two: the selected task's position in the accepted plan, the terminal
+  // outcome's kind, and the terminal durable built checkpoint's own remainder
+  // read from stage-event history (independently asserted zero).
+  const secondTask = acceptedLedger.ledger.tasks.findIndex(task => `- [ ] ${task.label}` === f.world.selectedTasks[1]) + 1
+  expect(secondTask).toBe(firstTask + 1)
+  const durableBuilt = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
+    .map(event => JSON.parse(event.meta!).checkpoint as Record<string, unknown> | undefined)
+    .filter(checkpoint => checkpoint?.stage === 'built' && checkpoint.head && !checkpoint.pending)
+  const terminalBuilt = durableBuilt.at(-1)
+  if (terminalBuilt === undefined) throw new Error('no durable built checkpoint in stage-event history')
+  expect(terminalBuilt.head).not.toBe(interruptedHead)
+  expect(terminalBuilt.remainingTasks).toBe(0)
+  const completedTrace = { ...observedTrace, events: [...observedTrace.events,
+    { task: secondTask, kind: traceKind(terminal.kind), remainingTasks: terminalBuilt.remainingTasks }] }
+  const decodedCompleted = decodeSequenceTrace(completedTrace)
+  if (!decodedCompleted.ok) throw new Error(decodedCompleted.reason)
+  expect(validateCompletedSequence(decodedCompleted.trace)).toEqual({ status: 'accepted', runId: f.row.id, taskCount: 2 })
+  // Derivative reorder of the observed completed trace.
+  const reordered = decodeSequenceTrace({ ...completedTrace, events: [...completedTrace.events].reverse() })
+  if (!reordered.ok) throw new Error(reordered.reason)
+  expect(validateCompletedSequence(reordered.trace)).toEqual({ status: 'rejected', reason: 'event 0: task is not the next task' })
   expect(f.world.dispatches[0]).toMatchObject({ role: 'plan', step_id: `${f.row.id}:task:1:plan:0` })
   if (mergeMode === 'local') expect(f.commands.some(argv => argv[0] === 'gh')).toBe(false)
 }, 300_000)
