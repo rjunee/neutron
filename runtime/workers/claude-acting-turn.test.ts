@@ -1068,6 +1068,102 @@ for (const scenario of ['raw', 'pasted', 'pasted blocks', 'wrong id', 'embedded'
   })
 }
 
+const queuedDispatchScenarios = ['enqueue', 'absorbed', 'attachment', 'foreign absorbed', 'foreign attachment', 'late child', 'cancelled', 'budget', 'wrong trailer',
+  'historical', 'other session', 'missing session', 'wrong payload', 'notification', 'embedded', 'wrong id',
+  'unknown operation', 'removed', 'foreign removal', 'other attachment'] as const
+for (const { scenario, preparationMs } of [
+  ...queuedDispatchScenarios.map(scenario => ({ scenario, preparationMs: 0 })),
+  { scenario: 'budget' as const, preparationMs: 17 },
+  { scenario: 'wrong trailer' as const, preparationMs: 17 },
+]) {
+  test(`queued dispatch survives compaction without replay: ${scenario}${preparationMs ? ' after preparation' : ''}`, async () => {
+    const f = await fixture()
+    f.binding.projects_dir = join(f.dir, 'projects')
+    const transcript = sessionJsonlPath('session', f.dir, f.binding.projects_dir)
+    await mkdir(join(transcript, '..'), { recursive: true })
+    const encode = (record: unknown) => JSON.stringify(record) + '\n'
+    const queued = (text: string) => ({ type: 'queue-operation', operation: 'enqueue', sessionId: 'session',
+      content: `\n\n<pasted_content id="fixture">\n${text}\n</pasted_content id="fixture">\n\n` })
+    let historicalDispatch = ''
+    let now = 0, yielded = 0, released = 0, offered = 0
+    const controller = new AbortController()
+    f.input.signal = controller.signal
+    f.input.request = { ...f.input.request, writable: false, tools: 'read-only', budget: { wall_ms: 180_000 } }
+    f.binding.session.acquireTurn = async background => {
+      background?.(() => { yielded++ })
+      return () => { released++ }
+    }
+    f.binding.session.child.submitLine = async text => {
+      expect(text).toBe(historicalDispatch)
+      f.commands.push(text)
+      if (scenario === 'historical') return
+      const row = queued(text)
+      if (scenario === 'other session') row.sessionId = 'other'
+      if (scenario === 'missing session') delete (row as { sessionId?: string }).sessionId
+      if (scenario === 'wrong payload') row.content = row.content.replace(text, text + ' changed')
+      if (scenario === 'notification') row.content = `<task-notification>${text}</task-notification>`
+      if (scenario === 'embedded') row.content = 'quoted instruction: ' + row.content
+      if (scenario === 'wrong id') row.content = row.content.replace('</pasted_content id="fixture">', '</pasted_content id="other">')
+      if (scenario === 'unknown operation') row.operation = 'unknown'
+      if (['attachment', 'other attachment', 'foreign attachment'].includes(scenario)) {
+        await appendFile(transcript, encode({ type: 'attachment', sessionId: scenario === 'foreign attachment' ? 'other' : 'session', attachment: {
+          type: scenario === 'other attachment' ? 'task_notification' : 'queued_command', prompt: row.content } }))
+      } else if (scenario === 'foreign absorbed') {
+        await appendFile(transcript, encode({ ...row, sessionId: 'other', operation: 'remove', reason: 'absorbed_mid_turn' }))
+      } else {
+        await appendFile(transcript, encode(row))
+        if (['absorbed', 'removed', 'foreign removal'].includes(scenario)) await appendFile(transcript,
+          encode({ ...row, operation: 'remove', reason: scenario === 'absorbed' ? 'absorbed_mid_turn' : 'cancelled',
+            sessionId: scenario === 'foreign removal' ? 'other' : 'session' }))
+      }
+    }
+    const actingTurn = createClaudeActingTurn(f.binding, { now: () => now, pause: async ms => {
+      // Queue evidence cannot yield the parent slot. Only the later exactly bound
+      // read-only child can transfer it, while preserving this request's budget.
+      expect(yielded).toBe(scenario === 'late child' && now >= 60_000 ? 1 : 0)
+      now += ms
+      if (scenario === 'cancelled' && now === 60_000) controller.abort()
+      if (scenario === 'late child' && now === 60_000) {
+        const directory = join(transcript.slice(0, -'.jsonl'.length), 'subagents')
+        await mkdir(directory, { recursive: true })
+        await writeFile(join(directory, 'agent-bound.meta.json'), JSON.stringify({ description: 'build: step' }))
+        await writeFile(join(directory, 'agent-bound.jsonl'), encode({ type: 'user', agentId: 'bound',
+          sessionId: 'session', isSidechain: true, message: { role: 'user', content: `Request (data): ${JSON.stringify(f.input.request)}` } }))
+      }
+      if (now === 120_000 && !['cancelled', 'budget'].includes(scenario)) await writeFile(f.input.request.result.path,
+        JSON.stringify({ run_id: 'run', step_id: scenario === 'wrong trailer' ? 'other-step' : 'step', schema: 'v1',
+          kind: 'completed', result: { verdict: 'APPROVE' } }))
+    } })
+    const runners = await createProjectRunners({ conversation: f.input.conversation, run_id: 'run', state_dir: f.dir,
+      actingTurn: async input => {
+        historicalDispatch = 'Execute the prompt in this JSON dispatch specification: ' + JSON.stringify({ ...input.spec, effort: input.request.effort })
+        // Seed the runner's actual dispatch before the actor captures its byte
+        // boundary. Submission asserts identity so this historical control cannot
+        // pass merely because its synthetic prompt differs from the real request.
+        await writeFile(transcript, encode({ type: 'user', message: { content: 'earlier ☃' } }) + encode(queued(historicalDispatch)))
+        // Preparation spends the runner's wall budget before this call. Measure
+        // that remaining allowance and keep the zero-wait queue on our logical
+        // clock, so real filesystem jitter cannot add time to the observation.
+        const { dispatchBudget: _realClockBudget, ...logicalInput } = input
+        offered = Math.min(input.timeout_ms, f.input.request.budget.wall_ms - preparationMs)
+        return actingTurn({ ...logicalInput, timeout_ms: offered })
+      }, headless: {}, trailer: { schemas: new Map([['v1', value => (value as { verdict?: string }).verdict === 'APPROVE']]), metadata: () => undefined } })
+    const outcome = await runners.inRepl!.run(f.input.request, 'in-repl', controller.signal)
+    expect(offered).toBeGreaterThan(120_000)
+    expect(offered).toBeLessThanOrEqual(f.input.request.budget.wall_ms - preparationMs)
+    if (['enqueue', 'absorbed', 'attachment', 'late child', 'foreign removal'].includes(scenario)) {
+      expect(outcome).toMatchObject({ kind: 'completed', result: { verdict: 'APPROVE' } })
+      expect(now).toBe(120_000)
+    } else {
+      expect(outcome.kind).toBe('unknown')
+      expect(now).toBe(scenario === 'cancelled' ? 60_000 : ['budget', 'wrong trailer'].includes(scenario) ? offered : DISPATCH_TIMEOUT_MS)
+    }
+    expect(f.commands).toHaveLength(1)
+    expect(released).toBe(1)
+    expect(yielded).toBe(scenario === 'late child' ? 1 : 0)
+  })
+}
+
 test('expiry during boundary capture prevents submission', async () => {
   const f = await fixture()
   f.binding.projects_dir = join(f.dir, 'projects')

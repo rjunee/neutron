@@ -56,6 +56,22 @@ is the thing being rebuilt.
       Verify: `bun test runtime/workers/claude-composer.test.ts runtime/workers/claude-acting-turn.test.ts`
       and `bun test open/__tests__/project-build-e2e.test.ts -t 'adopted project composer'`.
 
+- [x] **A dispatch queued during Claude compaction retains bounded observation.**
+      After submission, an exact current-session queue entry, absorbed command,
+      or queued-command attachment beyond the captured transcript byte boundary
+      keeps observing the same request under its original wall budget. Queue
+      evidence alone neither transfers the parent input slot nor completes work.
+      Historical commands, foreign or missing session identities, embedded
+      notifications, changed payloads and removed commands without observed
+      consumption cannot extend the launch probe. Cancellation, expiry, trailer
+      validation, transcript replacement checks and uniquely bound child ownership
+      remain enforced; no replay or replacement budget is created.
+      Verify: `bun test runtime/workers/claude-acting-turn.test.ts` and
+      `bun test open/__tests__/project-build-e2e.test.ts -t 'queued native build dispatch'`.
+      The consuming harness reaches merge for exact queued evidence and retains an
+      unknown outcome and native lease for foreign-session or notification decoys.
+      This bounded offline proof does not establish unattended live acceptance.
+
 - [ ] **A headless worker never talks to the owner.** It returns "blocked on X" to the
       orchestrator, which decides whether that reaches him. Asserted by a test in which a
       worker attempts to ask and the attempt is refused or routed — and its complement, that
@@ -76,6 +92,29 @@ is the thing being rebuilt.
       one. Enumerate them first — a list derived by grep, with a positive control, not by
       reading the old file top to bottom — and pin each. A gate silently lost in a rewrite
       is the most likely real defect in this whole item.
+
+- [ ] **A child discovered after observation can discharge original ownership.**
+      For a terminal run with an `unknown` canonical native attempt, an original
+      authenticated `submission-started` dispatch may recover its unique child
+      through the exact surviving native parent's canonical transcript location.
+      The full first-request envelope must match; original session, PID and kernel
+      birth identity must survive, including after gateway wrapper adoption.
+      Identity reads bound the first envelope and metadata, independently of total
+      transcript size or later line size. Large valid transcripts must discharge
+      ownership; wrong first requests and duplicate metadata must still refuse.
+      Require the original canonical armed reservation and the ordinary validated
+      completed or blocked result before releasing only the exact lease. Recheck
+      parent and child binding before release. Preserve all dispatch records,
+      attempts, results, workflow state and budgets; send no native input.
+      Missing, foreign, duplicate or malformed binding, altered request/signature,
+      parent/process replacement, changed lease/reservation/result, unresolved
+      parents and ongoing work retain ownership. An unrelated lease survives and
+      repeated reconciliation is idempotent. A sibling planner's real host
+      capability must refuse before recovery and become usable afterward.
+      Verify: `bun test open/wiring/__tests__/claude-native-dispatch-boot.test.ts`
+      (late submission controls, planner consumption, Open startup and periodic
+      recovery), and existing passive recovery consumers in
+      `open/__tests__/project-build-e2e.test.ts`, with bidirectional mutations.
 
 - [ ] **Invalidated review evidence can settle its original child's ownership.**
       Passive reconciliation of a terminal run releases only the exact native

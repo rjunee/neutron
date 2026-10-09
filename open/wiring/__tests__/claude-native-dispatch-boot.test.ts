@@ -8,7 +8,7 @@ import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
-import { createClaudeNativeDispatchReceipt, nativeDispatchReceiptPath } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
+import { createClaudeNativeDispatchReceipt, nativeDispatchReceiptPath, type NativeDispatchParent } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { seedProject } from '@neutronai/gateway/wiring/__tests__/project-admission-fixture.ts'
 import { reconcileClaudeNativeDispatches, type ClaudeNativeDispatchReconcileOptions } from '../claude-native-dispatch-reconcile.ts'
@@ -21,11 +21,17 @@ import { AttemptAccounting } from '@neutronai/trident/attempt-accounting.ts'
 import { admitNativeChildWorkspace, nativeChildCensusKnown } from '@neutronai/runtime/workers/native-child-workspace.ts'
 import { bindPlannerWork, dispatchPlannerWork, releasePlannerWork } from '@neutronai/runtime/workers/planner-work.ts'
 
+import * as childObservation from '@neutronai/runtime/workers/claude-child-observation.ts'
+import { pool, childByKey, supervisedBySessionKey } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
+import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
+import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
+
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
 
 async function fixture(projectId: string | null = null, submitted: boolean | 'bound' = false,
-  panel?: { role: 'review' | 'synthesis'; source?: boolean; change?: (request: BoundedWorkRequest) => void }) {
+  panel?: { role: 'review' | 'synthesis'; source?: boolean; change?: (request: BoundedWorkRequest) => void },
+  late?: { parent: NativeDispatchParent; change: (request: BoundedWorkRequest) => void }) {
   const dir = await mkdtemp(join(tmpdir(), 'native-boot-proof-'))
   cleanup.push(() => rm(dir, { recursive: true, force: true }))
   const dbPath = join(dir, 'project.db'); seedMigratedDb(dbPath)
@@ -65,6 +71,7 @@ async function fixture(projectId: string | null = null, submitted: boolean | 'bo
     await bindReviewRequest(directory, identity, createHash('sha256').update(JSON.stringify(request)).digest('hex'))
     await writeFile(join(directory, 'request.json'), JSON.stringify(request))
   }
+  late?.change(request)
   const key = { run_id: run.id, step_id: request.step_id, attempt_id: 'dispatch' }
   if (!reviewOptions) await attempts.admit({ ...key, phase: 'decomposition', task_id: 'task', head_sha: 'a'.repeat(40), role: request.role, review_seat: null,
     provider: 'anthropic', requested_model: 'model', resolved_model: 'model', placement: 'in-repl', queued_at: 1 })
@@ -75,14 +82,14 @@ async function fixture(projectId: string | null = null, submitted: boolean | 'bo
   if (child.status !== 'admitted') throw new Error('Expected child admission')
   const receipt = createClaudeNativeDispatchReceipt(state, request, port.dispatchAuthority!(child.lease, request))
   if (submitted) {
-    receipt.record({ kind: 'parent-bound', parent: { sessionId: 'original-session', childGeneration: 'original-generation', pid: 42, processIdentity: null } })
+    receipt.record({ kind: 'parent-bound', parent: late?.parent ?? { sessionId: 'original-session', childGeneration: 'original-generation', pid: 42, processIdentity: null } })
     receipt.record({ kind: 'submission-started' })
     if (submitted === 'bound') receipt.record({ kind: 'child-bound', nativeAgentId: 'original-child' })
     receipt.close()
   } else receipt.record({ kind: 'not-submitted' })
   port.finishPreparing!(child.lease)
   await runs.update(run.id, { phase: 'failed' })
-  if (submitted === 'bound' && !reviewOptions) await attempts.lifecycle(key, { ended_at: 4, outcome: 'unknown' })
+  if (submitted && !reviewOptions) await attempts.lifecycle(key, { ended_at: 4, outcome: 'unknown' })
   const admission = new ProjectAdmission({ db, ownerHandle: 'owner', bootId: 'restarted' })
   const options: ClaudeNativeDispatchReconcileOptions = { stateRoot, admission, runs, attempts,
     projectIdForRun: value => value.project_slug === 'owner' ? null : value.project_slug,
@@ -96,11 +103,110 @@ async function fixture(projectId: string | null = null, submitted: boolean | 'bo
 
 function lateResult(request: BoundedWorkRequest) {
   return { schema: request.result.schema, run_id: request.run_id, step_id: request.step_id, kind: 'completed',
-    result: { head: 'a'.repeat(40), diff: '', pr: null, payload: {
+    result: { head: 'a'.repeat(40), diff: '', pr: null, payload: request.role === 'build' ? { worktreePath: request.cwd, branch: 'fixture', commitSha: 'a'.repeat(40),
+      prNumber: null, diffFile: '', testsPassed: true, mutationClaim: null } : {
       strategy: 'single', rationale: 'One bounded change.', implementationPlan: '- [ ] T1 record a note',
       topTask: '- [ ] T1 record a note', executionSpec: 'Record the requested note.', complexity: 'mechanical', remainingTasks: 0,
     } } }
 }
+
+async function lateChildFixture(projectId: string | null = 'general', changeParent?: (parent: NativeDispatchParent) => void) {
+  const parent: NativeDispatchParent = { sessionId: 'late-session', childGeneration: 'original-generation',
+    pid: process.pid, processIdentity: readProcessIdentity(process.pid)! }
+  changeParent?.(parent)
+  const f = await fixture(projectId, true, undefined, { parent, change: request => {
+    Object.assign(request, { role: 'build', step_id: `${request.run_id}:build:0`,
+      result: { schema: 'project-build', path: join(dirname(request.result.path), 'build.result') } })
+  } })
+  const session = { sessionId: parent.sessionId, childGeneration: parent.childGeneration, cwd: f.dir,
+    child: { pid: process.pid }, hasChildExited: () => false }
+  const sessionKey = `late-child-${f.run.id}`
+  const projectsDir = join(f.dir, 'transcripts')
+  const liveOptions = { project_id: projectId ?? 'general', conversationProjectId: projectId, substrate_instance_id: 'cc-agent-fixture', projectsDir }
+  supervisedBySessionKey.set(sessionKey, liveOptions as never)
+  pool.set(sessionKey, Promise.resolve(session as never)); childByKey.set(sessionKey, session.child as never)
+  cleanup.push(() => { pool.delete(sessionKey); childByKey.delete(sessionKey); supervisedBySessionKey.delete(sessionKey) })
+  const directory = join(sessionJsonlPath(parent.sessionId, session.cwd, projectsDir).slice(0, -6), 'subagents')
+  await mkdir(directory, { recursive: true })
+  const meta = join(directory, 'agent-late-child.meta.json'), transcript = join(directory, 'agent-late-child.jsonl')
+  const row = { type: 'user', agentId: 'late-child', sessionId: parent.sessionId, isSidechain: true,
+    message: { role: 'user', content: `Request (data): ${JSON.stringify(f.request)}` } }
+  await writeFile(meta, JSON.stringify({ description: `${f.request.role}: ${f.request.step_id}` }))
+  await writeFile(transcript, JSON.stringify(row) + '\n')
+  await writeFile(f.request.result.path, JSON.stringify(lateResult(f.request)))
+  return { ...f, parent, session, sessionKey, liveOptions, directory, meta, transcript, row }
+}
+
+for (const fault of ['none', 'missing-child', 'foreign-child', 'duplicate-child', 'malformed-child', 'malformed-meta',
+  'wrong-request', 'missing-parent', 'pending-parent', 'changed-session', 'adopted-generation', 'changed-pid',
+  'changed-pool-child', 'changed-scope', 'exited-parent', 'wrong-transcript-root', 'signature', 'reservation',
+  'result', 'ongoing-run', 'attempt', 'missing-birth', 'changed-birth', 'missing-result', 'invalid-payload', 'running-attempt', 'request-signature', 'lease-generation', 'lease-token',
+  'duplicate-after-first', 'replaced-after-confirm', 'generation-during-read'] as const)
+test(`late submission child ownership: ${fault}`, async () => {
+  const f = await lateChildFixture('general', parent => {
+    if (fault === 'missing-birth') parent.processIdentity = null
+    if (fault === 'changed-birth') parent.processIdentity = { ...parent.processIdentity!, start_ticks: parent.processIdentity!.start_ticks + 1 }
+  })
+  if (fault === 'missing-child') await rm(f.meta)
+  if (fault === 'foreign-child') { f.row.sessionId = 'foreign'; await writeFile(f.transcript, JSON.stringify(f.row)) }
+  if (fault === 'duplicate-child') await writeFile(join(f.directory, 'agent-duplicate.meta.json'), await readFile(f.meta))
+  if (fault === 'malformed-child') await writeFile(f.transcript, '{')
+  if (fault === 'malformed-meta') await writeFile(f.meta, '{')
+  if (fault === 'wrong-request') { f.row.message.content = `Request (data): ${JSON.stringify({ ...f.request, model_id: 'foreign' })}`; await writeFile(f.transcript, JSON.stringify(f.row)) }
+  if (fault === 'missing-parent') pool.delete(f.sessionKey)
+  if (fault === 'pending-parent') pool.set(f.sessionKey, new Promise(() => {}))
+  if (fault === 'changed-session') f.session.sessionId = 'foreign'
+  if (fault === 'adopted-generation') f.session.childGeneration = 'foreign'
+  if (fault === 'changed-pid') f.session.child.pid = process.pid + 1
+  if (fault === 'changed-pool-child') childByKey.set(f.sessionKey, {} as never)
+  if (fault === 'changed-scope') f.liveOptions.conversationProjectId = 'other'
+  if (fault === 'exited-parent') f.session.hasChildExited = () => true
+  if (fault === 'wrong-transcript-root') f.liveOptions.projectsDir = join(f.dir, 'foreign')
+  if (['duplicate-after-first', 'replaced-after-confirm', 'generation-during-read'].includes(fault)) {
+    const observe = childObservation.observeClaudeChildBinding
+    let calls = 0
+    const reader = spyOn(childObservation, 'observeClaudeChildBinding').mockImplementation(async (...args) => {
+      const result = await observe(...args)
+      calls++
+      if (fault === 'duplicate-after-first' && calls === 1) await writeFile(join(f.directory, 'agent-duplicate.meta.json'), await readFile(f.meta))
+      if (fault === 'replaced-after-confirm' && calls === 2) childByKey.set(f.sessionKey, {} as never)
+      if (fault === 'generation-during-read' && calls === 1) f.session.childGeneration = 'replaced'
+      return result
+    })
+    cleanup.push(() => reader.mockRestore())
+  }
+  if (fault === 'request-signature') await writeFile(f.path, (await readFile(f.path, 'utf8')).replaceAll('"model_id":"model"', '"model_id":"foreign"'))
+  if (fault === 'lease-generation') f.db.runSync('UPDATE project_admission_leases SET generation = generation + 1')
+  if (fault === 'lease-token') f.db.runSync('UPDATE project_admission_leases SET token = ?', ['foreign-token'])
+  if (fault === 'signature') await writeFile(f.path, (await readFile(f.path, 'utf8')).replaceAll('original-generation', 'altered-generation'))
+  if (fault === 'reservation') await writeFile(f.reservation, JSON.stringify({ ...f.request, thread: 'foreign' }) + '\n#dispatch-armed\n')
+  if (fault === 'result') await writeFile(f.request.result.path, JSON.stringify({ ...lateResult(f.request), step_id: 'foreign' }))
+  if (fault === 'ongoing-run') await f.runs.update(f.run.id, { phase: 'task-build' })
+  if (fault === 'missing-result') await rm(f.request.result.path)
+  if (fault === 'invalid-payload') await writeFile(f.request.result.path, JSON.stringify({ ...lateResult(f.request), result: {} }))
+  if (fault === 'running-attempt') f.db.raw().query('UPDATE code_trident_attempts SET outcome = NULL, ended_at = NULL WHERE run_id = ?').run(f.run.id)
+  if (fault === 'attempt') f.db.raw().query('UPDATE code_trident_attempts SET resolved_model = ? WHERE run_id = ?').run('foreign', f.run.id)
+  const paths = [f.path, f.reservation, ...(fault === 'missing-result' ? [] : [f.request.result.path])]
+  const before = await Promise.all(paths.map(path => readFile(path, 'utf8')))
+  const attempt = f.attempts.get(f.key), run = f.runs.get(f.run.id)
+  expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: (fault === 'none' || fault === 'adopted-generation') ? 1 : 0, kept: (fault === 'none' || fault === 'adopted-generation') ? 0 : 1 })
+  expect(f.attempts.get(f.key)).toEqual(attempt); expect(f.runs.get(f.run.id)).toEqual(run)
+  if (fault === 'none' || fault === 'adopted-generation') expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: 0, kept: 0 })
+  expect(await Promise.all(paths.map(path => readFile(path, 'utf8')))).toEqual(before)
+})
+
+for (const tail of ['large-transcript', 'large-later-line'] as const)
+for (const fault of ['none', 'wrong-first-request', 'duplicate-child'] as const)
+test(`late submission binding ignores ${tail}: ${fault}`, async () => {
+  const f = await lateChildFixture()
+  if (fault === 'wrong-first-request') f.row.message.content = `Request (data): ${JSON.stringify({ ...f.request, model_id: 'foreign' })}`
+  if (fault === 'duplicate-child') await writeFile(join(f.directory, 'agent-duplicate.meta.json'), await readFile(f.meta))
+  const later = tail === 'large-transcript'
+    ? (JSON.stringify({ padding: 'x'.repeat(8192) }) + '\n').repeat(1025)
+    : JSON.stringify({ padding: 'x'.repeat(256 * 1024 + 1) }) + '\n'
+  await writeFile(f.transcript, JSON.stringify(f.row) + '\n' + later)
+  expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: fault === 'none' ? 1 : 0, kept: fault === 'none' ? 0 : 1 })
+})
 
 function panelResult(request: BoundedWorkRequest, kind = 'completed') {
   return { schema: request.result.schema, run_id: request.run_id, step_id: request.step_id, kind,
@@ -160,19 +266,20 @@ test(`late panel ${role} preserves ownership on ${evidence}: invalidated=${inval
   expect(await reconcileClaudeNativeDispatches(f.options)).toMatchObject({ released: 0, kept: 1 })
 })
 
-test('invalidated completed review releases planner census without making its verdict usable', async () => {
-  const f = await fixture('general', 'bound', { role: 'review', source: true })
+for (const lateBinding of [false, true]) test(`completed child releases planner census: late binding=${lateBinding}`, async () => {
+  const f = lateBinding ? await lateChildFixture() : await fixture('general', 'bound', { role: 'review', source: true })
   const directory = dirname(f.request.result.path)
-  await invalidateReviewReceipt(directory, directory.split('/').at(-1)!.slice('review-'.length))
-  await writeFile(f.request.result.path, JSON.stringify(panelResult(f.request)))
-  const paths = [join(directory, 'receipt.json'), join(directory, 'request.json'), f.reservation, f.request.result.path]
+  if (!lateBinding) await invalidateReviewReceipt(directory, directory.split('/').at(-1)!.slice('review-'.length))
+  await writeFile(f.request.result.path, JSON.stringify(lateBinding ? lateResult(f.request) : panelResult(f.request)))
+  const paths = [f.path, ...(lateBinding ? [] : [join(directory, 'receipt.json'), join(directory, 'request.json')]),
+    f.reservation, f.request.result.path]
   const evidence = await Promise.all(paths.map(path => readFile(path, 'utf8')))
   const run = f.runs.get(f.run.id), attempt = f.attempts.get(f.key)
   const verdict = async () => {
     const source = reconcileProjectReviewSource(f.reviewOptions!)
     return source.readSeat(source.seats[0]!, f.snapshot, 1)
   }
-  await expect(verdict()).rejects.toThrow('original pending attempt had changed inputs')
+  if (!lateBinding) await expect(verdict()).rejects.toThrow('original pending attempt had changed inputs')
 
   // A new planner has a measured linked worktree, but the old review has no
   // local workspace proof after restart. Its durable lease keeps census unknown.
@@ -209,16 +316,18 @@ test('invalidated completed review releases planner census without making its ve
   const capability = await bind()
   expect(await dispatchPlannerWork(session, { run_id: request.run_id, step_id: request.step_id, capability, operation: 'brief' }))
     .toMatchObject({ brief: 'next planner brief' })
-  await expect(verdict()).rejects.toThrow('original pending attempt had changed inputs')
-  expect(f.reviewCalls()).toBe(1)
+  if (!lateBinding) await expect(verdict()).rejects.toThrow('original pending attempt had changed inputs')
+  expect(f.reviewCalls()).toBe(lateBinding ? 0 : 1)
   expect(f.admission.listLeases('liveChild').map(row => row.token).sort()).toEqual([planner.lease.token, sibling.lease.token].sort())
   expect(f.runs.get(f.run.id)).toEqual(run)
   expect(f.attempts.get(f.key)).toEqual(attempt)
   expect(await Promise.all(paths.map(path => readFile(path, 'utf8')))).toEqual(evidence)
 })
 
-for (const kind of ['completed', 'blocked']) test(`late ${kind} releases only its authenticated token, without changing the failed run`, async () => {
-  const f = await fixture('general', 'bound')
+for (const kind of ['completed', 'blocked']) for (const lateBinding of [false, true])
+test(`late ${kind} releases only its authenticated token, without changing the failed run: late binding=${lateBinding}`, async () => {
+  const f = lateBinding ? await lateChildFixture() : await fixture('general', 'bound')
+  if (lateBinding) await rm(f.request.result.path)
   await f.admission.forNativeChild('general').admit(f.run.id, f.request.step_id)
   await f.admission.forNativeChild('other').admit(f.run.id, f.request.step_id)
   expect((await reconcileClaudeNativeDispatches(f.options))).toMatchObject({ released: 0, kept: 3 })
@@ -324,12 +433,12 @@ test('unreadable and malformed native census cannot discard expired original rec
   expect(await Bun.file(f.path).exists()).toBe(true)
 })
 
-for (const role of ['plan', 'review', 'synthesis'] as const)
-for (const submitted of (role === 'plan' ? [false, 'bound'] : ['bound']) as (false | 'bound')[]) for (const availableAtBoot of [true, false]) test(`actual Open composition consumes terminal evidence without a turn: role=${role}, submitted=${submitted}, present-at-boot=${availableAtBoot}`, async () => {
-  const f = await fixture(null, submitted, role === 'plan' ? undefined : { role })
-  if (role !== 'plan') await invalidateReviewReceipt(dirname(f.request.result.path), 'a'.repeat(64))
+for (const role of ['plan', 'review', 'synthesis', 'build'] as const)
+for (const submitted of (role === 'plan' ? [false, 'bound'] : ['bound']) as (false | 'bound')[]) for (const availableAtBoot of [true, false]) test(`actual Open composition consumes terminal evidence without a turn: role=${role}, submitted=${role === 'build' ? 'submission-started' : submitted}, present-at-boot=${availableAtBoot}`, async () => {
+  const f = role === 'build' ? await lateChildFixture(null) : await fixture(null, submitted, role === 'plan' ? undefined : { role })
+  if (role === 'review' || role === 'synthesis') await invalidateReviewReceipt(dirname(f.request.result.path), 'a'.repeat(64))
   const artifact = submitted ? f.request.result.path : f.path
-  if (submitted) await writeFile(artifact, JSON.stringify(role === 'plan' ? lateResult(f.request) : panelResult(f.request)))
+  if (submitted) await writeFile(artifact, JSON.stringify(role === 'plan' || role === 'build' ? lateResult(f.request) : panelResult(f.request)))
   const bytes = await readFile(artifact, 'utf8')
   if (!availableAtBoot) await rm(artifact)
   const env: NodeJS.ProcessEnv = { ...process.env, NEUTRON_HOME: f.dir, OWNER_HOME: f.dir, NEUTRON_DB_PATH: f.dbPath,

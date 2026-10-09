@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
@@ -7,7 +8,11 @@ import type { AdmissionLeaseRow } from '@neutronai/gateway/project-admission-sto
 import type { TridentRunStore, TridentRun } from '@neutronai/trident/store.ts'
 import type { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
-import { readClaudeNativeDispatchReceipt, verifyNativeDispatchNotSubmitted, verifyNativeDispatchChildBound } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
+import { readClaudeNativeDispatchReceipt, verifyNativeDispatchNotSubmitted, verifyNativeDispatchChildBound, verifyNativeDispatchSubmissionStarted, type SignedNativeDispatchRecord } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
+import { observeClaudeChildBinding } from '@neutronai/runtime/workers/claude-child-observation.ts'
+import { sessionJsonlPath } from '@neutronai/runtime/adapters/claude-code/persistent/jsonl-resumability.ts'
+import { resolveTranscriptProjectsDir } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
+import { isProcessIdentity, readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
 import { readArmedTrailerReservation } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { decodeProjectTrailer } from '@neutronai/runtime/workers/project-runners.ts'
 import { completeNativeChildWorkspaceRequest } from '@neutronai/runtime/workers/native-child-workspace.ts'
@@ -57,7 +62,8 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
       if (!request) continue
       const refused = verifyNativeDispatchNotSubmitted(receipt, request, { ...lease, reason: 'liveChild' })
       const submitted = verifyNativeDispatchChildBound(receipt, request, { ...lease, reason: 'liveChild' })
-      if (!refused && !submitted) continue
+      const unbound = verifyNativeDispatchSubmissionStarted(receipt, request, { ...lease, reason: 'liveChild' })
+      if (!refused && !submitted && !unbound) continue
       if (request.run_id !== runId || request.step_id !== stepId) continue
       const attempt = options.attempts.get({ run_id: runId, step_id: stepId, attempt_id: 'dispatch' })
       if (!attempt || attempt.provider !== 'anthropic' || attempt.placement !== 'in-repl'
@@ -71,6 +77,11 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
       // Failed observation does not kill the native child. Inspect terminal runs
       // without reconstructing an actor, changing outcome, or dispatching again.
       if (!isTerminalPhase(run.phase)) continue
+      // A bounded first-envelope read supplies only the original child binding.
+      // Completion still comes exclusively from the original reserved result.
+      const binding = unbound && attempt.outcome === 'unknown'
+        ? await lateChildBinding(receipt as SignedNativeDispatchRecord, lease.scope.projectId) : undefined
+      if (unbound && !binding) continue
       const state = join(options.stateRoot, encodeURIComponent(runId))
       if (!await canonicalResultPath(state, request)) continue
       const key = createHash('sha256').update(JSON.stringify([runId, stepId])).digest('hex')
@@ -80,6 +91,7 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
       if (bytes === undefined) continue
       const outcome = decodeProjectTrailer(bytes, request, projectBuildTrailerDecoder(() => options.runs.get(runId)))
       if (outcome.kind !== 'completed' && outcome.kind !== 'blocked') continue
+      if (binding && !await binding()) continue
       if (!await options.admission.maintenance.release(lease)) continue
       released++
       const sessions = await resolveLiveProjectSessions(lease.scope.projectId === null ? ['general', undefined] : [lease.scope.projectId])
@@ -87,6 +99,41 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
     } catch { /* Unknown DB, request or artifact authority never releases this child. */ }
   }
   return { status: 'observed', released, kept: leases.length - released }
+}
+
+/** Observe the original native process through the authoritative live pool.
+ * Wrapper incarnation is distinct from native process identity: pin the current
+ * wrapper during observation and match original session, PID and kernel birth. */
+async function lateChildBinding(receipt: SignedNativeDispatchRecord, projectId: string | null):
+  Promise<(() => Promise<boolean>) | undefined> {
+  const parent = receipt.body.parent
+  if (!parent || !isProcessIdentity(parent.processIdentity)) return
+  const resolve = () => resolveLiveProjectSessions(projectId === null ? ['general', undefined] : [projectId],
+    { excludeConversationScopesOtherThan: projectId })
+  const current = await resolve()
+  if (current.unresolved || current.live.length !== 1) return
+  const { session, options } = current.live[0]!
+  const generation = session.childGeneration
+  const directory = () => join(sessionJsonlPath(session.sessionId, session.cwd, resolveTranscriptProjectsDir(options)).slice(0, -6), 'subagents')
+  const path = directory()
+  const owns = () => parent.sessionId === session.sessionId && parent.pid === session.child.pid
+    && session.childGeneration === generation && isDeepStrictEqual(readProcessIdentity(parent.pid), parent.processIdentity)
+    && directory() === path
+  if (!owns()) return
+  const observation = await observeClaudeChildBinding(path, parent.sessionId, receipt.body.request)
+  if (!observation || !owns()) return
+  const stillCurrent = async () => {
+    const latest = await resolve()
+    return !latest.unresolved && latest.live.length === 1 && latest.live[0]!.session === session
+      && latest.live[0]!.options === options && owns()
+  }
+  return async () => {
+    if (!await stillCurrent()) return false
+    // Repeat the unbound scan: a new duplicate must not be hidden by pinning the
+    // first agent id. Never write a child-bound journal from this observation.
+    const confirmed = await observeClaudeChildBinding(path, parent.sessionId, receipt.body.request)
+    return confirmed?.agentId === observation.agentId && await stillCurrent()
+  }
 }
 
 async function canonicalResultPath(state: string, request: BoundedWorkRequest): Promise<boolean> {

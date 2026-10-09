@@ -121,7 +121,7 @@ async function observeSubagents(directory: string, description: string, request:
   return { directory: 'readable', metaFiles, matched, rateLimited, bound, ...(bound ? { nativeAgentId: children[0]! } : {}) }
 }
 
-type DispatchConsumption = 'consumed' | 'not-consumed' | 'unreadable'
+type DispatchEvidence = 'consumed' | 'queued' | 'not-consumed' | 'unreadable'
 type TranscriptBoundary = { offset: number; identity?: { dev: number; ino: number } } | undefined
 
 /** Claude wraps a pasted terminal submission as one whole text message. Match
@@ -147,18 +147,18 @@ async function transcriptBoundary(transcript: string): Promise<TranscriptBoundar
 
 /** One read at the launch probe deadline, never per poll. History is not evidence of
  * this submission. Replacement or truncation invalidates the captured boundary. */
-async function dispatchConsumption(transcript: string, dispatch: string, boundary: TranscriptBoundary, signal: AbortSignal, remainingMs: number): Promise<DispatchConsumption> {
+async function dispatchEvidence(transcript: string, dispatch: string, sessionId: string, boundary: TranscriptBoundary, signal: AbortSignal, remainingMs: number): Promise<DispatchEvidence> {
   if (!boundary) return 'unreadable'
   const controller = new AbortController()
   const stopped = AbortSignal.any([signal, controller.signal])
   const timeout = setTimeout(() => controller.abort(), Math.max(1, remainingMs))
   let cancel!: () => void
-  const cancelled = new Promise<DispatchConsumption>(resolve => {
+  const cancelled = new Promise<DispatchEvidence>(resolve => {
     cancel = () => resolve('unreadable')
     stopped.addEventListener('abort', cancel, { once: true })
     if (stopped.aborted) cancel()
   })
-  const read = async (): Promise<DispatchConsumption> => {
+  const read = async (): Promise<DispatchEvidence> => {
     let bytes: Buffer
     try {
       const file = await open(transcript, 'r')
@@ -172,9 +172,25 @@ async function dispatchConsumption(transcript: string, dispatch: string, boundar
         bytes = (await file.readFile({ signal: stopped })).subarray(boundary.offset)
       } finally { await file.close() }
     } catch { return 'unreadable' }
+    let queued = false
     for (const line of bytes.toString('utf8').split('\n')) {
       try {
-        const record = JSON.parse(line) as { type?: unknown; message?: { content?: unknown } }
+        const record = JSON.parse(line) as { type?: unknown; sessionId?: unknown; operation?: unknown; reason?: unknown;
+          content?: unknown; attachment?: { type?: unknown; prompt?: unknown }; message?: { content?: unknown } }
+        // During compaction Claude first queues terminal input, then absorbs it
+        // into the turn. These exact same-session records justify waiting; they
+        // cannot identify a child, transfer the slot, or complete the request.
+        if (record.sessionId === sessionId) {
+          if (record.type === 'queue-operation' && isDispatchText(record.content, dispatch)) {
+            if (record.operation === 'enqueue') queued = true
+            if (record.operation === 'remove') {
+              if (record.reason === 'absorbed_mid_turn') return 'consumed'
+              queued = false
+            }
+          }
+          if (record.type === 'attachment' && record.attachment?.type === 'queued_command'
+            && isDispatchText(record.attachment.prompt, dispatch)) return 'consumed'
+        }
         if (record.type !== 'user') continue
         const content = record.message?.content
         if (isDispatchText(content, dispatch)) return 'consumed'
@@ -182,7 +198,7 @@ async function dispatchConsumption(transcript: string, dispatch: string, boundar
           && block.type === 'text' && isDispatchText(block.text, dispatch))) return 'consumed'
       } catch { /* Partial and unrelated records do not prove consumption. */ }
     }
-    return 'not-consumed'
+    return queued ? 'queued' : 'not-consumed'
   }
   try {
     return await Promise.race([read(), cancelled])
@@ -375,17 +391,17 @@ export function createClaudeActingTurn(binding: ClaudeActingSession, clock: Obse
           accepted ||= seen.matched
           if (!accepted && clock.now() >= dispatchDeadline) {
             readingConsumption = true
-            const consumption = await dispatchConsumption(transcript, dispatch, boundary, stopped, deadline - clock.now())
+            const evidence = await dispatchEvidence(transcript, dispatch, session.sessionId, boundary, stopped, deadline - clock.now())
             readingConsumption = false
-            // Consumption proves ownership of this request, not completion.
-            // Compaction can delay Agent creation beyond the launch probe. Keep
-            // observing the same slot and trailer under the original wall budget.
-            if (consumption === 'consumed') {
+            // An exact queued or consumed dispatch justifies continued observation,
+            // not completion. Compaction can delay Agent creation beyond the
+            // launch probe. Keep the same slot and original wall budget.
+            if (evidence === 'consumed' || evidence === 'queued') {
               if (expired()) return unknown()
               accepted = true
               continue
             }
-            const detail = consumption === 'not-consumed'
+            const detail = evidence === 'not-consumed'
               ? 'The dispatch line was never consumed by the REPL within its budget.'
               : 'The session transcript could not be read across the dispatch boundary; REPL consumption is unknown.'
             const where = seen.directory === 'readable'

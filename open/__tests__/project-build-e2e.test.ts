@@ -59,6 +59,7 @@ import { readProcessIdentity } from '@neutronai/runtime/adapters/claude-code/per
 import { CLAUDE_CONTINUATION_PROFILE } from '@neutronai/runtime/workers/claude-native-continuation.ts'
 import { capacityFixture } from '@neutronai/runtime/workers/claude-capacity-client.test-support.ts'
 import * as nativeCapacityClient from '@neutronai/runtime/workers/claude-capacity-client.ts'
+import * as claudeActingTurn from '@neutronai/runtime/workers/claude-acting-turn.ts'
 import { getBestModel, setBestModelOverride } from '@neutronai/runtime/models.ts'
 import { reserveTrailerSlot } from '@neutronai/runtime/workers/trailer-slot.ts'
 import { createClaudeNativeDispatchReceipt, readClaudeNativeDispatchReceipt, type SignedNativeDispatchRecord } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
@@ -9668,6 +9669,62 @@ for (const seam of ['submitLine', 'acquireTurn', 'silent-worker'] as const) {
     expect(f.github.prs).toEqual([])
   }, 60_000)
 }
+
+test.each(['enqueue', 'other session', 'notification'] as const)('queued native build dispatch %s reaches merge only with exact current evidence', async scenario => {
+  const f = await fixture()
+  const transcript = join(f.dir, 'claude-projects', f.dir.replace(/\//g, '-'), 'e2e-session.jsonl')
+  const submit = f.session.child.submitLine!
+  let held: string | undefined
+  let submissions = 0, completed = 0
+  f.session.child.submitLine = async (line: string) => {
+    const spec = JSON.parse(line.slice(line.indexOf('{')))
+    const args = JSON.parse(String(spec.prompt).slice(String(spec.prompt).indexOf('{')))
+    const requestLine = String(args.prompt).split('\n').find(row => row.startsWith('Request (data): '))!
+    const request: BoundedWorkRequest = JSON.parse(requestLine.slice('Request (data): '.length))
+    if (request.role !== 'build') return submit(line)
+    submissions++
+    held = line
+    await mkdir(dirname(transcript), { recursive: true })
+    const pasted = `<pasted_content id="fixture">\n${line}\n</pasted_content id="fixture">`
+    await appendFile(transcript, JSON.stringify({ type: 'queue-operation', operation: 'enqueue',
+      sessionId: scenario === 'other session' ? 'another-session' : f.session.sessionId,
+      content: scenario === 'notification' ? `<task-notification>${pasted}</task-notification>` : pasted }) + '\n')
+  }
+  // Drive only the existing actor's observation clock. The launch threshold,
+  // full host, signed dispatch, native lease and result decoder stay production.
+  // The model emits its result after the probe, never from terminal acknowledgement.
+  const create = claudeActingTurn.createClaudeActingTurn
+  const actor = spyOn(claudeActingTurn, 'createClaudeActingTurn').mockImplementation(binding => {
+    const started = Date.now()
+    let elapsed = 0
+    return create(binding, { now: () => started + elapsed, pause: async ms => {
+      elapsed += ms
+      if (held && elapsed >= 60_000) {
+        expect(f.world.dispatches.filter(call => call.role === 'build')).toHaveLength(0)
+        const line = held
+        held = undefined
+        completed++
+        await submit(line)
+      }
+    } })
+  })
+  try {
+    const outcome = await drive(f)
+    expect(submissions).toBe(1)
+    if (scenario === 'enqueue') {
+      expect(outcome.kind, why(f, outcome)).toBe('merged')
+      expect(completed).toBe(1)
+      expect(f.world.dispatches.filter(call => call.role === 'build')).toHaveLength(1)
+      expect(f.admission.listLeases('liveChild')).toEqual([])
+    } else {
+      expect(outcome, why(f, outcome)).toMatchObject({ kind: 'unknown', phase: 'build' })
+      expect(completed).toBe(0)
+      expect(f.world.dispatches.filter(call => call.role === 'build')).toEqual([])
+      expect(f.admission.listLeases('liveChild')).toHaveLength(1)
+      expect(f.github.prs).toEqual([])
+    }
+  } finally { actor.mockRestore() }
+}, 30_000)
 
 test('native queued writer execution expiry preserves exact child recovery without redispatch', async () => {
   let releaseChild!: () => void
