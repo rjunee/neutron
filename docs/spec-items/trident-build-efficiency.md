@@ -258,6 +258,16 @@ barrier at `trident/build-run.ts:691-697`.
   fresh proof. Focused launcher controls also pair unchanged records with
   shell shadows, absent Node and inner-startup-input refusals.
 
+  Synthetic package-launcher fixtures must own their outer launcher environment:
+  their positive and refusal controls must work when the test process itself is
+  started by `bun run test`. Scoped fixture setup restores the original presence
+  and value of launcher inputs afterward, removes fixture-added launcher inputs,
+  and leaves unrelated environment changes intact. This is test isolation, not
+  permission to normalize production measurement inputs or grant portable proof
+  for an unknown launcher. Verify both focused identity and prepared retry
+  consumers through a real outer package script in
+  `open/__tests__/package-launcher-fixture-env.test.ts`.
+
 - [ ] **Efficiency cannot reset budgets or bypass a gate.** Review rounds, one
   bounded re-plan, infrastructure retry ceilings/backoff and atomic claims retain
   their existing durable limits across recovery. Changed scheduling preserves

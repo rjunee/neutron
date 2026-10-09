@@ -67,6 +67,7 @@ import { routeCodegenCancel } from '@neutronai/gateway/codegen-cancel-router.ts'
 import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/codegen-core'
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
 import { projectInstallAvailableBytes, projectSuiteIdentityMeasurement } from '../wiring/project-build-dependencies.ts'
+import { isolatePackageLauncherEnvironment } from './package-launcher-fixture-env.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { access, appendFile, chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -5102,6 +5103,7 @@ for (const launcher of ['bare', 'package'] as const)
 for (const changed of ['none', 'head', 'dependencies', 'environment', 'strategy', 'subset', 'legacy', 'red', 'invalidated',
   ...(launcher === 'package' ? ['hooks', 'config', 'tool-resolution', 'bash-shadow', 'node-absent', 'startup-env', 'runner', 'inner-env'] as const : [])] as const)
 test(`prepared cross-run ${launcher} suite proof handles ${changed} inputs in a distinct retry worktree`, async () => {
+  if (launcher === 'package') cleanups.push(isolatePackageLauncherEnvironment())
   // The outer CI shard selects this test, not the nested project's full suite.
   const outerShard = process.env.NEUTRON_TEST_SHARD
   cleanups.push(() => {
