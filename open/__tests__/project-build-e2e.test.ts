@@ -1024,7 +1024,7 @@ console.log(JSON.stringify({ type: 'result', subtype: 'success', is_error: false
 
 async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; suiteExit?: number; testStrategy?: string
   malformedNativeTrailer?: boolean
-  namedSuiteFailure?: boolean | 'generic'
+  namedSuiteFailure?: boolean | 'generic' | 'generic-until-fix'
   verboseSuiteDiagnostic?: boolean
   spec?: boolean
   /** `false`: the seed commit carries NO `IMPLEMENTATION_PLAN.md` (default `true`). */
@@ -1135,8 +1135,10 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
     await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), suiteScript(options.suiteExit ?? 0), { mode: 0o755 })
     if (options.namedSuiteFailure) {
       await mkdir(join(repo, 'tests'), { recursive: true })
-      if (options.namedSuiteFailure === 'generic') {
-        await writeFile(join(repo, 'tests', 'preexisting.test.sh'), "echo 'tests/preexisting.test.sh: pre-existing red'\nexit 1\n")
+      if (options.namedSuiteFailure === 'generic' || options.namedSuiteFailure === 'generic-until-fix') {
+        await writeFile(join(repo, 'tests', 'preexisting.test.sh'),
+          (options.namedSuiteFailure === 'generic-until-fix' ? "grep -q ':fix:1' NOTES.md && exit 0\n" : '')
+          + "echo 'tests/preexisting.test.sh: pre-existing red'\nexit 1\n")
         await writeFile(join(repo, 'scripts', 'ci', 'suite.sh'), 'bash ./tests/preexisting.test.sh\n')
       } else {
         await writeFile(join(repo, 'tests', 'preexisting.test.ts'), "import { expect, test } from 'bun:test'\n"
@@ -1818,13 +1820,18 @@ test('native planner consumes its closed host capability while builder retains c
     const call = (operation: string, fields: object = {}) => dispatchPlannerWork(f.session, {
       run_id: request.run_id, step_id: request.step_id, capability, operation, ...fields })
     expect(request.tools).toBe('edit')
-    expect(await call('brief')).toMatchObject({ context: { request: { step_id: request.step_id } } })
+    expect(await call('brief')).toMatchObject({ context: { resource: 'context', fields: expect.arrayContaining(['request']) } })
+    const scopedRequest = await call('read', { resource: 'context', pointer: ['request'] }) as { content: string }
+    expect(JSON.parse(scopedRequest.content)).toMatchObject({ step_id: request.step_id })
+    const briefPage = await call('read', { resource: 'brief' }) as { content: string }
+    expect(briefPage.content.length).toBeGreaterThan(0)
+    expect(briefPage.content).toBe((await readFile(request.brief.path, 'utf8')).slice(0, briefPage.content.length))
     await expect(call('exec', { command: 'bun test open/__tests__/project-build-e2e.test.ts' })).rejects.toThrow('Unsupported')
     await expect(call('probe', { path: 'preparation.ts', kind: 'syntax', uncertainty: 'syntax', command: 'tsc -p tsconfig.json' })).rejects.toThrow('Unsupported')
     await expect(call('read', { path: '../state/another-plan' })).rejects.toThrow('scope')
     await call('write', { path: 'preparation.ts', content: 'export const prepared: number = 42\n' })
     expect(await call('probe', { path: 'preparation.ts', kind: 'syntax', uncertainty: 'Does this proposed declaration parse?' })).toMatchObject({ ok: true })
-    expect(await call('state')).toMatchObject({ head: f.baseSha, preparation: [{ path: 'preparation.ts', committed: false }] })
+    expect(await call('state')).toMatchObject({ head: f.baseSha, preparation: { count: 1 } })
     expect(await call('publish', { payload })).toMatchObject({ published: true })
     inspected = true
   }
@@ -3725,6 +3732,37 @@ test('G070 permits a different host failure with large diagnostics, fewer blocke
   expect(outcome.kind, why(f, outcome)).toBe('merged')
   expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix')).toHaveLength(2)
   expect(suites).toBe(3)
+}, 120_000)
+
+for (const preserveProof of [true, false])
+test(`G072 repaired full host suite permits distinct decreasing code repairs only with proof: ${preserveProof}`, async () => {
+  const f = await fixture({ namedSuiteFailure: 'generic-until-fix', blockersByRound: [0, 2, 1, 0], maxRounds: 3 })
+  f.world.suiteReport = async () => ({ testsPassed: false, suiteOutcome: 'deferred', suiteEvidence: '' })
+  const exits: number[] = []
+  const runSuite = f.context.runSuite!
+  f.context.runSuite = async (...args) => {
+    const result = await runSuite(...args)
+    exits.push(result.exit_code)
+    return result
+  }
+  const host = await createProjectBuildHost(await f.prepare())
+  if (!preserveProof) {
+    const observe = host.deps.reviewSuite!
+    host.deps.reviewSuite = async (...args) => {
+      const observed = await observe(...args)
+      if (observed.kind !== 'known') return observed
+      const { fullSuitePassed: _proof, ...withoutProof } = observed
+      return withoutProof
+    }
+  }
+  const outcome = await host.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
+  expect(outcome.kind, why(f, outcome)).toBe(preserveProof ? 'merged' : 'unknown')
+  if (!preserveProof) expect(outcome).toMatchObject({ detail: 'Review progress cannot compare unidentified host suite failures' })
+  expect(exits).toEqual(preserveProof ? [1, 0, 0] : [1, 0])
+  for (const [role, count] of [['plan', 1], ['build', 1], ['fix', preserveProof ? 2 : 1], ['synthesis', preserveProof ? 3 : 2]] as const) {
+    expect(f.world.dispatches.filter(dispatch => dispatch.role === role), role).toHaveLength(count)
+  }
+  expect(lastCheckpoint(f)).toMatchObject(preserveProof ? { stage: 'approved', round: 3 } : { stage: 'rejected', round: 2 })
 }, 120_000)
 
 for (const changed of [false, true]) test(`G072 generic red with fewer blockers remains undecidable, changed=${changed}`, async () => {

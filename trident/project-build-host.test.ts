@@ -149,7 +149,7 @@ for (const change of ['none', 'head', 'round', 'strategy', 'subset', 'identity',
     const host = await createProjectBuildHost(f.options)
     const checkpoint = { head: subject.head, stage: 'approved' as const, round: 2, replansUsed: 0, findings: [], previousFindings: [] }
     await host.deps.modes!.saveCheckpoint!(checkpoint)
-    expect(await host.deps.publicationSuite(subject)).toEqual({ kind: 'known', findings: [] })
+    expect(await host.deps.publicationSuite(subject)).toEqual({ kind: 'known', findings: [], fullSuitePassed: true })
     if (change === 'head') subject.head = 'c'.repeat(40)
     if (change === 'round') await host.deps.modes!.saveCheckpoint!({ ...checkpoint, round: 3 })
     if (change === 'strategy') f.options.policy.publicationSuite.strategy = 'bash suite.sh'
@@ -165,7 +165,8 @@ for (const change of ['none', 'head', 'round', 'strategy', 'subset', 'identity',
       f.options.production.runId = other.id
     }
     const recovered = await createProjectBuildHost(f.options)
-    expect(await recovered.deps.publicationSuite(subject)).toEqual({ kind: 'known', findings: [] })
+    expect(await recovered.deps.publicationSuite(subject)).toEqual({ kind: 'known', findings: [],
+      ...(change === 'subset' ? {} : { fullSuitePassed: true }) })
     expect(calls).toBe(change === 'none' ? 1 : 2)
   })
 }
@@ -235,7 +236,7 @@ test('invalidation during identity measurement cannot revive an older suite rece
   await measuring
   await f.options.production.store.recordStageEvent(f.options.production.runId, 'build-suite-receipt', null)
   release('measured-fixture-identity')
-  expect(await result).toEqual({ kind: 'known', findings: [] })
+  expect(await result).toEqual({ kind: 'known', findings: [], fullSuitePassed: true })
   expect(calls).toBe(2)
 })
 
@@ -497,7 +498,7 @@ test('observation CI re-observes pending readiness and preserves terminal classi
 test('observation suite requires independently acquired identity and preserves report claims', async () => {
   const f = observationFixture()
   const assess = () => assessReviewSuite(f.sources.reviewSuite, observedSnapshot, 1, 'run')
-  expect(await assess()).toEqual({ kind: 'known', findings: [] })
+  expect(await assess()).toEqual({ kind: 'known', findings: [], fullSuitePassed: true })
   const suite = f.options.suite!
   for (const field of ['runId', 'head', 'round'] as const) {
     suite.readCheckpoint = async () => ({ runId: 'run', head: observedHead, round: 1, report: { hostExitCode: 0 }, [field]: field === 'round' ? 2 : 'wrong' }) as any
@@ -619,7 +620,8 @@ for (const scenario of ['same head', 'changed head', 'subset', 'different strate
       expect(result).toMatchObject({ kind: 'known', findings: [{ advisory: false, title: 'FULL SUITE NOT PROVEN' }] })
       expect(publicationRuns).toBe(0)
     } else {
-      expect(result).toEqual({ kind: 'known', findings: [] })
+      expect(result).toEqual({ kind: 'known', findings: [],
+        ...(scenario === 'publication subset' ? {} : { fullSuitePassed: true }) })
       expect(publicationRuns).toBe(scenario === 'same head' ? 0 : 1)
     }
   })

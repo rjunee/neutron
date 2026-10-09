@@ -20,10 +20,11 @@ export const PLANNER_PROFILE = JSON.stringify({ [PLANNER_ROLE]: PLANNER_AGENT })
 export const PLANNER_PROFILE_ID = createHash('sha256').update(PLANNER_PROFILE).digest('hex')
 export const PLANNER_TOOL_SCHEMA = {
   name: PLANNER_TOOL,
-  description: 'Closed host operations for one admitted planner. Pass its secret capability and exact run_id/step_id. Operations: brief; list {path} (empty path lists root); read {path}; state; write {path,content}; probe {path,kind:"syntax"|"json",uncertainty}; publish {payload} or {blocked}. Paths are relative to the assigned worktree. No commands, tests, scripts, configs or plugins execute. Writes remain uncommitted; state reports them separately from committed head/diff.',
+  description: 'Closed host operations for one admitted planner. Pass its secret capability and exact run_id/step_id. Operations: brief; list {path} (empty path lists root); read {path} or {resource:"brief"|"context"|"state",pointer?:string[]} with optional offset,limit,sha256; find {path,query} for literal matches; state; write {path,content}; probe {path,kind:"syntax"|"json",uncertainty}; publish {payload} or {blocked}. Paths are relative to the assigned worktree. No commands, tests, scripts, configs or plugins execute. brief returns a manifest: read resource brief completely once and select context fields (including committedPlan) by pointer. Read/find offsets count UTF-16 code units; pass the returned sha256 for every nonzero offset. Follow nextOffset until null when the full value is needed. state returns descriptors; read resource state for complete head/diff/preparation. Writes remain uncommitted.',
   input_schema: { type: 'object', required: ['run_id', 'step_id', 'capability', 'operation'], additionalProperties: false,
-    properties: { run_id: { type: 'string' }, step_id: { type: 'string' }, capability: { type: 'string' }, operation: { enum: ['brief', 'list', 'read', 'state', 'write', 'probe', 'publish'] },
-      path: { type: 'string' }, content: { type: 'string' }, kind: { enum: ['syntax', 'json'] }, uncertainty: { type: 'string' },
+    properties: { run_id: { type: 'string' }, step_id: { type: 'string' }, capability: { type: 'string' }, operation: { enum: ['brief', 'list', 'read', 'find', 'state', 'write', 'probe', 'publish'] },
+      path: { type: 'string' }, resource: { enum: ['brief', 'context', 'state'] }, pointer: { type: 'array', items: { type: 'string' }, maxItems: 16 },
+      offset: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 12000 }, sha256: { type: 'string' }, query: { type: 'string' }, content: { type: 'string' }, kind: { enum: ['syntax', 'json'] }, uncertainty: { type: 'string' },
       payload: { type: 'object' }, blocked: { type: 'string' } } },
 }
 
@@ -75,6 +76,46 @@ export function releasePlannerWork(session: Session, request: BoundedWorkRequest
 const record = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
 const digest = (text: string) => createHash('sha256').update(text).digest('hex')
 const MAX_BYTES = 1024 * 1024
+
+// Budget both JSON encodings used by the native text-block bridge, leaving room
+// for its envelope. Pages never depend on inaccessible native persisted output.
+const OUTPUT_BYTES = 14 * 1024
+const encodedBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(JSON.stringify(value, null, 2)))
+const asText = (value: unknown): string => typeof value === 'string' ? value : JSON.stringify(value, null, 2) ?? 'null'
+const descriptor = (text: string) => ({ total: text.length, sha256: digest(text) })
+const splitSurrogate = (text: string, offset: number) => offset > 0 && offset < text.length
+  && /[\uD800-\uDBFF]/.test(text[offset - 1]!) && /[\uDC00-\uDFFF]/.test(text[offset]!)
+function readOffset(text: string, raw: Record<string, unknown>): number {
+  const offset = raw.offset ?? 0
+  if (!Number.isSafeInteger(offset) || Number(offset) < 0 || Number(offset) > text.length || splitSurrogate(text, Number(offset))) throw Error('Invalid planner offset')
+  if ((offset !== 0 && raw.sha256 === undefined) || (raw.sha256 !== undefined && raw.sha256 !== digest(text))) throw Error('Planner source changed or page digest missing; restart at offset zero')
+  return Number(offset)
+}
+function page(text: string, raw: Record<string, unknown>) {
+  const offset = readOffset(text, raw), limit = raw.limit ?? 12000
+  if (!Number.isSafeInteger(limit) || Number(limit) < 1 || Number(limit) > 12000) throw Error('Invalid planner page limit')
+  const metadata = descriptor(text)
+  const result = (end: number) => ({ ...metadata, offset, content: text.slice(offset, end), nextOffset: end < text.length ? end : null })
+  let low = offset, high = Math.min(text.length, offset + Number(limit))
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2)
+    if (encodedBytes(result(middle)) <= OUTPUT_BYTES) low = middle
+    else high = middle - 1
+  }
+  if (splitSurrogate(text, low)) low--
+  if (low === offset && offset < text.length) throw Error('Planner page limit splits a Unicode character; use a larger limit')
+  return result(low)
+}
+function selectResource(value: unknown, pointer: unknown): unknown {
+  if (pointer === undefined) return value
+  if (!Array.isArray(pointer) || pointer.length > 16 || pointer.some(key => typeof key !== 'string')
+    || pointer.join('').length > 1024) throw Error('Invalid planner resource pointer')
+  for (const key of pointer as string[]) {
+    if (['__proto__', 'prototype', 'constructor'].includes(key) || !value || typeof value !== 'object' || !Object.hasOwn(value, key)) throw Error('Unknown planner resource field')
+    value = (value as Record<string, unknown>)[key]
+  }
+  return value
+}
 
 /** Constructed only by the admitted native dispatch owner, never from tool arguments.
  * Expiry revokes operations, NOT the durable child lease or its unknown outcome. */
@@ -164,14 +205,40 @@ async function constructPlannerWork(input: PlannerWorkInput, control: GrantContr
   const perform: Operation = async raw => {
     await active()
     if (!record(raw) || raw.run_id !== request.run_id || raw.step_id !== request.step_id) throw Error('Planner request identity mismatch')
-    const fields: Record<string, readonly string[]> = { brief: [], list: ['path'], read: ['path'], state: [], write: ['path', 'content'], probe: ['path', 'kind', 'uncertainty'], publish: ['payload', 'blocked'] }
+    const fields: Record<string, readonly string[]> = { brief: [], list: ['path'], read: ['path', 'resource', 'pointer', 'offset', 'limit', 'sha256'], find: ['path', 'query', 'offset', 'sha256'], state: [], write: ['path', 'content'], probe: ['path', 'kind', 'uncertainty'], publish: ['payload', 'blocked'] }
     if (typeof raw.operation !== 'string' || !Object.hasOwn(fields, raw.operation)
       || Object.keys(raw).some(k => !['run_id', 'step_id', 'capability', 'operation', ...fields[raw.operation as string]!].includes(k))) throw Error('Unsupported planner operation')
-    if (raw.operation === 'brief') return { brief: input.brief, context: input.context }
-    if (raw.operation === 'read') {
-      const path = await scopedPath(raw.path, false)
-      if ((await lstat(path)).size > MAX_BYTES) throw Error('Planner read exceeds file limit')
-      return { path: raw.path, content: await readFile(path, 'utf8') }
+    if (raw.operation === 'brief') {
+      const context = record(input.context) ? input.context : {}
+      return { planner: context.planner, executionStrategy: context.executionStrategy,
+        brief: { resource: 'brief', ...descriptor(input.brief) },
+        context: { resource: 'context', fields: Object.keys(context) },
+        instructions: 'Read resource brief completely once. Select relevant context fields with pointer, including committedPlan for continuation. Full state is available as resource state. Pages have nextOffset and require sha256 after offset zero.' }
+    }
+    if (raw.operation === 'read' || raw.operation === 'find') {
+      let text: string
+      if (raw.resource !== undefined) {
+        if (raw.operation !== 'read' || raw.path !== undefined || !['brief', 'context', 'state'].includes(String(raw.resource))) throw Error('Choose one planner path or host resource')
+        const value = raw.resource === 'brief' ? input.brief : raw.resource === 'context' ? input.context : await snapshot()
+        text = asText(selectResource(value, raw.pointer))
+      } else {
+        if (raw.pointer !== undefined) throw Error('Planner pointer requires a host resource')
+        const path = await scopedPath(raw.path, false)
+        if ((await lstat(path)).size > MAX_BYTES) throw Error('Planner read exceeds file limit')
+        text = await readFile(path, 'utf8')
+        if (Buffer.byteLength(text) > MAX_BYTES) throw Error('Planner read exceeds file limit')
+      }
+      if (raw.operation === 'read') return page(text, raw)
+      if (typeof raw.query !== 'string' || !raw.query || raw.query.length > 1024) throw Error('Planner find requires a bounded literal query')
+      let offset = readOffset(text, raw)
+      const matches: { offset: number; line: number }[] = []
+      while (matches.length < 32) {
+        const found = text.indexOf(raw.query, offset)
+        if (found < 0) return { ...descriptor(text), matches, nextOffset: null }
+        matches.push({ offset: found, line: text.slice(0, found).split('\n').length })
+        offset = found + raw.query.length
+      }
+      return { ...descriptor(text), matches, nextOffset: offset < text.length ? offset : null }
     }
     if (raw.operation === 'list') {
       if (typeof raw.path !== 'string' || raw.path.includes('\\') || raw.path.split('/').some(part => part.startsWith('.') || part === 'node_modules')) throw Error('Invalid planner directory')
@@ -185,7 +252,12 @@ async function constructPlannerWork(input: PlannerWorkInput, control: GrantContr
       return { entries: entries.filter(entry => !entry.name.startsWith('.') && entry.name !== 'node_modules' && !entry.isSymbolicLink())
         .map(entry => ({ name: entry.name, directory: entry.isDirectory() })) }
     }
-    if (raw.operation === 'state') return snapshot()
+    if (raw.operation === 'state') {
+      const measured = await snapshot()
+      return { head: measured.head, pr: measured.pr,
+        diff: { resource: 'state', pointer: ['diff'], ...descriptor(measured.diff) },
+        preparation: { resource: 'state', pointer: ['preparation'], count: measured.preparation.length, ...descriptor(asText(measured.preparation)) } }
+    }
     if (raw.operation === 'write') {
       if (typeof raw.content !== 'string' || Buffer.byteLength(raw.content) > MAX_BYTES) throw Error('Planner write exceeds file limit')
       const path = await scopedPath(raw.path, true)

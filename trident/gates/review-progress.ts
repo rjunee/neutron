@@ -16,7 +16,8 @@ export interface ReviewStop {
 }
 
 /** Compare against the panel preceding the last dispatched fix or replacement build. */
-export function reviewProgress(previous: ReviewProgress | undefined, current: ReviewProgress | undefined): GateResult {
+export function reviewProgress(previous: ReviewProgress | undefined, current: ReviewProgress | undefined,
+  host: { priorSuiteFailureResolved?: boolean } = {}): GateResult {
   if (!current || !Number.isSafeInteger(current.blockingCount) || current.blockingCount < 0 || current.findings.some(id => !id.trim())
     || (current.unknownIdentities !== undefined && typeof current.unknownIdentities !== 'boolean')) {
     return { kind: 'unknown', detail: 'Review progress needs readable host findings and blocker/major count' }
@@ -33,9 +34,12 @@ export function reviewProgress(previous: ReviewProgress | undefined, current: Re
       reviewStop: { trigger: 'no-progress', previous, current } }
   }
   // G072: falling counts do not establish progress when unresolved findings
-  // cannot be compared. A green/earned-advisory current observation resolves the
-  // unknown blocker and can proceed; the first red may still receive its fix.
-  if (current.blockingCount > 0 && (previous.unknownIdentities || current.unknownIdentities)) {
+  // cannot be compared. An affirmative current full-suite pass can resolve the
+  // prior unknown host failure while distinct code findings still need repair.
+  // Empty/deferred assessments cannot supply that fact, nor clear a current
+  // unknown failure. The known arithmetic vetoes above keep the original baseline.
+  if (current.blockingCount > 0 && (current.unknownIdentities
+      || previous.unknownIdentities && host.priorSuiteFailureResolved !== true)) {
     return { kind: 'unknown', detail: 'Review progress cannot compare unidentified host suite failures' }
   }
   return { kind: 'allow' }
