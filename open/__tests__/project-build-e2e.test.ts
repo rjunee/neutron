@@ -1820,13 +1820,18 @@ test('native planner consumes its closed host capability while builder retains c
     const call = (operation: string, fields: object = {}) => dispatchPlannerWork(f.session, {
       run_id: request.run_id, step_id: request.step_id, capability, operation, ...fields })
     expect(request.tools).toBe('edit')
-    expect(await call('brief')).toMatchObject({ context: { request: { step_id: request.step_id } } })
+    expect(await call('brief')).toMatchObject({ context: { resource: 'context', fields: expect.arrayContaining(['request']) } })
+    const scopedRequest = await call('read', { resource: 'context', pointer: ['request'] }) as { content: string }
+    expect(JSON.parse(scopedRequest.content)).toMatchObject({ step_id: request.step_id })
+    const briefPage = await call('read', { resource: 'brief' }) as { content: string }
+    expect(briefPage.content.length).toBeGreaterThan(0)
+    expect(briefPage.content).toBe((await readFile(request.brief.path, 'utf8')).slice(0, briefPage.content.length))
     await expect(call('exec', { command: 'bun test open/__tests__/project-build-e2e.test.ts' })).rejects.toThrow('Unsupported')
     await expect(call('probe', { path: 'preparation.ts', kind: 'syntax', uncertainty: 'syntax', command: 'tsc -p tsconfig.json' })).rejects.toThrow('Unsupported')
     await expect(call('read', { path: '../state/another-plan' })).rejects.toThrow('scope')
     await call('write', { path: 'preparation.ts', content: 'export const prepared: number = 42\n' })
     expect(await call('probe', { path: 'preparation.ts', kind: 'syntax', uncertainty: 'Does this proposed declaration parse?' })).toMatchObject({ ok: true })
-    expect(await call('state')).toMatchObject({ head: f.baseSha, preparation: [{ path: 'preparation.ts', committed: false }] })
+    expect(await call('state')).toMatchObject({ head: f.baseSha, preparation: { count: 1 } })
     expect(await call('publish', { payload })).toMatchObject({ published: true })
     inspected = true
   }

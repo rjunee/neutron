@@ -213,6 +213,19 @@ barrier at `trident/build-run.ts:691-697`.
   `SPEC.md` consistent with the implementation; this criterion does not authorize
   bypassing G027/G028's committed-plan evidence or the full-refresh cadence.
 
+  The closed planner tool must deliver usable continuation context even when a
+  prior diff, brief or source file exceeds the native tool's inline-output size.
+  A compact manifest exposes the selected planning mode and retrievable host
+  documents. The planner can select context fields, read bounded content pages
+  and locate literal text within an admitted file without shell execution or
+  external artifact access. Every page identifies its complete source and next
+  offset; changed source cannot silently join an earlier page. Instructions and
+  the owned ledger remain fully retrievable, while result publication retains
+  the complete independently measured head and diff. Verify the actual native
+  response encoding stays within 16 KiB for these read responses using a large
+  continuation fixture in `runtime/workers/planner-work-output.test.ts`, with an
+  oversized positive control, exact reconstruction and scope/expiry refusals.
+
 - [ ] **Preparation and proof reuse is tied to measured inputs.** Reuse validated
   setup or suite evidence only under its existing identity contract, including
   dependency manifests/lockfile, runtime/toolchain, workspace isolation, revision

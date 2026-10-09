@@ -187,6 +187,9 @@ describe('P0-1 native-MCP tool bridge — spawn wiring', () => {
     expect(JSON.parse(argv[argv.indexOf('--agents') + 1]!)).toEqual({ [PLANNER_ROLE]: PLANNER_AGENT })
     const manifest = JSON.parse(readFileSync(readMcpConfig(argv).mcpServers['neutron']!.env['TOOLS_MANIFEST_PATH']!, 'utf8'))
     expect(manifest.map((tool: { name: string }) => tool.name)).toEqual(['doc_search', PLANNER_TOOL])
+    const schema = manifest.find((tool: { name: string }) => tool.name === PLANNER_TOOL).input_schema
+    expect(schema.properties.operation.enum).toContain('find')
+    expect(schema.properties.resource.enum).toContain('context')
   })
   it('attaches a SECOND mcpServers entry + manifest + --allowedTools when enabled', async () => {
     setReplToolBridge(fakeBridge([]))
@@ -346,16 +349,33 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
       const git = (...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim()
       git('init', '-q'); await writeFile(join(cwd, 'source.ts'), 'export const x = 1')
       git('add', '.'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', '-c', 'core.hooksPath=/dev/null', 'commit', '-qm', 'fixture')
+      const brief = 'Bound brief\n'.repeat(3000)
       const capability = await bindPlannerWork({ session,
         request: { run_id: 'run', step_id: 'plan', role: 'plan', model_id: 'fixture', effort: 'high', cwd, writable: true, network: false, tools: 'edit',
           brief: { path: join(state, 'brief'), integrity: 'fixture' }, result: { path: join(state, 'result'), schema: 'fixture' }, thread: null, budget: { wall_ms: 60_000 }, needs_approval_decision: false },
-        base: git('rev-parse', 'HEAD'), pr: null, brief: 'Bound brief', context: {}, signal: new AbortController().signal,
+        base: git('rev-parse', 'HEAD'), pr: null, brief, context: { committedPlan: { body: '- [x] Prior task\n- [ ] Next task' } }, signal: new AbortController().signal,
         deadline: Date.now() + 60_000, current: () => true, validate: () => true })
       const { port } = await getReplSinkInfo()
       const call = createToolCallHandler({ port, token: liveCredential, sessionId: 'forged-advisory-id' })
       const invoke = (args: Record<string, unknown>) => call({ method: 'tools/call', params: { name: PLANNER_TOOL,
         arguments: { run_id: 'run', step_id: 'plan', capability, operation: 'brief', ...args } } })
-      expect(await invoke({})).toMatchObject({ content: [{ text: expect.stringContaining('Bound brief') }] })
+      const manifest = await invoke({})
+      expect(manifest).toMatchObject({ content: [{ text: expect.stringContaining('resource') }] })
+      expect(Buffer.byteLength(JSON.stringify(manifest))).toBeLessThanOrEqual(16 * 1024)
+      let restored = '', offset = 0, sha256: string | undefined
+      do {
+        const response = await invoke({ operation: 'read', resource: 'brief', offset, ...(sha256 ? { sha256 } : {}) })
+        expect(response).not.toHaveProperty('isError', true)
+        expect(Buffer.byteLength(JSON.stringify(response))).toBeLessThanOrEqual(16 * 1024)
+        const page = JSON.parse(response.content[0]!.text)
+        restored += page.content; sha256 ??= page.sha256
+        if (page.nextOffset === null) break
+        expect(page.nextOffset).toBeGreaterThan(offset)
+        offset = page.nextOffset
+      } while (true)
+      expect(restored).toBe(brief)
+      const ledger = await invoke({ operation: 'read', resource: 'context', pointer: ['committedPlan', 'body'] })
+      expect(JSON.parse(ledger.content[0]!.text).content).toBe('- [x] Prior task\n- [ ] Next task')
       expect(await invoke({ capability: 'foreign' })).toMatchObject({ isError: true })
       expect(await invoke({ operation: 'exec', command: 'bun test' })).toMatchObject({ isError: true })
       expect(await invoke({ operation: 'write', path: 'useful.ts', content: 'export const useful = 1' })).not.toHaveProperty('isError', true)

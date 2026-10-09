@@ -315,7 +315,9 @@ for (const lateBinding of [false, true]) test(`completed child releases planner 
   expect(nativeChildCensusKnown(workspace)).toBe(true)
   const capability = await bind()
   expect(await dispatchPlannerWork(session, { run_id: request.run_id, step_id: request.step_id, capability, operation: 'brief' }))
-    .toMatchObject({ brief: 'next planner brief' })
+    .toMatchObject({ brief: { resource: 'brief', total: 'next planner brief'.length } })
+  expect(await dispatchPlannerWork(session, { run_id: request.run_id, step_id: request.step_id, capability,
+    operation: 'read', resource: 'brief' })).toMatchObject({ content: 'next planner brief', nextOffset: null })
   if (!lateBinding) await expect(verdict()).rejects.toThrow('original pending attempt had changed inputs')
   expect(f.reviewCalls()).toBe(lateBinding ? 0 : 1)
   expect(f.admission.listLeases('liveChild').map(row => row.token).sort()).toEqual([planner.lease.token, sibling.lease.token].sort())

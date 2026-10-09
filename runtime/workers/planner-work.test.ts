@@ -46,7 +46,7 @@ test('closed writable planning preserves preparation, diagnostics and atomic hos
   expect(JSON.parse(await readFile(syntax.log, 'utf8')).ok).toBe(true)
   await f.call('write', { path: 'fixture.json', content: '{"ok":true}' })
   expect(await f.call('probe', { path: 'fixture.json', kind: 'json', uncertainty: 'Is the fixture valid JSON?' })).toMatchObject({ ok: true })
-  expect(await f.call('state')).toMatchObject({ head: f.base, diff: '', preparation: [{ path: 'prepared/new.ts', committed: false }, { path: 'fixture.json', committed: false }] })
+  expect(await f.call('state')).toMatchObject({ head: f.base, diff: { total: 0 }, preparation: { count: 2 } })
   expect(await f.call('publish', { payload: { executionSpec: 'Build the change and run every required acceptance gate.' } })).toMatchObject({ published: true, head: f.base })
   const result = JSON.parse(await readFile(f.request.result.path, 'utf8'))
   expect(result).toMatchObject({ schema: 'plan-fixture', run_id: 'run', step_id: 'run:plan:0', result: { head: f.base, diff: '', pr: null } })
@@ -109,13 +109,13 @@ test('concurrent requests on one native MCP session require their own secret and
   const capability = await implementation.bindPlannerWork({ session: first.session, request, base: second.base, pr: null,
     brief: 'Second private brief', context: { request }, signal: second.cancel.signal, deadline: Date.now() + 60_000,
     current: () => true, validate: () => true })
-  const invoke = (fields: object) => implementation.dispatchPlannerWork(first.session, { run_id: request.run_id, step_id: request.step_id, capability, operation: 'brief', ...fields })
+  const invoke = (fields: object) => implementation.dispatchPlannerWork(first.session, { run_id: request.run_id, step_id: request.step_id, capability, operation: 'read', resource: 'brief', ...fields })
   await expect(invoke({ capability: first.capability })).rejects.toThrow('no current')
   await expect(first.call('brief', { capability })).rejects.toThrow('no current')
   await expect(first.call('read', { path: '../state/brief' })).rejects.toThrow('scope')
   await expect(invoke({ step_id: first.request.step_id })).rejects.toThrow('no current')
-  expect(await invoke({})).toMatchObject({ brief: 'Second private brief' })
-  expect(await first.call('brief')).toMatchObject({ brief: 'Host brief' })
+  expect(await invoke({})).toMatchObject({ content: 'Second private brief' })
+  expect(await first.call('brief')).toMatchObject({ brief: { resource: 'brief', total: 10 } })
   expect(await first.call('list', { path: '' })).toMatchObject({ entries: [{ name: 'source.ts' }] })
   expect(implementation.PLANNER_AGENT.tools).toEqual([implementation.PLANNER_NATIVE_TOOL])
 })
@@ -212,7 +212,7 @@ test('planner async authorization semantic mutants cannot authorize false grants
   await writeFile(deny, source.replace(anchor, 'const current = false'))
   const denyApi = await import(deny) as typeof implementation
   const allowed = await fixture(implementation, { current: async () => true })
-  expect(await allowed.call('brief')).toMatchObject({ brief: 'Host brief' })
+  expect(await allowed.call('brief')).toMatchObject({ brief: { resource: 'brief', total: 10 } })
   await expect(fixture(denyApi, { current: async () => true })).rejects.toThrow('lost ownership')
   const recheck = "if (control.retired || terminal || input.signal.aborted || Date.now() >= input.deadline || !current)"
   expect(source.split(recheck)).toHaveLength(2)
@@ -227,7 +227,7 @@ test('planner async authorization semantic mutants cannot authorize false grants
     // The brief operation has no downstream Git timeout to hide the missing
     // post-await authorization check. The original must refuse at active().
     if (api === implementation) await expect(f.call('brief')).rejects.toThrow('lost ownership')
-    else expect(await f.call('brief')).toMatchObject({ brief: 'Host brief' })
+    else expect(await f.call('brief')).toMatchObject({ brief: { resource: 'brief', total: 10 } })
   }
 })
 
@@ -244,7 +244,7 @@ test('planner retirement drains an accepted operation and prevents later calls w
   const retirement = implementation.retirePlannerWork(f.request)
   expect(Bun.peek.status(retirement)).toBe('pending')
   await expect(f.call('brief')).rejects.toThrow('no current')
-  expect(await sibling.call('brief')).toMatchObject({ brief: 'Host brief' })
+  expect(await sibling.call('brief')).toMatchObject({ brief: { resource: 'brief', total: 10 } })
   pause.release()
   expect(await rejection).toMatchObject({ message: expect.stringContaining('expired or lost ownership') }); await retirement
   await expect(access(join(f.cwd, 'late.ts'))).rejects.toThrow()
@@ -264,5 +264,5 @@ test('retirement includes constructing grants and refuses a late capability inst
   const retirement = implementation.retirePlannerWork(request)
   expect(Bun.peek.status(retirement)).toBe('pending')
   pause.release(); expect((await rejection).message).toContain('expired or lost ownership'); await retirement
-  expect(await f.call('brief')).toMatchObject({ brief: 'Host brief' })
+  expect(await f.call('brief')).toMatchObject({ brief: { resource: 'brief', total: 10 } })
 })
