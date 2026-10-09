@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { prepareNativeRequestRelay, readNativeRequestRelay } from '../native-request-relay.ts'
-import { capacityFixture } from '../../../../workers/claude-capacity-client.test-support.ts'
+import { capacityFixture, unprovisionedClaudeCapacityPin } from '../../../../workers/claude-capacity-client.test-support.ts'
 import { nativeRelayRouteFingerprint } from '../../../../workers/claude-capacity-client.ts'
 
 const cleanup: (() => Promise<void>)[] = []
@@ -48,8 +48,10 @@ test('registered native Messages use plaintext only on the Unix socket and fail 
   expect(received).toBe(1)
 })
 test('an unregistered self-host keeps its caller-selected HTTPS authentication untouched', () => {
+  // The unregistered self-host is the injected absent source, not whatever the
+  // build host happens to provision.
   const env = { ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_API_KEY: 'synthetic-direct' }
-  expect(prepareNativeRequestRelay(env)).toBeUndefined()
+  expect(prepareNativeRequestRelay(env, unprovisionedClaudeCapacityPin)).toBeUndefined()
   expect(env).toEqual({ ANTHROPIC_BASE_URL: 'https://api.anthropic.com', ANTHROPIC_API_KEY: 'synthetic-direct' })
 })
 test('route identity remains stable without account credentials and changes with host authority', async () => {
@@ -61,6 +63,7 @@ test('route identity remains stable without account credentials and changes with
   ])).digest('hex')}`
   expect(route).not.toBe(legacy)
   expect(nativeRelayRouteFingerprint({ ...host.pin })).toBe(route)
+  expect(nativeRelayRouteFingerprint(() => host.pin)).toBe(route)
   for (const [key, value] of [['hostId', 'another-host'], ['instanceId', 'another-instance'], ['socketPath', '/another.sock']] as const) {
     expect(nativeRelayRouteFingerprint({ ...host.pin, [key]: value })).not.toBe(route)
   }

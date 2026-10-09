@@ -1,18 +1,21 @@
 import { randomBytes } from 'node:crypto'
-import { loadClaudeCapacityPin, NATIVE_RELAY_BASE_URL, NativeRelayUnavailable, registerClaudeNativeRelay,
-  type ClaudeCapacityPin, type NativeRelayScope } from '../../../workers/claude-capacity-client.ts'
+import { NATIVE_RELAY_BASE_URL, NativeRelayUnavailable, registerClaudeNativeRelay, resolveClaudeCapacityPin,
+  type ClaudeCapacityPin, type ClaudeCapacityPinSource, type NativeRelayScope } from '../../../workers/claude-capacity-client.ts'
 import { readProcessIdentity } from './process-identity.ts'
 
 const scopes = new WeakMap<object, NativeRelayScope>()
 export function readNativeRequestRelay(session: object): NativeRelayScope | undefined { return scopes.get(session) }
 
 /** Host configuration selects the transport; this is not a per-turn feature flag.
- * The native CLI still owns its request body, model selection and tools. */
+ * The native CLI still owns its request body, model selection and tools.
+ * `source` is an explicit pin, an injected source, or omitted (the production
+ * source, where a present broken pin throws rather than falling back). */
 export function prepareNativeRequestRelay(env: Record<string, string | undefined>,
-  pin: ClaudeCapacityPin | undefined = loadClaudeCapacityPin()): {
+  source?: ClaudeCapacityPin | ClaudeCapacityPinSource): {
     env: Record<string, string | undefined>
     register(session: { sessionId: string; child: { pid: number } }): Promise<void>
   } | undefined {
+  const pin = resolveClaudeCapacityPin(source)
   if (!pin) return undefined
   const scopeToken = randomBytes(32).toString('base64url')
   const routed = { ...env }
