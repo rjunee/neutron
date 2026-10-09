@@ -5344,6 +5344,36 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('is not in this branch')
     expect(out.evidence).toBeNull()
+    expect(out.exempt).toBe(false)
+    expect(out.repair).toMatchObject({ kind: 'invalid-nomination', detail: out.reason })
+  })
+
+  test('out-of-diff nomination repair requires a surviving executable target and stable known head', async () => {
+    for (const scenario of ['executable', 'fixture', 'config', 'deleted', 'unreadable', 'unknown', 'moved', 'wrong-pin'] as const) {
+      const deps = gateDeps(scenario === 'config' ? '.github/workflows/ci.yml\0'
+        : scenario === 'fixture' ? 'tests/support/held-tick.ts\0' : 'src/changed.ts\0')
+      const original = deps.run_host
+      let heads = 0
+      deps.run_host = async (...args) => {
+        if (args[0].includes('rev-parse')) {
+          heads++
+          if (scenario === 'unknown') return res(128, '')
+          if (scenario === 'moved' && heads > 1) return res(0, 'b'.repeat(40))
+        }
+        if (args[0].includes('--name-status')) {
+          if (scenario === 'unreadable') return res(128, '')
+          if (scenario === 'deleted') return diffRes('D\0src/changed.ts\0')
+        }
+        return original(...args)
+      }
+      const out = await runMutationProofGate({ run: RUN, claim: CLAIM, base_branch: 'main', ...deps,
+        ...(scenario === 'wrong-pin' ? { expected_head: 'b'.repeat(40) } : {}),
+        run_guard: async () => { throw Error('An out-of-diff nomination must never execute') } })
+      expect(out.ok).toBe(false)
+      expect(out.exempt).toBe(false)
+      expect(out.evidence).toBeNull()
+      expect(out.repair?.kind).toBe(['executable', 'fixture'].includes(scenario) ? 'invalid-nomination' : undefined)
+    }
   })
 
   test('a guard that is not a test — the grep/echo pair — never opens the gate', async () => {

@@ -428,6 +428,7 @@ interface WorkerWorld {
   numericBuildPr?: boolean
   mutationArgv?: 'bare' | 'valid' | 'missing'
   mutationFile?: string
+  mutationClaimFile?: string
   commitAttribution?: 'direct' | 'wrapped'
   extraBuildFiles?: Record<string, string>
   run: Runner
@@ -798,7 +799,7 @@ async function performRole(world: WorkerWorld, request: BoundedWorkRequest, brie
     const head = await gitOut(world.run, world.repo, ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`])
     const diff = await measureDiff(world.run, world.repo, snapshot.head, head, world.scratch)
     return { head, diff, pr: snapshot.pr, payload: {
-      mutationClaim: world.mutationArgv && world.mutationArgv !== 'missing' ? { file: world.mutationFile ?? 'src/limit.ts', find: 'n > max ? max : n', replace: 'n',
+      mutationClaim: world.mutationArgv && world.mutationArgv !== 'missing' ? { file: world.mutationClaimFile ?? world.mutationFile ?? 'src/limit.ts', find: 'n > max ? max : n', replace: 'n',
         guard: [...(world.mutationArgv === 'valid' ? ['bun', 'test'] : []), 'tests/limit.test.ts'],
         control: [...(world.mutationArgv === 'valid' ? ['bun', 'test'] : []), 'tests/control.test.ts'] } : null,
       worktreePath: cwd, branch, commitSha: head, prNumber: null,
@@ -8807,19 +8808,23 @@ test(`pending native fix recovery preserves repeated-finding enforcement with ${
   expect(f.github.prs[0]!.state).toBe('OPEN')
 }, 30_000)
 
-for (const scenario of ['missing', 'missing-repeated', 'missing-exhausted', 'bare', 'valid', 'repeated', 'exhausted', 'forged-fix', 'wrong-head-fix', 'wrong-run', 'wrong-step'] as const)
+for (const scenario of ['missing', 'missing-repeated', 'missing-exhausted', 'outside-diff', 'outside-diff-repeated', 'outside-diff-exhausted', 'bare', 'valid', 'repeated', 'exhausted', 'forged-fix', 'wrong-head-fix', 'wrong-run', 'wrong-step'] as const)
 test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite new worker brief`, async () => {
   const missing = scenario.startsWith('missing')
-  const repeated = scenario === 'repeated' || scenario === 'missing-repeated'
-  const exhausted = scenario === 'exhausted' || scenario === 'missing-exhausted'
-  const argv = missing ? 'missing' : scenario === 'valid' ? 'valid' : 'bare'
+  const outsideDiff = scenario.startsWith('outside-diff')
+  const sequenced = missing || outsideDiff
+  const repeated = scenario === 'repeated' || scenario.endsWith('-repeated')
+  const exhausted = scenario === 'exhausted' || scenario.endsWith('-exhausted')
+  const argv = missing ? 'missing' : scenario === 'valid' || outsideDiff ? 'valid' : 'bare'
+  const needsRepair = outsideDiff || argv !== 'valid'
   const task = 'Implement a bounded numeric limit and verify clamping and below-limit preservation with separate behavioural regression tests'
-  const f = await fixture({ dispatchTask: task, taskSequence: missing, maxRounds: exhausted ? 1 : 5 })
-  if (missing) {
+  const f = await fixture({ dispatchTask: task, taskSequence: sequenced, maxRounds: exhausted ? 1 : 5 })
+  if (sequenced) {
     f.world.mutationFile = 'tests/fixtures/trident-sequence-trace/cli.ts'
     await f.store.update(f.row.id, { task_iteration: 2 })
     f.input.run = f.store.get(f.row.id)!
   }
+  if (outsideDiff) f.world.mutationClaimFile = 'scripts/ci/suite.sh'
   f.world.mutationArgv = argv
   f.github.refuse.add('create')
   const priorHost = await createProjectBuildHost(await f.prepare())
@@ -8831,7 +8836,7 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
     return result.kind === 'repair-nomination' ? { kind: 'blocked', on: result.finding } : result
   }
   const first = await priorHost.run({ mode: 'implementation', start: 'fresh' }, new AbortController().signal)
-  expect(first.kind, why(f, first)).toBe(argv !== 'valid' ? 'blocked' : 'unknown')
+  expect(first.kind, why(f, first)).toBe(needsRepair ? 'blocked' : 'unknown')
   const checkpoint = lastCheckpoint(f)
   expect(checkpoint).toMatchObject({ stage: 'built', round: 1 })
   expect(checkpoint.pending).toBeUndefined()
@@ -8879,6 +8884,7 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
   // Any genuinely requested new worker could return the corrected executable
   // nomination; the reproduction proves whether the loop ever asks one.
   f.world.mutationArgv = repeated ? argv : 'valid'
+  if (!repeated) f.world.mutationClaimFile = undefined
   let settled!: () => void
   const completion = new Promise<void>(resolve => { settled = resolve })
   const record = f.store.recordStageEvent.bind(f.store)
@@ -8907,30 +8913,36 @@ test(`unchanged-tip retry consumes prior ${scenario} mutation nomination despite
   if (blocked) expect(result.on).toContain(invalidIdentity ? 'mutation' : repeated ? 'repeated finding' : 'round ceiling')
   expect(f.world.dispatches.some(dispatch => ['plan', 'build'].includes(dispatch.role))).toBe(false)
   expect(f.world.dispatches.filter(dispatch => dispatch.role === 'fix').map(dispatch => dispatch.step_id))
-    .toEqual(argv !== 'valid' && !exhausted && !invalidIdentity ? [`${dispatched.run.id}${missing ? ':task:2' : ''}:fix:1`] : [])
+    .toEqual(needsRepair && !exhausted && !invalidIdentity ? [`${dispatched.run.id}${sequenced ? ':task:2' : ''}:fix:1`] : [])
   expect(f.github.prs[0]!.state).toBe(blocked ? 'OPEN' : 'MERGED')
   const checkpoints = f.store.stageEvents(dispatched.run.id).filter(event => event.stage === 'build-mode-state')
     .map(event => JSON.parse(event.meta!).checkpoint)
-  if (argv !== 'valid' && !invalidIdentity) expect(checkpoints).toContainEqual(expect.objectContaining({ stage: 'rejected', head: checkpoint.head, round: 1 }))
+  if (needsRepair && !invalidIdentity) expect(checkpoints).toContainEqual(expect.objectContaining({ stage: 'rejected', head: checkpoint.head, round: 1 }))
   if (repeated) expect(checkpoints.at(-1)).toMatchObject({ stage: 'rejected', round: 2 })
-  if (missing && blocked) {
+  if (sequenced && blocked) {
     expect(f.store.get(dispatched.run.id)!.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(f.world.dispatches.some(dispatch => dispatch.role === 'review')).toBe(false)
   }
   expect(await readFile(join(f.context.stateRoot, prior.id, 'build.result'), 'utf8')).toBe(retainedArtifact)
 }, 300_000)
 
-for (const nomination of ['bare', 'missing'] as const)
+for (const nomination of ['bare', 'missing', 'outside-diff'] as const)
 for (const mergeMode of ['local', 'pr'] as const)
 test(`${mergeMode} ${nomination} nomination gets one bounded fix and a fresh review before merge`, async () => {
   const f = await fixture({ mergeMode, maxRounds: 3 })
-  f.world.mutationArgv = nomination
+  f.world.mutationArgv = nomination === 'outside-diff' ? 'valid' : nomination
+  if (nomination === 'outside-diff') {
+    f.world.mutationFile = 'tests/support/limit.ts'
+    f.world.mutationClaimFile = 'scripts/ci/suite.sh'
+  }
   const host = await createProjectBuildHost(await f.prepare())
   const prepare = host.deps.prepareWork
   host.deps.prepareWork = async (request, context) => {
     if (request.role === 'fix') {
-      expect(context.findings.join('\n')).toContain(nomination === 'missing' ? 'nominated no mutation' : 'not a test runner on the prover allowlist')
+      expect(context.findings.join('\n')).toContain(nomination === 'missing' ? 'nominated no mutation'
+        : nomination === 'outside-diff' ? 'is not in this branch' : 'not a test runner on the prover allowlist')
       f.world.mutationArgv = 'valid'
+      f.world.mutationClaimFile = undefined
     }
     await prepare(request, context)
   }

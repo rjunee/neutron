@@ -281,6 +281,19 @@ barrier at `trident/build-run.ts:691-697`.
   action is refused and its legitimate sibling still succeeds. A parser error is
   not a semantic mutation result.
 
+  A mutation nomination targeting a file outside the measured diff remains
+  rejected. It may enter the existing bounded nomination fix loop only when the
+  host-read diff contains a surviving legal executable target and the original
+  head recheck succeeds. This classification grants neither proof nor an
+  exemption. Unknown or unreadable heads/diffs, moved heads, deletion-only and
+  configuration-only changes cannot obtain repair authority through this path.
+  A corrected worker result must pass the ordinary mutation, suite, fresh review,
+  CI and pinned merge gates. Retry preserves the original artifacts, task spend
+  and review ceilings; repeated or exhausted repairs stop without inventing a
+  review. Verify both PR/local delivery and unchanged-tip retry through
+  `open/__tests__/project-build-e2e.test.ts`, with eligibility/refusal controls in
+  `trident/mutation-prover.test.ts`.
+
   The planning role has a finite 30-minute host wall; review remains 15 minutes,
   and build and fix remain 90 minutes each. This planning-only allowance accommodates
   slow project REPL probes. It does not authorize candidate acceptance validation
