@@ -60,6 +60,26 @@ card, that a build stopped because it was blocked rather than because it failed.
 
 ## Acceptance
 
+### Resolve a prior unidentified host failure with measured success
+
+A full host suite that passes for the current run, reviewed head and round
+resolves an earlier host failure whose individual identity was unavailable.
+Distinct, decreasing code findings may then receive their permitted next repair.
+This does not clear a repeated finding, a nondecreasing blocker count, a current
+unidentified failure, a red CI result, or the existing review and round limits.
+An empty assessment is not proof of success: absent strategy, deferred subset,
+subset success, unreadable evidence and advisory pre-existing red do not supply
+this authority. Persisted review baselines and budgets remain intact; no old
+run or receipt is rewritten to invent a pass.
+
+- The real prepared build runs a failing generic suite, repairs it, then observes
+  actual full-suite success while a distinct smaller code review still needs a
+  fix. It completes the required subsequent review and publication without a
+  new planner/build or a skipped repair. The sibling with another generic red
+  remains undecidable, and repeated/nondecreasing findings still STOP.
+  verify: `bun test open/__tests__/project-build-e2e.test.ts -t G072`
+  verify: `bun test trident/gates/review-progress.test.ts trident/gates/review-suite.test.ts`
+
 ### Typed host terminal transport (2026-09-25)
 
 The host's arithmetic G070/G071 STOP carries structured trigger, previous/current

@@ -32,3 +32,18 @@ test('G072 unidentified suite failures cannot establish repetition or improvemen
   expect(reviewProgress(first, { findings: ['panel defect'], blockingCount: 1 })).toEqual({ kind: 'blocked', on: 'Review requires orchestrator arbitration: repeated finding',
     reviewStop: { trigger: 'repeat-finding', previous: first, current: { findings: ['panel defect'], blockingCount: 1 } } })
 })
+
+test('G072 a measured full suite pass resolves only the prior unknown host failure', () => {
+  const previous = { findings: ['old code'], blockingCount: 3, unknownIdentities: true }
+  const current = { findings: ['new code'], blockingCount: 1 }
+  expect(reviewProgress(previous, current)).toMatchObject({ kind: 'unknown' })
+  expect(reviewProgress(previous, current, { priorSuiteFailureResolved: false })).toMatchObject({ kind: 'unknown' })
+  expect(reviewProgress(previous, current, { priorSuiteFailureResolved: true })).toEqual({ kind: 'allow' })
+  expect(reviewProgress(previous, { ...current, unknownIdentities: true }, { priorSuiteFailureResolved: true })).toMatchObject({ kind: 'unknown' })
+  expect(reviewProgress(previous, { ...current, findings: ['old code'] }, { priorSuiteFailureResolved: true })).toMatchObject({
+    kind: 'blocked', reviewStop: { trigger: 'repeat-finding', previous },
+  })
+  expect(reviewProgress(previous, { ...current, blockingCount: 3 }, { priorSuiteFailureResolved: true })).toMatchObject({
+    kind: 'blocked', reviewStop: { trigger: 'no-progress', previous },
+  })
+})

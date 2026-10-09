@@ -46,6 +46,23 @@ function fixture() {
   const decide = async () => applyReviewSuite(approve, await assess())
   return { observation, source, assess, decide }
 }
+test('full-suite pass provenance requires the matching host execution, not empty findings', async () => {
+  const f = fixture()
+  expect(await f.assess()).toEqual({ kind: 'known', findings: [], fullSuitePassed: true })
+  for (const change of ['no-strategy', 'subset-pass', 'subset-deferred', 'unreadable', 'red', 'advisory-red', 'wrong-head', 'wrong-round', 'wrong-run'] as const) {
+    const f = fixture()
+    if (change === 'no-strategy') f.observation.strategy = ''
+    else if (change === 'subset-pass') f.observation.scope = 'subset'
+    else if (change === 'subset-deferred') { f.observation.scope = 'subset'; f.observation.report = { suiteOutcome: 'deferred' } }
+    else if (change === 'unreadable') f.observation.report = null
+    else if (change === 'red') f.observation.report = { hostExitCode: 1, suiteOutcome: 'passed' }
+    else if (change === 'advisory-red') f.observation.report = { hostExitCode: 1, suiteOutcome: 'failed-preexisting', suiteEvidence: 'base comparison' }
+    else if (change === 'wrong-head') f.observation.head = 'b'.repeat(40)
+    else if (change === 'wrong-round') f.observation.round++
+    else f.observation.runId = 'other'
+    expect(await f.assess(), change).not.toHaveProperty('fullSuitePassed')
+  }
+})
 test('G063 rejects a nonzero host receipt — advisory only for an EVIDENCED failed-preexisting claim — and never accepts a deferred claim', async () => {
   const f = fixture()
   expect(await f.decide()).toEqual(approve)

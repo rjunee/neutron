@@ -9,7 +9,9 @@ export interface SuiteFinding {
   identity?: string | null
 }
 export type SuiteAssessment =
-  | { kind: 'known'; findings: readonly SuiteFinding[] }
+  | { kind: 'known'; findings: readonly SuiteFinding[];
+      /** Affirmative host exit-zero evidence for the matching full-suite run/head/round. */
+      fullSuitePassed?: true }
   | { kind: 'unknown'; detail: string }
 export interface SuiteObservation {
   kind: 'known'
@@ -61,7 +63,8 @@ export async function assessReviewSuite(source: ReviewSuiteSource | undefined, s
     if ((report.hostSuiteWorker !== undefined && typeof report.hostSuiteWorker !== 'boolean')
       || (report.hostComparisonEligible !== undefined && typeof report.hostComparisonEligible !== 'boolean')
       || (report.hostFailureFormat !== undefined && !['bun', 'generic'].includes(report.hostFailureFormat))) return unknown('Host suite comparison provenance is malformed')
-    if (report.hostExitCode === 0) return known()
+    if (report.hostExitCode === 0) return value.scope === 'full-suite'
+      ? { kind: 'known', findings: [], fullSuitePassed: true } : known()
     if (report.suiteOutcome === 'failed-preexisting' && !report.suiteEvidence?.trim()) return failedPreexisting(report)
     if (report.hostDiagnostics !== undefined && (typeof report.hostDiagnostics !== 'string'
       || (report.hostFailureId !== undefined && typeof report.hostFailureId !== 'string'))) return unknown('Host suite diagnostics are malformed')

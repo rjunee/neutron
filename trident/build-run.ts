@@ -1176,7 +1176,11 @@ export async function buildRun(input: BuildRunInput, deps: BuildRunDeps, signal:
         // exhausted round ends the run, and the orchestrator resumes from this row;
         // writing it only on the paths that continue would lose exactly the rounds
         // that need it.
-        const progress = gateStop(reviewProgress(previousReview, currentReview), round,
+        const progress = gateStop(reviewProgress(previousReview, currentReview, {
+          // An empty suite assessment can also mean absent strategy or deferred
+          // subset. Only the host's matching full-suite pass resolves prior red.
+          priorSuiteFailureResolved: suite.fullSuitePassed === true && ci.findings.length === 0,
+        }), round,
           // Progress is recorded only after the panel's run/head/round is verified.
           // A refused second re-plan is still a real panel decision, not infrastructure.
           currentReview && (panel.kind === 'approve' || panel.kind === 'fix' || panel.kind === 're-plan' || panel.kind === 'blocked')
