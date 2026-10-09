@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { closeSync, fstatSync, mkdtempSync, openSync, rmSync, writeSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assertProcessTestIsolation } from '../../../../../trident/process-test-isolation.ts'
+import { assertProcessTestIsolation } from '@neutronai/trident/process-test-isolation.ts'
 import { acquireCodexAccountWriteLease } from '../../account-writer-lock.ts'
 import { createProjectControlStdioTransport } from '../../persistent/project-control-broker-transport.ts'
 
