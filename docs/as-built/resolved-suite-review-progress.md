@@ -35,6 +35,17 @@ source bytes were restored. The Trident typecheck and CI lint pass. The ten
 changed/new files and an unchanged tracked control pass the configured privacy
 gate; this scoped scan does not replace full-tree CI purity.
 
-Full shared-host validation, exact-head CI, source publication, deployment and a
-fresh unattended live sequence are pending. These fixture results do not complete
-#1196 or the live acceptance goal.
+The combined `bash scripts/check-shared-host.sh` ran at source
+`3de9db95cb1ac10be5b16c36aef14f44b0d24d7a` from 20:27:16 through 21:01:03 UTC.
+Lint and all 51 TypeScript projects passed; all 1,806 discovered files executed.
+Eighteen of 19 lanes passed. The only failure was the inventory citation guard:
+the new G072 row omitted test-citation line numbers. Those citations are now
+corrected to the actual enforcement and regression lines. The unchanged guard
+passes both tests with 1,524 assertions. Only that documentation row and this
+change's two new records changed after the full run; runtime code, test code and
+runner configuration were not edited. This records a failed full run followed by its
+affected guard passing, not a second full-suite pass. Exact publication-head CI
+remains required before merge.
+
+Source publication, deployment and a fresh unattended live sequence are pending.
+These fixture results do not complete #1196 or the live acceptance goal.

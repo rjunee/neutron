@@ -55,9 +55,19 @@ the census, sibling ownership and historical-evidence assertions. The corrected
 boot-recovery, bounded planner-output and review-gate checks pass 189 tests across
 four files on the combined source.
 
-The corrected full gate, exact-head CI, publication, scoped deployment and live
-before/after token measurements remain pending. This unpublished change is
-combined with the measured suite-progress correction for one complete validation
-and delivery. These fixture results establish usable bounded output, not measured
-production token savings or completion of #1196. Scheduling shipped separately
-in #1480.
+The combined `bash scripts/check-shared-host.sh` ran at source
+`3de9db95cb1ac10be5b16c36aef14f44b0d24d7a` from 20:27:16 through 21:01:03 UTC.
+Lint and all 51 TypeScript projects passed; all 1,806 discovered files executed.
+Eighteen of 19 lanes passed. The only failure was the inventory citation guard:
+the new G072 row omitted test-citation line numbers. Those citations are now
+corrected to the actual enforcement and regression lines. The unchanged guard
+passes both tests with 1,524 assertions. Only that documentation row and this
+change's two new records changed after the full run; runtime code, test code and
+runner configuration were not edited. This records a failed full run followed by its
+affected guard passing, not a second full-suite pass. Exact publication-head CI
+remains required before merge.
+
+The two continuation corrections share one source delivery. Publication, scoped
+deployment and live before/after token measurements remain pending. These fixture
+results establish usable bounded output, not measured production token savings
+or completion of #1196. Scheduling merged separately in #1480.
