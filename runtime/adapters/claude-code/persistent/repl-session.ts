@@ -612,8 +612,8 @@ export class ReplSession {
   }
 
   /** Acquire the per-session write slot and a busy lease. A background dispatcher
-   * may yield only after binding its child. Readers can overlap readers; host
-   * admitted writers can overlap disjoint admitted writers. Other turns wait.
+   * may yield only after binding its child. Readers can overlap readers; a pair
+   * containing a writer needs host-admitted disjoint workspaces. Other turns wait.
    * A queued writer owns the queue before waiting, so later readers cannot starve it. */
   async acquireTurn(backgroundDispatch?: (yieldDispatch: () => void) => void, workspace?: NativeChildWorkspace): Promise<() => void> {
     return this.acquireTurnSlot(backgroundDispatch, workspace, false)

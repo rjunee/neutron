@@ -137,6 +137,18 @@ barrier at `trident/build-run.ts:691-697`.
   preserve standalone and synthesis vetoes, and assert that unavailable admission
   still prevents dispatch. Parallelizing only the panel loop cannot satisfy this.
 
+  A review for one card and a builder for another must also overlap when their
+  host-admitted workspaces are independent. Any pair containing a writer needs
+  distinct canonical worktree and Git identities, distinct branches in a shared
+  repository, and nonoverlapping workspace/result paths. A read-only declaration
+  alone cannot bypass that proof. Verify both launch orders and simultaneous
+  admission through the real project preparation, durable admission and REPL
+  queue in `open/__tests__/project-build-e2e.test.ts`, with alias and result-path
+  refusal controls in `runtime/workers/native-child-workspace.test.ts`.
+  Ordinary turns, unbound children and unknown ownership retain their existing
+  fences; parent input remains serialized. This does not extend execution or
+  queue deadlines, release live ownership, or substitute a review verdict.
+
   A newly admitted sibling's asynchronous workspace measurement must not revoke
   an otherwise valid planner grant. Initial binding and later planner operations
   wait for the complete measured census within their existing deadline and

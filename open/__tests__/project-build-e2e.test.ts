@@ -2106,7 +2106,8 @@ test('active planner census refuses a retained foreign admission before writes o
   }
 }, 15_000)
 
-test.each(['independent', 'simultaneous', 'aliased'] as const)('native writable children consume host workspace admission: %s', async layout => {
+for (const roles of ['build-build', 'build-review', 'review-build'] as const)
+test.each(['independent', 'simultaneous', 'aliased'] as const)(`native admitted ${roles} children consume host workspace admission: %s`, async layout => {
   let release!: () => void, firstStarted!: () => void, bothStarted!: () => void
   const hold = new Promise<void>(resolve => { release = resolve })
   const first = new Promise<void>(resolve => { firstStarted = resolve })
@@ -2127,19 +2128,25 @@ test.each(['independent', 'simultaneous', 'aliased'] as const)('native writable 
     await f.store.update(second.id, { branch: f.store.get(f.row.id)!.branch, worktree: alias })
   }
   const two = await prepareProjectBuild({ ...f.input, run: f.store.get(second.id)! }, f.context, new AbortController().signal)
-  const call = (prepared: typeof one, runId: string) => prepared.substrate.inRepl!.run({ ...prepared.workers.build.request,
-    run_id: runId, step_id: `${runId}:build:0`, role: 'build', needs_approval_decision: false }, 'in-repl', new AbortController().signal)
-  const running = [call(one, f.row.id)]
+  const call = (prepared: typeof one, runId: string, role: 'build' | 'review') => prepared.substrate.inRepl!.run({ ...prepared.workers[role].request,
+    run_id: runId, step_id: `${runId}:${role}:0`, role, needs_approval_decision: false }, 'in-repl', new AbortController().signal)
+  const firstRole = roles === 'review-build' ? 'review' : 'build'
+  const secondRole = roles === 'build-review' ? 'review' : 'build'
+  const expectedRoles: BoundedWorkRequest['role'][] = [firstRole, secondRole]
+  const running = [call(one, f.row.id, firstRole)]
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
-    if (layout === 'simultaneous') running.push(call(two, second.id))
+    if (layout === 'simultaneous') running.push(call(two, second.id, secondRole))
     await first
-    if (layout !== 'simultaneous') running.push(call(two, second.id))
+    if (layout !== 'simultaneous') running.push(call(two, second.id, secondRole))
     if (layout !== 'aliased') {
       await Promise.race([both, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error('Independent native writers stayed serialized')), 10_000)
+        timer = setTimeout(() => reject(new Error('Independent native children stayed serialized')), 10_000)
       })])
       expect(started.map(request => request.run_id).sort()).toEqual([f.row.id, second.id].sort())
+      expect(started.map(request => request.role).sort()).toEqual(expectedRoles.sort())
+      for (const request of started) expect(request).toMatchObject(request.role === 'review'
+        ? { writable: false, tools: 'read-only' } : { writable: true, tools: 'edit-and-run' })
       expect(f.admission.listLeases('liveChild')).toHaveLength(2)
       expect((await pool.get(f.key))!.turnSlotHeld).toBe(2)
     } else {

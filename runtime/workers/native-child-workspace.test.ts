@@ -13,7 +13,7 @@ import type { ProjectActingTurn } from './project-runners.ts'
 const cleanups: (() => Promise<void>)[] = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 const barrier = () => { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve }); return { promise, release } }
-async function fixture(alias = false, readOnly = false) {
+async function fixture(alias = false, readOnly: boolean | readonly [boolean, boolean] = false, conflict: 'none' | 'result' | 'branch' = 'none') {
   const dir = await mkdtemp(join(tmpdir(), 'native-writers-'))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const roots = [join(dir, 'one'), join(dir, 'two')]
@@ -24,18 +24,20 @@ async function fixture(alias = false, readOnly = false) {
   const session = new ReplSession('fixture', 'generation', 'session', 'channel', dir)
   session.toolSurface = 'Agent,Read,Write,Bash'
   session.attachChild({ pid: 123, write() {}, kill() {}, hasExited: () => false, exited: new Promise(() => {}) })
-  const requests: BoundedWorkRequest[] = roots.map((cwd, index) => ({ run_id: `run-${index}`, step_id: `build:${index}`, role: 'build',
-    model_id: 'worker', effort: 'high', cwd, writable: !readOnly, network: true, tools: readOnly ? 'read-only' : 'edit-and-run',
-    brief: { path: join(state, `brief-${index}`), integrity: 'digest' }, result: { path: join(state, `result-${index}`), schema: 'v1' },
+  const reader = (index: number) => typeof readOnly === 'boolean' ? readOnly : readOnly[index]!
+  const requests: BoundedWorkRequest[] = roots.map((cwd, index) => ({ run_id: `run-${index}`, step_id: `${reader(index) ? 'review' : 'build'}:${index}`, role: reader(index) ? 'review' : 'build',
+    model_id: 'worker', effort: 'high', cwd, writable: !reader(index), network: true, tools: reader(index) ? 'read-only' : 'edit-and-run',
+    brief: { path: join(state, `brief-${index}`), integrity: 'digest' }, result: { path: join(conflict === 'result' && index === 1 ? roots[0]! : state, `result-${index}`), schema: 'v1' },
     thread: { id: 'session' }, budget: { wall_ms: 10_000 }, needs_approval_decision: false }))
   let pending = requests.map(request => ({ runId: request.run_id, stepId: request.step_id, generation: 0 }))
   let unreadable = false
   const workspaces: NativeChildWorkspace[] = []
   for (const [index, request] of requests.entries()) {
     const actual = alias ? 0 : index
+    const branch = conflict === 'branch' ? 0 : actual
     workspaces.push(await admitNativeChildWorkspace({ session, request, runId: request.run_id, worktree: roots[index]!,
-      branch: `branch-${actual}`, generation: 0, pending: () => { if (unreadable) throw new Error('unreadable census'); return pending },
-      git: async args => args[0] === 'symbolic-ref' ? `refs/heads/branch-${actual}`
+      branch: `branch-${branch}`, generation: 0, pending: () => { if (unreadable) throw new Error('unreadable census'); return pending },
+      git: async args => args[0] === 'symbolic-ref' ? `refs/heads/branch-${branch}`
         : args.includes('--show-toplevel') ? roots[actual]!
           : args.includes('--absolute-git-dir') ? join(common, actual === 0 ? 'one' : 'two') : common }))
   }
@@ -64,8 +66,10 @@ async function fixture(alias = false, readOnly = false) {
     setUnreadable: () => { unreadable = true }, setPending: (rows: typeof pending) => { pending = rows } }
 }
 
-test.each(['writers', 'readers'] as const)('admitted %s overlap only after exact child proof and keep leases until host validation', async mode => {
-  const f = await fixture(mode === 'readers', mode === 'readers'), submitted = barrier(), ack = barrier(), both = barrier(), finish = barrier()
+test.each(['writers', 'readers', 'writer then reader', 'reader then writer'] as const)('admitted %s overlap only after exact child proof and keep leases until host validation', async mode => {
+  const readOnly = mode === 'writer then reader' ? [false, true] as const
+    : mode === 'reader then writer' ? [true, false] as const : mode === 'readers'
+  const f = await fixture(mode === 'readers', readOnly), submitted = barrier(), ack = barrier(), both = barrier(), finish = barrier()
   const controller = new AbortController()
   let writes = 0, activeWrites = 0, maxWrites = 0, polls = 0
   f.session.child.submitLine = async () => {
@@ -132,8 +136,16 @@ for (const shape of ['metadata', 'forged', 'foreign', 'duplicate']) {
   })
 }
 
-test('canonical worktree aliases remain serialized even with distinct run admissions', async () => {
-  const f = await fixture(true), polled = barrier(), finish = barrier()
+test.each([
+  ['writer aliases', true, false, 'none'],
+  ['writer then reader aliases', true, [false, true], 'none'],
+  ['reader then writer aliases', true, [true, false], 'none'],
+  ['writer then reader result overlap', false, [false, true], 'result'],
+  ['reader then writer result overlap', false, [true, false], 'result'],
+  ['writer then reader shared branch', false, [false, true], 'branch'],
+  ['reader then writer shared branch', false, [true, false], 'branch'],
+] as const)('%s remain serialized even with distinct run admissions', async (_label, alias, readOnly, conflict) => {
+  const f = await fixture(alias, readOnly, conflict), polled = barrier(), finish = barrier()
   f.session.child.submitLine = async () => { await f.proof(0) }
   const running = createClaudeActingTurn(f.binding(0), { now: () => 0, pause: async () => { polled.release(); await finish.promise } })(f.input(0))
   await polled.promise
