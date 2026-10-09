@@ -84,6 +84,8 @@ async function runScript(args: string[]): Promise<{ code: number; stderr: string
   }
   env['PATH'] = `${stubBin}:${process.env['PATH'] ?? ''}`
   env['HOME'] = fakeHome
+  // Runtime caches remain inside the plaintext scan, separate from gh's HOME.
+  env['BUN_RUNTIME_TRANSPILER_CACHE_PATH'] = join(workdir, 'bun-cache')
   const child = Bun.spawn([process.execPath, SCRIPT, ...args], {
     env,
     stdout: 'pipe',

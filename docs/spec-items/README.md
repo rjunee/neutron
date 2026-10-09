@@ -35,6 +35,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`claude-tool-generation-settlement`](claude-tool-generation-settlement.md) — Fence Claude tool admission and account for accepted calls durably
 - [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
 - [`native-bun-cache-hardlinks`](native-bun-cache-hardlinks.md) — Native scratch installs reuse Bun cache hardlinks
+- [`native-process-descriptor-ownership`](native-process-descriptor-ownership.md) — Preserve parent descriptors after native child finalization
 - [`project-herdr-workspaces`](project-herdr-workspaces.md) — Project-owned Herdr workspaces and sleep lifecycle
 - [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) — Split a project into declared code repos and a versioned vault
 
@@ -132,6 +133,7 @@ branch is cut (standard §3.1, §3.2).
 | [`herdr-host-implements-ptyhost-over-the-socket-api`](herdr-host-implements-ptyhost-over-the-socket-api.md) | HerdrHost implements PtyHost over the herdr socket API | P0 | yes |
 | [`migration-owner-atomic-publication`](migration-owner-atomic-publication.md) | Publish complete migration ownership markers without replacement | P0 | yes |
 | [`native-bun-cache-hardlinks`](native-bun-cache-hardlinks.md) | Native scratch installs reuse Bun cache hardlinks | P0 | yes |
+| [`native-process-descriptor-ownership`](native-process-descriptor-ownership.md) | Preserve parent descriptors after native child finalization | P0 | yes |
 | [`project-herdr-workspaces`](project-herdr-workspaces.md) | Project-owned Herdr workspaces and sleep lifecycle | P0 | yes |
 | [`an-abandoned-dispatch-cannot-actuate-later`](an-abandoned-dispatch-cannot-actuate-later.md) | An abandoned dispatch cannot actuate later | P1 | — |
 | [`claude-project-prompt-suggestions`](claude-project-prompt-suggestions.md) | Keep generated suggestions out of machine-dispatched Claude composers | P1 | — |

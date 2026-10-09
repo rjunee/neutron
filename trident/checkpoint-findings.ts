@@ -16,6 +16,22 @@ import { trimAsciiWs } from './ascii-trim.ts'
 
 const SQLITE_JSON_MAX_DEPTH = 1000
 
+/** Preserve the TEXT-only findings contract before decoding the original bytes. */
+export const CHECKPOINT_FINDINGS_READ_SQL =
+  "CASE WHEN inner_checkpoint_findings IS NULL THEN NULL " +
+  "WHEN typeof(inner_checkpoint_findings) = 'text' THEN CAST(inner_checkpoint_findings AS BLOB) " +
+  "ELSE x'' END AS inner_checkpoint_findings"
+
+/** Read findings as bytes so SQLite driver replacement decoding cannot turn
+ * malformed UTF-8 into apparently valid review evidence. Preserve a leading BOM
+ * for the parser's explicit refusal, and retain valid literal replacement chars. */
+export function decodeStoredCheckpointFindings(raw: Uint8Array | null): string | null {
+  if (raw === null) return null
+  if (!(raw instanceof Uint8Array)) throw new TypeError('Stored findings must be read as bytes')
+  try { return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw) }
+  catch { return '' }
+}
+
 /** Container nesting depth exceeds SQLite's bound? Linear scan; brackets inside
  * string literals (and escaped quotes) do not count. Only inputs JSON.parse
  * accepts can change answer here — garbage already returns []. */

@@ -917,7 +917,7 @@ printf '%s\\n' "$rc" > "$STATUSFILE"
         .filter((line) => !line.startsWith('#') && line.startsWith('trap '))
       // The extraction must find SOMETHING, or "no bad trap here" is an empty check —
       // the exact failure mode this repo has shipped four times.
-      expect(traps.length).toBe(3)
+      expect(traps.length).toBe(path === SCRIPT ? 6 : 3)
       for (const line of traps) {
         // No SIGNAL trap may decide the exit code from `$?`.
         if (/ (INT|TERM)$/.test(line)) expect(line).not.toContain('exit $_rc')

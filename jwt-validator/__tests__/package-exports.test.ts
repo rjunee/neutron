@@ -17,7 +17,7 @@
  * sanctioned entry still resolves cannot tell a narrowed map from the wildcard it
  * replaced — the wildcard satisfies that assertion too. So the internals must be
  * REFUSED, and the refusal must be a RESOLUTION refusal: `ERR_MODULE_NOT_FOUND`
- * naming the specifier, not merely "something threw", which a module that fails
+ * naming the package, not merely "something threw", which a module that fails
  * to evaluate would also satisfy. (Measured: under `"./*": "./*"` these same
  * imports RESOLVE, so the catch below is about the map and nothing else.)
  */
@@ -47,7 +47,7 @@ describe('@neutronai/jwt-validator package exports', () => {
     const error = await import(specifier).then(() => null, (cause: unknown) => cause)
     expect(error).not.toBeNull()
     expect((error as { code?: string }).code).toBe('ERR_MODULE_NOT_FOUND')
-    expect(String((error as Error).message)).toContain(specifier)
+    expect(String((error as Error).message)).toContain('@neutronai/jwt-validator')
   })
 
   // A WILDCARD IN THE TYPES MAP WOULD RE-PUBLISH WHAT THE RUNTIME MAP DROPPED.

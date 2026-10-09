@@ -1219,7 +1219,7 @@ describe('bun install cache wiring', () => {
     ],
     [
       'bun-version is bumped without touching the key',
-      (s) => s.replace('bun-version: 1.3.13', 'bun-version: 1.4.0'),
+      (s) => s.replace(/bun-version: \S+/, 'bun-version: 0.0.0'),
       "does not carry this job's bun version",
     ],
     [

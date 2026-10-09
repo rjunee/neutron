@@ -195,7 +195,8 @@ test('a retained adopted owner is reused, but its later exit invalidates the cac
   cleanup.push(() => { session?.sizeWatchdog?.stop(); session?.deadTurnWatcher?.stop(); session?.selfFenceTimer?.cancel() })
   host.attached[0]!.kill()
   await host.attached[0]!.exited
-  for (let i = 0; i < 20 && pool.has(key); i++) await Promise.resolve()
+  const deadline = performance.now() + 1000
+  while (pool.has(key) && performance.now() < deadline) await Bun.sleep(1)
   expect(pool.has(key)).toBe(false)
   expect(await recover()).toEqual({ status: 'resumed' })
   expect(f.calls).toHaveLength(1)

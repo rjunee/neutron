@@ -431,7 +431,7 @@ self-host a Connect node, free, forever.
 
 ## What you need to run it
 
-- **Bun** — runtime and package manager.
+- **Bun 1.4.2 or later** — runtime and package manager.
 - **A Claude subscription** (via `claude setup-token`) **or an Anthropic API
   key** — Neutron runs your turns through the `claude` CLI under your own
   account.
