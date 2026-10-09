@@ -133,6 +133,8 @@ import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
 import { buildRun, type BuildRunOutcome } from '@neutronai/trident/build-run.ts'
 import type { InnerLoopInput } from '@neutronai/trident/inner-loop.ts'
 import { PROJECT_SESSION_ACQUIRE_TIMEOUT_MS, prepareProjectBuild, projectBuildTrailerDecoder, type ProjectBuildContext } from '../wiring/project-build.ts'
+import { publishedRetrySettlement } from '../wiring/published-retry-settlement.ts'
+import { readPublishedRetryHandoff } from '@neutronai/trident/published-retry-handoff.ts'
 import { claudeInReplRunner } from '@neutronai/runtime/workers/claude-in-repl.ts'
 import { createClaudeHeadlessRunner } from '@neutronai/runtime/workers/claude-headless.ts'
 import { createCodexHeadlessRunner, codexHeadlessReservation } from '@neutronai/runtime/workers/codex-headless.ts'
@@ -6409,6 +6411,300 @@ for (const owned of [true, false]) for (const intermediate of [false, true]) tes
   }
 }, 30_000)
 
+// ─────────────────────────────────────────────────────────────────────────────
+// OWNED PUBLISHED RETRY THROUGH OUTER LAUNCH (#1476)
+//
+// A terminal PR-mode predecessor whose native worker wrote a completed original
+// result while the driver's acknowledgement was lost, so its latest checkpoint
+// still records a pending build or fix. Its publication is witnessed, its linked
+// checkout still holds the branch, and a normal Work Board retry is driven through
+// `dispatchBoardBoundBuild`, the real outer orchestrator/launcher and actual
+// `prepareProjectBuild`. Nothing jumps into the inner host: with the predecessor's
+// checkout present, a broken launch or preparation cannot reach a worker.
+// ─────────────────────────────────────────────────────────────────────────────
+
+type OwnedRetryShape = 'completed-build' | 'unfinished-fix' | 'unknown-fix'
+const OWNED_RETRY_SHAPES: readonly [OwnedRetryShape, string][] = [
+  ['completed-build', 'completed build accounting whose driver acknowledgement was lost'],
+  ['unfinished-fix', 'an unfinished fix attempt (ended_at and outcome null) stopped through the supported control'],
+  ['unknown-fix', 'an explicitly unknown fix attempt'],
+]
+const WRONG_BASE_REFUSAL = "refusing to build on another lane's work"
+
+async function ownedPublishedRetry(shape: OwnedRetryShape, options: { owned?: boolean } = {}) {
+  const owned = options.owned ?? true
+  const fix = shape !== 'completed-build'
+  const task = 'Record a note in NOTES.md and verify the owned published retry reaches merge'
+  const f = await fixture({ dispatchTask: task, maxRounds: 4, ...(fix ? { blockersByRound: [0, 1] } : {}) })
+  const board = new WorkBoardStore(f.db)
+  const card = await board.create('project', { title: task })
+  await board.attachRun('project', card.id, f.row.id)
+  const role = fix ? 'fix' : 'build'
+
+  // THE PREDECESSOR: a real plan/build(/review/fix) whose original worker completes
+  // and writes its result, after which the driver never acknowledges it.
+  let dying = false
+  let workerDone!: () => void
+  const workerFinished = new Promise<void>(resolve => { workerDone = resolve })
+  const append = f.store.appendBuildModeState.bind(f.store)
+  let lost = false
+  // The predecessor's driver never acknowledges the worker: its checkpoint write
+  // never lands, exactly as if the process died there. Other runs are untouched.
+  const losing = spyOn(f.store, 'appendBuildModeState').mockImplementation((...args) => {
+    if (!dying || args[0] !== f.row.id) return append(...args)
+    lost = true
+    return new Promise<never>(() => {})
+  })
+  cleanups.push(() => losing.mockRestore())
+  const host = await createProjectBuildHost(await f.prepare())
+  const runner = host.workers[role].runner
+  host.workers[role].runner = { ...runner, run: async (...args) => {
+    const outcome = await runner.run(...args)
+    expect(outcome.kind).toBe('completed')
+    workerDone()
+    if (shape === 'unknown-fix') return { kind: 'unknown', detail: 'fixture worker finished but its acknowledgement was lost' }
+    // The driver process dies with the attempt still open: no accounting end.
+    if (shape === 'unfinished-fix') return new Promise<never>(() => {})
+    // Accounting records the completion; the checkpoint acknowledgement is lost.
+    dying = true
+    return outcome
+  } }
+  const driving = buildRun({ mode: 'implementation', start: 'fresh', run_id: f.row.id, workers: host.workers,
+    repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal)
+  if (shape === 'unknown-fix') expect(await driving).toMatchObject({ kind: 'unknown', phase: 'fix' })
+  else void driving.catch(() => {})
+  await workerFinished
+  const step = `${f.row.id}:${fix ? 'fix:1' : 'build:0'}`
+  await until(() => {
+    const attempt = f.store.attempts(f.row.id).find(row => row.step_id === step && row.attempt_id === 'dispatch')
+    return attempt && (shape === 'unfinished-fix' ? attempt.started_at !== null : attempt.ended_at !== null)
+      && (shape !== 'completed-build' || lost) ? true : undefined
+  }, 500, 10)
+  const pending = JSON.parse(f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state').at(-1)!.meta!)
+  expect(pending.checkpoint.pending).toMatchObject({ phase: role, step_id: step })
+
+  // PUBLICATION. A fix predecessor already published its build through the normal
+  // guarded publisher (its settled fix commit is local only). A build predecessor is
+  // published by the real guarded salvage seam; an unowned PR is only DISCOVERED.
+  let prior = f.store.get(f.row.id)!
+  if (!fix) {
+    if (!owned) f.github.prs.push({ number: 1, state: 'OPEN', headRefName: prior.branch!, baseRefName: 'main' })
+    const salvageHost = Object.assign(async (...args: Parameters<typeof f.context.runHost>) => {
+      const argv = args[0]
+      if (argv[0] === 'gh' && argv[1] === 'pr' && argv[2] === 'list' && argv.includes('--jq')) {
+        const pr = f.github.prs.find(row => row.headRefName === argv[argv.indexOf('--head') + 1])
+        return { ok: true, exit_code: 0, stdout: pr ? String(pr.number) : '', stderr: '' }
+      }
+      return f.context.runHost(...args)
+    }, { writesDiffOutput: true as const })
+    const orch = buildTridentOrchestrator({ fire_workflow: async () => { throw Error('No build dispatch during salvage') },
+      db_path: f.input.db_path, base_branch: 'main', run_host: salvageHost, sleep: async () => {},
+      with_salvage_reservation: (run, body) => f.store.withSalvageReservation(run, body),
+      persist_refire_reset: async (id, patch) => { await f.store.update(id, patch) },
+      leak_preflight: async input => ({ status: 'clean', head: input.head, findings: [], skipped_rules: [], attempts: 0, note: 'fixture scanner' }) })
+    const salvaged = await orch.reconcile_stranded({ ...prior, phase: 'failed', failure_reason: 'driver acknowledgement lost' })
+    expect(salvaged).not.toBeNull()
+    expect(salvaged!.pr).toBe(1)
+    expect(salvaged!.published_pr).toBe(owned ? 1 : null)
+    await f.store.save({ ...salvaged!, phase: prior.phase })
+  }
+  prior = f.store.get(f.row.id)!
+  expect(prior.published_pr).toBe(owned ? 1 : null)
+  expect(f.github.prs).toMatchObject([{ number: 1, state: 'OPEN', headRefName: prior.branch }])
+  const publishedHead = await gitOut(f.context.runHost, f.origin, ['rev-parse', `refs/heads/${prior.branch}`])
+  const settledHead = await gitOut(f.context.runHost, prior.worktree!, ['rev-parse', 'HEAD'])
+  expect(await gitOut(f.context.runHost, f.repo, ['rev-parse', `refs/heads/${prior.branch}`])).toBe(settledHead)
+  if (fix) expect(settledHead).not.toBe(publishedHead)
+  else expect(settledHead).toBe(publishedHead)
+
+  // TERMINAL through the supported control, then the board's real terminal writer
+  // records the card's strategy and Task spend.
+  const terminal = shape === 'unfinished-fix' ? 'stopped' : 'failed'
+  expect((await buildTridentTerminator({ store: f.store }).terminate(prior.id, terminal,
+    { reason: 'owned published retry fixture predecessor', runObservers: false })).won).toBe(true)
+  prior = f.store.get(f.row.id)!
+  await board.detachRun('project', prior.id, 'failed', { pr: 1, pr_url: null,
+    execution_strategy: prior.execution_strategy, strategy_rationale: prior.strategy_rationale,
+    strategy_plan: prior.strategy_plan, strategy_source: prior.strategy_source,
+    task_iteration: 1, max_task_iterations: 4 })
+  // The retained branch carries commits beyond the fetched base, so it is NOT
+  // contained in it: a fresh launch meets exactly the wrong-base guard. (Main is
+  // not advanced here: the fake GitHub merge is a fast-forward of origin/main;
+  // the direct real-Git cases cover a moved base and its measured base_behind.)
+  // The GitHub API is the fixture's fake boundary; give its repository a
+  // canonical public identity while every Git operation runs against the local
+  // origin, and answer `--jq` discovery the way gh does (a refused launch is
+  // still swept by the real stranded-salvage path, which must only DISCOVER).
+  const originalHost = f.context.runHost
+  f.context.runHost = Object.assign(async (...args: Parameters<typeof originalHost>) => {
+    const argv = args[0]
+    if (argv[0] === 'git' && argv.includes('remote') && argv.includes('get-url') && argv.includes('origin')) {
+      return { ok: true, exit_code: 0, stdout: 'https://github.com/fixture/project.git\n', stderr: '' }
+    }
+    if (argv[0] === 'gh' && argv[1] === 'pr' && argv[2] === 'list' && argv.includes('--jq')) {
+      const pr = f.github.prs.find(row => row.state === 'OPEN' && row.headRefName === argv[argv.indexOf('--head') + 1])
+      return { ok: true, exit_code: 0, stdout: pr ? String(pr.number) : '', stderr: '' }
+    }
+    return originalHost(...args)
+  }, { writesDiffOutput: true as const })
+  // The ONE host settlement witness the composer builds, over this fixture's
+  // real admission and run stores, consumed by outer launch and preparation alike.
+  const settled = publishedRetrySettlement({ admission: f.admission, runs: f.store })
+  f.context.publishedRetrySettled = settled
+
+  const state = join(f.context.stateRoot, encodeURIComponent(prior.id))
+  const observe = async () => ({
+    prior: f.store.get(prior.id), events: f.store.stageEvents(prior.id), attempts: f.store.attempts(prior.id),
+    artifacts: Object.fromEntries(await Promise.all((await readdir(state)).sort().map(async name =>
+      [name, (await lstat(join(state, name))).isFile() ? await readFile(join(state, name), 'utf8') : 'dir'] as const))),
+  })
+  // Observed with the plain process runner, never the (possibly faulted) host.
+  const git = async () => ({
+    refs: await gitOut(spawnCapture, f.repo, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads']),
+    origin: await gitOut(spawnCapture, f.origin, ['for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads']),
+    worktrees: await gitOut(spawnCapture, f.repo, ['worktree', 'list', '--porcelain']),
+    holder: await exists(prior.worktree!)
+      ? await gitOut(spawnCapture, prior.worktree!, ['status', '--porcelain', '--untracked-files=all']) : null,
+  })
+  const dispatch = async () => {
+    const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: card.id }, {
+      store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+      board, resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', max_task_iterations: 4,
+    })
+    expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
+    if (!dispatched.ok) throw Error('retry was not dispatched')
+    return dispatched.run
+  }
+  const launch = async (runId: string, reader = (run: TridentRun) => readPublishedRetryHandoff(f.store, settled, run)) => {
+    f.world.dispatches.length = 0
+    f.world.plannerChoices.length = 0
+    return launchThroughGateway(f, runId, () => {}, { read_published_retry_handoff: reader })
+  }
+  return { f, board, card, prior, task, publishedHead, settledHead, state, observe, git, dispatch, launch, settled }
+}
+
+type OwnedRetryWorld = Awaited<ReturnType<typeof ownedPublishedRetry>>
+/** Commands that could discard, reset or force the predecessor's checkout or branch. */
+const forcing = (w: OwnedRetryWorld, commands: string[][]) => commands.filter(argv =>
+  argv.some(arg => arg === w.prior.worktree || arg.startsWith(`${w.prior.worktree}/`) || arg === w.prior.branch)
+  && argv.some(arg => ['--force', '-f', '-B', '-D', 'reset', 'checkout'].includes(arg)))
+
+for (const [shape, name] of OWNED_RETRY_SHAPES) {
+  test(`owned published retry reaches merged through dispatch, outer launch and actual preparation: ${name}`, async () => {
+    const w = await ownedPublishedRetry(shape)
+    const { f, prior } = w
+    const before = await w.observe()
+    const retry = await w.dispatch()
+    // The witnessed same-card publication arrives through the card lineage only;
+    // no checkpoint, findings or approval is imported, and spend is carried.
+    expect(retry).toMatchObject({ published_pr: 1, pr: null, inner_checkpoint: null, inner_checkpoint_head: null,
+      inner_checkpoint_findings: null, branch: prior.branch, execution_strategy: prior.execution_strategy,
+      task_iteration: 1, max_task_iterations: 4 })
+    expect(f.store.stageEvents(retry.id).map(event => event.stage)).not.toContain('build-retry-source')
+    const commandsBefore = f.commands.length
+    const { stepped, outcome, errors } = await w.launch(retry.id)
+    expect(errors).toEqual([])
+    expect(stepped.failure_reason).toBeNull()
+    expect(outcome?.kind, outcome ? why(f, outcome) : '').toBe('merged')
+    const commands = f.commands.slice(commandsBefore)
+    // Fresh planning and a real builder, then its own review, proof and pinned merge.
+    expect(f.world.plannerChoices).toEqual(['full'])
+    expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
+    expect(f.world.dispatches.filter(call => call.role === 'build')).toHaveLength(1)
+    expect(f.world.dispatches.some(call => call.role === 'review')).toBe(true)
+    expect(f.store.attempts(retry.id).some(row => row.role === 'build' && row.outcome === 'completed')).toBe(true)
+    expect(commands.some(argv => argv[0] === 'gh' && argv[2] === 'merge' && argv.includes('--match-head-commit'))).toBe(true)
+    // The SAME PR merged; none was created.
+    expect(commands.some(argv => argv[0] === 'gh' && argv[2] === 'create')).toBe(false)
+    expect(f.github.prs).toMatchObject([{ number: 1, state: 'MERGED', headRefName: prior.branch }])
+    for (const head of [w.publishedHead, w.settledHead]) {
+      expect((await f.context.runHost(['git', '-C', f.origin, 'merge-base', '--is-ancestor', head, 'refs/heads/main'], f.origin)).ok).toBe(true)
+    }
+    const after = f.store.get(retry.id)!
+    expect(after.base_sha).toBe(prior.base_sha)
+    expect(after.execution_strategy).toBe(prior.execution_strategy)
+    expect(after.published_pr).toBe(1)
+    // The predecessor's checkout went through the existing lifecycle, nothing forced.
+    expect(await exists(prior.worktree!)).toBe(false)
+    expect(commands.some(argv => argv[0] === 'bash' && argv[1]!.endsWith('worktree-cleanup.sh')
+      && argv[2] === f.repo && argv[3] === prior.branch && argv[4] === 'keep-branch')).toBe(true)
+    expect(forcing(w, commands)).toEqual([])
+    // Predecessor run, events, attempts, budgets and retained artifacts are untouched,
+    // and its pending checkpoint is still no retry source.
+    expect(await w.observe()).toEqual(before)
+    expect(retryModeSource(f.store, f.store.get(prior.id)!)).toBeNull()
+    expect(f.db.all('SELECT * FROM code_trident_branch_reservations')).toEqual([])
+  }, 120_000)
+}
+
+test('owned published retry: a discovered-but-unowned PR sibling keeps the wrong-base refusal and is untouched', async () => {
+  const w = await ownedPublishedRetry('completed-build', { owned: false })
+  const { f } = w
+  const before = { rows: await w.observe(), git: await w.git() }
+  const retry = await w.dispatch()
+  expect(retry.published_pr).toBeNull()
+  const { stepped, outcome } = await w.launch(retry.id)
+  expect(outcome).toBeNull()
+  expect(stepped.phase).toBe('failed')
+  expect(stepped.failure_reason).toContain(WRONG_BASE_REFUSAL)
+  expect(f.world.dispatches).toEqual([])
+  expect(f.github.prs).toMatchObject([{ number: 1, state: 'OPEN' }])
+  expect({ rows: await w.observe(), git: await w.git() }).toEqual(before)
+}, 120_000)
+
+const OWNED_RETRY_CONTROLS: Record<string, { apply: (w: OwnedRetryWorld) => Promise<unknown>; refusal: string[] }> = {
+  // Preparation: the retained checkout cannot be handed off.
+  'a dirty retained checkout (untracked file)': { apply: w => writeFile(join(w.prior.worktree!, 'scratch.txt'), 'unsaved\n'),
+    refusal: ['reason=branch-held', 'handoff=refused:holder-dirty'] },
+  'a locked retained checkout': { apply: w => gitOut(w.f.context.runHost, w.f.repo, ['worktree', 'lock', w.prior.worktree!]),
+    refusal: ['reason=branch-held', 'handoff=refused:holder-locked'] },
+  'a holder at a path other than the predecessor worktree': {
+    apply: w => gitOut(w.f.context.runHost, w.f.repo, ['worktree', 'move', w.prior.worktree!, join(w.f.repo, '.trident-worktrees', 'elsewhere')]),
+    refusal: ['reason=branch-held', 'handoff=refused:holder-not-recorded-worktree'] },
+  'an unreadable worktree listing': {
+    apply: async w => {
+      const host = w.f.context.runHost
+      w.f.context.runHost = Object.assign(async (...args: Parameters<typeof host>) =>
+        args[0].includes('worktree') && args[0].includes('list') && args[0].includes('--porcelain')
+          ? { ok: false, exit_code: 128, stdout: '', stderr: 'fatal: injected' } : host(...args), { writesDiffOutput: true as const })
+    }, refusal: ['reason=observation-error', 'handoff=unknown:worktree-list-unreadable'] },
+  // Outer launch: no settled, unowned authority exists.
+  'an active native writer of the predecessor': {
+    apply: async w => {
+      const admitted = await w.f.admission.forNativeChild(null).admit(w.prior.id, `${w.prior.id}:review:1`)
+      expect(admitted.status).toBe('admitted')
+    }, refusal: [WRONG_BASE_REFUSAL] },
+  'a branch reservation held by another run': {
+    apply: w => w.f.store.reserveBranch({ repo_path: w.f.repo, branch: w.prior.branch!, run_id: 'another-run', purpose: 'salvage' }),
+    refusal: [WRONG_BASE_REFUSAL] },
+}
+for (const [control, { apply, refusal }] of Object.entries(OWNED_RETRY_CONTROLS)) {
+  test(`owned published retry refuses without discarding retained work: ${control}`, async () => {
+    const w = await ownedPublishedRetry('completed-build')
+    const { f, prior } = w
+    // The fault arrives after the normal dispatch and before outer launch.
+    const retry = await w.dispatch()
+    await apply(w)
+    const before = { rows: await w.observe(), git: await w.git(),
+      reservations: f.db.all('SELECT repo_path, branch, run_id, purpose FROM code_trident_branch_reservations') }
+    const commandsBefore = f.commands.length
+    const { stepped, outcome } = await w.launch(retry.id)
+    expect(outcome).toBeNull()
+    expect(stepped.phase).toBe('failed')
+    for (const text of refusal) expect(stepped.failure_reason).toContain(text)
+    if (refusal[0] !== WRONG_BASE_REFUSAL) {
+      expect(f.store.stageEvents(retry.id).filter(event => event.stage === 'build-worktree-add-failed')).toHaveLength(1)
+    }
+    expect(f.world.dispatches).toEqual([])
+    expect(forcing(w, f.commands.slice(commandsBefore))).toEqual([])
+    expect(f.commands.slice(commandsBefore).some(argv => argv.some(arg => arg.endsWith('worktree-cleanup.sh')))).toBe(false)
+    expect(f.github.prs).toMatchObject([{ number: 1, state: 'OPEN' }])
+    expect({ rows: await w.observe(), git: await w.git(),
+      reservations: f.db.all('SELECT repo_path, branch, run_id, purpose FROM code_trident_branch_reservations') }).toEqual(before)
+    expect(prior.worktree).not.toBeNull()
+  }, 120_000)
+}
+
 /** The state a restarted driver actually reads back (`production-host-effects.ts:235`). */
 function lastCheckpoint(f: Awaited<ReturnType<typeof fixture>>) {
   const events = f.store.stageEvents(f.row.id).filter(event => event.stage === 'build-mode-state')
@@ -6464,7 +6760,8 @@ async function restartThroughGateway(f: Awaited<ReturnType<typeof fixture>>) {
  * that never started.
  */
 async function launchThroughGateway(f: Awaited<ReturnType<typeof fixture>>, runId: string,
-  onPrepare: (input: InnerLoopInput) => void) {
+  onPrepare: (input: InnerLoopInput) => void,
+  extra: Pick<Parameters<typeof buildTridentOrchestrator>[0], 'read_published_retry_handoff'> = {}) {
   let settled!: () => void
   const completion = new Promise<void>(resolve => { settled = resolve })
   const record = f.store.recordStageEvent.bind(f.store)
@@ -6484,7 +6781,7 @@ async function launchThroughGateway(f: Awaited<ReturnType<typeof fixture>>, runI
     base_branch: 'main', run_host: Object.assign(f.context.runHost, { writesDiffOutput: true as const }),
     read_run: id => f.store.get(id), list_stage_events: id => f.store.stageEvents(id),
     begin_project_build_driver_recovery: (id, reservation) => f.store.beginProjectBuildDriverRecovery(id, reservation),
-    sleep: async () => {} })
+    sleep: async () => {}, ...extra })
   const advanced = await orch.step(f.store.get(runId)!)
   if (advanced.run.phase === 'failed') return { stepped: advanced.run, outcome: null, errors }
   expect(await f.store.saveIfActive(advanced.run)).toBe(true)

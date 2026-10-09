@@ -1,3 +1,3 @@
 - [x] T1: Establish settled owned-publication authority and consume it at outer launch (spec criteria, trident/published-retry-handoff.ts, launch-preparation.ts option, Open composition wiring, direct real-Git tests)
 - [x] T2: Hand off the predecessor's retained linked checkout in prepareProjectBuild under the existing branch reservation and worktree-cleanup lifecycle, with direct preparation controls
-- [ ] T3: Drive the normal board retry end to end in project-build-e2e (completed and unfinished/unknown accounting, unowned sibling, refusal controls), prove paired mutations, add the as-built shard
+- [x] T3: Drive the normal board retry end to end in project-build-e2e (completed and unfinished/unknown accounting, unowned sibling, refusal controls), prove paired mutations, add the as-built shard

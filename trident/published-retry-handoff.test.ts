@@ -154,11 +154,11 @@ async function world(shape: Shape = COMPLETED_BUILD, options: { published?: numb
   })
   let settledWitness = (): boolean => true
   const launch = (run: TridentRun = store.get(retry.id)!, reader = (r: TridentRun) =>
-    readPublishedRetryHandoff(store, () => settledWitness(), r)) => prepareLaunch(run, {
+    readPublishedRetryHandoff(store, () => settledWitness(), r), detected: number | null = null) => prepareLaunch(run, {
     run_host, sleep: async () => {}, list_stage_events: id => store.stageEvents(id),
     read_published_retry_handoff: reader,
   }, {
-    resolveBase: async () => 'main', detectExistingPr: async () => null, mint: () => 'wf-retry',
+    resolveBase: async () => 'main', detectExistingPr: async () => detected, mint: () => 'wf-retry',
     failedRun: (r, reason) => ({ ...r, phase: 'failed', failure_reason: reason }),
     resumeHeadUnreadable: (r, cause) => ({ ...r, phase: 'failed', failure_reason: cause }),
     resolveResumeLiveHead: async () => '', resumeHeadDecides: () => false,
@@ -195,6 +195,23 @@ for (const [name, shape] of [['completed accounting with a lost driver acknowled
     expect(retryModeSource(f.store, f.prior)).toBeNull()
   })
 }
+
+test('owned published retry adopts the retained branch when launch discovers its open PR', async () => {
+  // In production `gh pr list --head <branch>` finds the owned PR and launch
+  // links it on the launch-local row before the guard. The authority must be
+  // read over the row as stored, or its unchanged-row check refuses every owned
+  // retry GitHub reports (the consuming e2e surfaced exactly this).
+  const f = await world(UNFINISHED_FIX)
+  const seen: (number | null)[] = []
+  const outcome = prepared(await f.launch(undefined, r => {
+    seen.push(r.pr)
+    return readPublishedRetryHandoff(f.store, () => true, r)
+  }, PR))
+  expect(seen).toEqual([null, null])
+  expect(outcome.pinnedRun.pr).toBe(PR)
+  expect(outcome.pinnedRun.base_sha).toBe(f.base)
+  expect(retryModeSource(f.store, f.prior)).toBeNull()
+})
 
 test('the reproduced refusal: without the composed authority the same retry is refused as another lane', async () => {
   const f = await world(UNFINISHED_FIX)

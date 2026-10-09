@@ -751,7 +751,11 @@ export async function prepareLaunch(
           waiting: false,
           note: `${launchRun.phase} → failed (owned published retry probe UNKNOWN — no fire)`,
         })
-        const handoff = opts.read_published_retry_handoff(launchRun)
+        // The authority is read over the run AS STORED (`run`), never `launchRun`: the
+        // launch-local `pr` discovered by `gh pr list` above is not yet persisted, so
+        // the authority's own unchanged-row check would refuse every owned retry
+        // whose PR GitHub reports (the e2e caught exactly that).
+        const handoff = opts.read_published_retry_handoff(run)
         if (handoff !== null && handoff.settledHead === branchTip) {
           const descends = await ancestry([
             'git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', handoff.priorBase, branchTip,
@@ -769,7 +773,7 @@ export async function prepareLaunch(
             if (containsPr?.verdict === 'unknown') return unknownRefusal(probeDetail(containsPr.res))
             // The authority is re-read AFTER the Git and network observations; a
             // change in between (a writer, a new owner, an altered artifact) refuses.
-            const reread = containsPr?.verdict === 'yes' ? opts.read_published_retry_handoff(launchRun) : null
+            const reread = containsPr?.verdict === 'yes' ? opts.read_published_retry_handoff(run) : null
             if (reread !== null && isDeepStrictEqual(reread, handoff)) {
               const behind = await opts.run_host(
                 gitRangeArgv({

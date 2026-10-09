@@ -202,26 +202,26 @@ The retry receives current proof, review and pinned merge gates under its own
 identity. No prior approval, suite receipt, mutation proof or checkpoint carries
 because a PR exists.
 
-- [ ] The real board retry, through `dispatchBoardBoundBuild`, the outer launcher
+- [x] The real board retry, through `dispatchBoardBoundBuild`, the outer launcher
   and actual project preparation with the predecessor checkout still present,
   reaches merged on the same PR with its published commits retained, fresh
   planning, and the consumed strategy and task spend. Cover a completed attempt
   whose driver acknowledgement was lost and an unfinished or `unknown` attempt
   settled by its original authenticated result. Verify: `owned published retry`
   cases in `open/__tests__/project-build-e2e.test.ts`.
-- [ ] The discovered-but-unowned sibling remains refused at outer launch, with
+- [x] The discovered-but-unowned sibling remains refused at outer launch, with
   its PR, branch and checkout untouched and no worker dispatched.
-- [ ] Missing or altered request, result, reservation or publication authority;
+- [x] Missing or altered request, result, reservation or publication authority;
   an active native writer; another live owner; a dirty, locked or ambiguous
   retained checkout; changed repository, card or branch; unknown Git
   observations; and concurrent reservation acquisition each refuse without
   branch reset, checkout deletion, forced checkout or ownership release.
   Verify: `trident/published-retry-handoff.test.ts` and the preparation
   controls in `open/__tests__/project-build-e2e.test.ts`.
-- [ ] The predecessor's pending checkpoint is still refused as a retry source;
+- [x] The predecessor's pending checkpoint is still refused as a retry source;
   the retry imports no checkpoint, approval or suite receipt. Verify:
   `trident/build-mode-state.test.ts`.
-- [ ] Refusing every retry fails the owned positive; granting publication from
+- [x] Refusing every retry fails the owned positive; granting publication from
   discovery fails the unowned negative; bypassing retained-checkout ownership or
   settlement fails its active or unknown control. Each mutation is restored and
   the focused suites pass again.
