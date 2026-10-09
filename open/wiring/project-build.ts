@@ -56,6 +56,8 @@ import { AttemptAccounting } from '@neutronai/trident/attempt-accounting.ts'
 import { createProjectWorkerContinuity } from '@neutronai/trident/project-worker-continuity.ts'
 import { recoveredBuildArtifact } from '@neutronai/trident/recover-builder-commit.ts'
 import { TRIDENT_SCRIPT_DIR } from '@neutronai/trident/script-dir.ts'
+import { withRetainedCheckoutHandoff, type RetainedCheckoutOutcome } from '@neutronai/trident/published-retry-checkout.ts'
+import type { PublishedRetrySettlement } from '@neutronai/trident/published-retry-handoff.ts'
 import { suiteFailure } from '@neutronai/trident/suite-failure.ts'
 
 /** Match the selected adapters' credential source without storing its contents.
@@ -185,6 +187,12 @@ export interface ProjectBuildContext {
    * own scope (`projectId` null for General). Absent or null host → every worker runs
    * unplaced and records why. The tab is a view; evidence never comes from it. */
   workerTerminal?: { host: WorkerPlacementHost | null; scope: WorkerPlacementScope }
+  /**
+   * #1476 — the host settlement witness for an owned published retry, the same
+   * one outer launch composes. Absent → no retained checkout is ever handed off,
+   * and a held branch keeps the existing worktree-add refusal.
+   */
+  publishedRetrySettled?: PublishedRetrySettlement
 }
 
 /**
@@ -431,19 +439,43 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         start = expected
       }
     }
-    let added: HostCommandResult | null = null
-    try {
-      added = await git(branch.ok
-        ? ['worktree', 'add', '--', run.worktree, run.branch]
-        : ['worktree', 'add', '-b', run.branch, '--', run.worktree, start])
-    } catch { /* A thrown observation carries no safe command evidence. */ }
-    if (!added?.ok || added.timed_out) {
-      const diagnostic = worktreeAddDiagnostic(added)
-      let recorded = true
-      try { await context.store.recordStageEvent(run.id, 'build-worktree-add-failed', JSON.stringify(diagnostic)) }
-      catch { recorded = false }
-      throw Error(`Build worktree creation was not confirmed (reason=${diagnostic.reason}; exit=${diagnostic.exit_code ?? 'unknown'}; timed_out=${diagnostic.timed_out ?? 'unknown'}; diagnostic_recorded=${recorded})`)
+    const addWorktree = async (handoff: RetainedCheckoutOutcome) => {
+      let added: HostCommandResult | null = null
+      const refused = handoff.verdict === 'refused' || handoff.verdict === 'unknown'
+      // A refused or UNKNOWN retained-checkout handoff never reaches `worktree
+      // add`: an UNKNOWN cleanup may have released the holder, and an add that then
+      // succeeded would build on a hand-off nobody confirmed.
+      if (!refused) {
+        try {
+          added = await git(branch.ok
+            ? ['worktree', 'add', '--', run.worktree, run.branch]
+            : ['worktree', 'add', '-b', run.branch, '--', run.worktree, start])
+        } catch { /* A thrown observation carries no safe command evidence. */ }
+      }
+      if (refused || !added?.ok || added.timed_out) {
+        const diagnostic = refused
+          ? { operation: 'git-worktree-add', reason: handoff.verdict === 'refused' ? 'branch-held' : 'observation-error',
+            exit_code: null, timed_out: null, handoff: `${handoff.verdict}:${handoff.detail}` }
+          : worktreeAddDiagnostic(added)
+        let recorded = true
+        try { await context.store.recordStageEvent(run.id, 'build-worktree-add-failed', JSON.stringify(diagnostic)) }
+        catch { recorded = false }
+        const suffix = 'handoff' in diagnostic ? `; handoff=${diagnostic.handoff}` : ''
+        throw Error(`Build worktree creation was not confirmed (reason=${diagnostic.reason}; exit=${diagnostic.exit_code ?? 'unknown'}; timed_out=${diagnostic.timed_out ?? 'unknown'}${suffix}; diagnostic_recorded=${recorded})`)
+      }
+      if (handoff.verdict === 'handed-off') {
+        // The existing branch was attached, never recreated: its tip is the settled head.
+        const head = await context.runHost(['git', '-C', run.worktree, 'rev-parse', '--verify', 'HEAD^{commit}'], run.worktree)
+        if (!head.ok || head.timed_out || head.stdout.trim() !== handoff.handoff.settledHead) throw Error('Build worktree does not hold the settled retained head')
+      }
     }
+    // OWNED PUBLISHED RETRY (#1476): the predecessor's linked checkout may still
+    // hold the retained branch. Its hand-off runs through the existing worktree
+    // lifecycle under this run's branch reservation, which stays held across the add.
+    if (branch.ok) {
+      await withRetainedCheckoutHandoff({ store: context.store, settled: context.publishedRetrySettled, runId: run.id,
+        baseBranch: input.base_branch, runHost: (argv, cwd) => context.runHost(argv, cwd) }, addWorktree)
+    } else await addWorktree({ verdict: 'none' })
   }
   const checked = await context.runHost(['git', '-C', run.worktree, 'symbolic-ref', '--quiet', 'HEAD'], run.worktree)
   if (!checked.ok || checked.timed_out || checked.stdout.trim() !== `refs/heads/${run.branch}`) throw Error('Build worktree does not hold the assigned branch')

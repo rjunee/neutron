@@ -59,3 +59,12 @@ test('an unrelated lease does not hold the predecessor', () => {
   f.leases.push(lease('another-run'))
   expect(f.settled(f.handoff)).toBe(true)
 })
+
+test('production composes ONE settlement witness into both outer launch and project preparation', async () => {
+  const source = await Bun.file(new URL('../../composer.ts', import.meta.url)).text()
+  expect(source.match(/publishedRetrySettlement\(/g)).toHaveLength(1)
+  expect(source).toContain('const publishedRetrySettled = publishedRetrySettlement({ admission: projectAdmission, runs: new TridentRunStore(db) })')
+  expect(source).toContain('published_retry_settled: publishedRetrySettled,')
+  const call = source.slice(source.indexOf('return prepareProjectBuild(input, {'))
+  expect(call.slice(0, call.indexOf('}, signal)'))).toMatch(/\n\s+publishedRetrySettled,\n/)
+})
