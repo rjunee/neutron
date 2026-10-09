@@ -50,8 +50,25 @@ import { expect } from 'bun:test'
 import { dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import type { SupervisedLoop } from '@neutronai/loop'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+
+/**
+ * The slice of `@neutronai/loop`'s `SupervisedLoop` this harness drives, typed
+ * STRUCTURALLY. The root package does not depend on `@neutronai/loop`, so a bare
+ * type import here resolves only through an ancestor install and fails the CI
+ * typecheck (TS2307); a relative `import('../../loop/…')` type query is refused
+ * by the cross-package lint gate. The RUNTIME class is still resolved from the
+ * sweeper's own directory, below, so the prototype patch hits the real class.
+ */
+interface SupervisedLoop {
+  start(): void
+  stop(): Promise<void>
+  runOnce(): Promise<{ readonly ran: boolean; readonly skipped: boolean }>
+  stats(): { readonly running: boolean }
+}
+interface LoopModule {
+  readonly SupervisedLoop: { readonly prototype: SupervisedLoop }
+}
 
 function resolveFrom(consumerSpecifier: string, specifier: string): string {
   const consumerDir = dirname(fileURLToPath(import.meta.resolve(consumerSpecifier)))
@@ -60,7 +77,7 @@ function resolveFrom(consumerSpecifier: string, specifier: string): string {
 
 const { SupervisedLoop: SweeperSupervisedLoop } = (await import(
   resolveFrom('@neutronai/gateway/upload/chunked-upload-sweeper.ts', '@neutronai/loop')
-)) as typeof import('@neutronai/loop')
+)) as LoopModule
 
 const { SqliteUploadSessionStore } = (await import(
   resolveFrom('@neutronai/open/wiring/uploads.ts', '@neutronai/gateway/upload/upload-session-store.ts')
@@ -120,6 +137,17 @@ export function captureLoopOnStart(name: string = SWEEPER_LOOP_NAME): {
   }
 }
 
+/** Thrown when the boot succeeded but the sweeper capture did not; `booted` is the live stack. */
+export class BootCaptureError<T> extends Error {
+  constructor(
+    message: string,
+    readonly booted: T,
+  ) {
+    super(message)
+    this.name = 'BootCaptureError'
+  }
+}
+
 /**
  * Boot something (the fixture's own boot) with the start-capture installed, and
  * return its value plus the ONE captured sweeper loop. The patch is restored
@@ -136,8 +164,12 @@ export async function bootCapturingSweeperLoop<T>(
     capture.restore()
   }
   if (capture.loops.length !== 1) {
-    throw new Error(
+    // The boot succeeded, so its stack is live. Hand it back on the error so the
+    // caller can still close it — a thrown precondition must not leak a booted
+    // listener, its loops and its DB.
+    throw new BootCaptureError(
       `expected exactly one started '${SWEEPER_LOOP_NAME}' loop during boot, captured ${capture.loops.length}`,
+      value,
     )
   }
   return { value, loop: capture.loops[0]! }
@@ -426,10 +458,11 @@ export async function runHeldSweeperTeardown(target: HeldTeardownTarget): Promis
   let tickP: Promise<{ ran: boolean; skipped: boolean }> | null = null
   let teardownP: Promise<void> | null = null
   try {
-    tickP = loop.runOnce()
+    const tick = loop.runOnce()
+    tickP = tick
     const reached = await Promise.race([
       hold.entered.then(() => true),
-      tickP.then(() => false),
+      tick.then(() => false),
     ])
     if (!reached) {
       throw new Error(`the driven tick settled without reaching markExpired(${uploadId})`)

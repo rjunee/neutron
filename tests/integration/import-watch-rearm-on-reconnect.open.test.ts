@@ -407,8 +407,9 @@ describe('Open import-watch re-arm on reconnect (restart resilience)', () => {
  */
 describe('fixture teardown quiesces composed loops before DB close', () => {
   test('a held sweeper tick keeps Harness.close pending, the DB open, and later cleanups unentered until it lands', async () => {
-    const { value, loop } = await bootCapturingSweeperLoop(() => startHarness({ seedBeforeCompose: false }))
-    harness = value
+    // Assign `harness` INSIDE the boot so afterEach closes it even if the
+    // sweeper capture then throws.
+    const { value, loop } = await bootCapturingSweeperLoop(async () => (harness = await startHarness({ seedBeforeCompose: false })))
     const report = await runHeldSweeperTeardown({
       composition: value.composition,
       graph: value.graph,
@@ -420,8 +421,9 @@ describe('fixture teardown quiesces composed loops before DB close', () => {
   }, 45_000)
 
   test('an earlier rejecting and throwing cleanup neither skips the held cleanup nor lets the DB close early', async () => {
-    const { value, loop } = await bootCapturingSweeperLoop(() => startHarness({ seedBeforeCompose: false }))
-    harness = value
+    // Assign `harness` INSIDE the boot so afterEach closes it even if the
+    // sweeper capture then throws.
+    const { value, loop } = await bootCapturingSweeperLoop(async () => (harness = await startHarness({ seedBeforeCompose: false })))
     value.composition.realmode_cleanups!.unshift(
       async () => {
         throw new Error('injected-reject')
