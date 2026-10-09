@@ -500,9 +500,11 @@ async function untilOrRunFailure(
  * thenable (which `await` adopts by calling its `then`) that records
  * `<label>:handled` only when a consumer attaches a rejection handler, and
  * delivers its error only through that handler, so it can never surface as an
- * unhandled rejection. `<label>:handled` proves only that the drain consumed the
- * rejection; that the drain then CONTINUED is proven separately, by the later
- * cleanup entering and by the ordered events after it. A process-level
+ * unhandled rejection. `<label>:handled` proves only that SOME consumer attached
+ * a rejection handler and received the error; a consumer that then drops the
+ * error records it too (see the test's controls). That the drain then CONTINUED
+ * is proven separately, by the later cleanup entering and by the ordered events
+ * after it. A process-level
  * `unhandledRejection` listener cannot provide this evidence under `bun test`,
  * whose runner fails the running test on an unhandled rejection before any such
  * listener can observe it.
@@ -543,7 +545,7 @@ function countCleanups(composition: OpenComposition): number[] {
 /**
  * Prototype instrumentation for the composed upload sweeper, installed BEFORE the
  * composer runs (module identity matches what open/wiring/uploads.ts imports):
- *  - captures the sweeper's SupervisedLoop by its IDENTITY (its name);
+ *  - captures the sweeper's SupervisedLoop by its public descriptor name;
  *  - holds the real `SqliteUploadSessionStore.markExpired` write for the seeded
  *    row behind `gate`, then runs the original and records its real result;
  *  - records the sweeper's quiescing stop() start/end as teardown progress.
@@ -567,7 +569,9 @@ function installSweeperProbe(rec: Recorder, gate: Promise<void>): SweeperProbe {
   let captured: SupervisedLoop | null = null
 
   SupervisedLoop.prototype.start = function probedStart(this: SupervisedLoop): void {
-    if ((this as unknown as { name: string }).name === SWEEPER_LOOP) captured = this
+    // Identify the loop through its PUBLIC descriptor name (`describe()`), not the
+    // TS-private `name` field.
+    if (this.describe().name === SWEEPER_LOOP) captured = this
     return realStart.call(this)
   }
   SqliteUploadSessionStore.prototype.markExpired = async function probedMarkExpired(
@@ -756,12 +760,26 @@ describe('withComposition quiesces the composed loops before it closes the DB', 
     let settled: Promise<void> = Promise.resolve()
     let runErr: unknown = null
     try {
-      // Positive control for the handled-rejection probe: a rejection nobody
-      // consumes records no handler, so `reject:handled` below is not vacuous.
+      // Controls for the handled-rejection probe. (1) A rejection nobody consumes
+      // records no handler, so `reject:handled` below is not vacuous. (2) A caller
+      // that attaches a handler and then DROPS the error records `handled` too, and
+      // its handler receives the probe's own error. So `handled` proves only that a
+      // handler consumed the rejection; it cannot tell a drain that continues from
+      // one that stops, which is why continuation is asserted from event order.
       const control = recorder()
       observedRejection(control, 'unconsumed')
       await new Promise<void>((resolve) => setImmediate(resolve))
       expect(control.events).toEqual(['unconsumed:ran'])
+      const dropping = recorder()
+      let dropped: unknown = null
+      try {
+        await observedRejection(dropping, 'dropped')
+      } catch (err) {
+        dropped = err
+      }
+      expect(dropping.events).toEqual(['dropped:ran', 'dropped:handled'])
+      expect(dropped).toBeInstanceOf(Error)
+      expect((dropped as Error).message).toBe('dropped')
 
       const run = withComposition(async ({ db, composition }) => {
         heldDb = db
