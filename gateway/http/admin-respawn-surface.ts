@@ -26,6 +26,8 @@ import type { RespawnOutcome } from '@neutronai/runtime/adapters/claude-code/per
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 export interface AdminRespawnSurfaceInput {
+  prepareNativeParentTermination?: (request: unknown) => Promise<{ status: 'prepared' | 'refused' }>
+  consumeNativeParentTermination?: (request: unknown) => Promise<{ status: 'released' | 'already-retired' | 'refused' }>
   retirePlannerAuthority?: (request: unknown) => Promise<{ status: 'released' | 'already-retired' | 'refused' }>
   preparePlannerConversationQuarantine?: (request: unknown) => Promise<{ status: 'prepared' | 'refused' }>
 
@@ -70,10 +72,16 @@ export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): Admi
   // Per-surface rate-limit bucket: two instance gateways mounting this route in the
   // same process must not share a window (Codex P2).
   const rateState: AdminRespawnRateState = { hits: [] }
+  const recoveryRoutes: Record<string, ((request: unknown) => Promise<{ status: string }>) | undefined> = {
+    '/admin/retire-planner-authority': input.retirePlannerAuthority,
+    '/admin/prepare-planner-conversation-quarantine': input.preparePlannerConversationQuarantine,
+    '/admin/prepare-native-parent-termination': input.prepareNativeParentTermination,
+    '/admin/consume-native-parent-termination': input.consumeNativeParentTermination,
+  }
   return {
     handler: async (req: Request): Promise<Response | null> => {
       const url = new URL(req.url)
-      if (['/admin/retire-planner-authority', '/admin/prepare-planner-conversation-quarantine'].includes(url.pathname) && req.method === 'POST') {
+      if (Object.hasOwn(recoveryRoutes, url.pathname) && req.method === 'POST') {
         // The owner token gates this surface; the consumer independently verifies
         // the pinned operator signature and exact workflow authority.
         const supplied = Buffer.from(req.headers.get('X-Gateway-Token') ?? '')
@@ -86,7 +94,7 @@ export function createAdminRespawnSurface(input: AdminRespawnSurfaceInput): Admi
         if (rateState.hits.length >= limit.maxRequests) return Response.json({ status: 'refused' }, { status: 429 })
         rateState.hits.push(now)
         try {
-          const callback = url.pathname === '/admin/retire-planner-authority' ? input.retirePlannerAuthority : input.preparePlannerConversationQuarantine
+          const callback = recoveryRoutes[url.pathname]
           const result = await callback?.(await readCapAuthorization(req)) ?? { status: 'refused' }
           return Response.json(result, { status: result.status === 'refused' ? 409 : 200 })
         } catch { return Response.json({ status: 'refused' }, { status: 409 }) }

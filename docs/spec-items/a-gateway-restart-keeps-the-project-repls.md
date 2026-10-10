@@ -807,6 +807,58 @@ operation or unavailable authority refuses without changing ownership.
       guard or exact lease transaction must fail an opposing control. Existing
       child-bound retirement and automatic unknown reconciliation remain covered.
 
+### Prepared termination of an authenticated native parent
+
+An owner-authorized project conversation reset may retire expired, terminal-run
+native reviews without rebooting the host. This operation requires original
+host-signed child-bound receipts for every retained lease in the project and one
+common original native parent: session, generation, PID, kernel birth, boot and
+launch identity. Unsigned legacy work is ineligible. A missing process, task-menu
+idleness, a rendered API failure or an operator assertion alone is insufficient.
+
+The independent operator signs a preparation naming the complete exact lease
+multiset, original dispatch receipts, parent and current boot. All runs are
+terminal and every signed original dispatch deadline has elapsed. The application
+checks its canonical run/attempt/lease state and current native census. It commits
+one project maintenance hold, permanent exact-work tombstones and a permanent
+conversation quarantine atomically before any signal. An ordinary conversation,
+unlisted child, pending spawn, competing preparation or ambiguous owner refuses.
+Preparation grants no completion and releases no lease.
+
+The operator retains a pidfd opened while that exact original parent is alive,
+rechecks its kernel identity and the committed application preparation, then
+terminates that original execution and its positively attributed conversation
+forks and support processes. Before signalling, a root-reviewed process census
+must cover the entire descendant tree; unknown descendants and foreign
+conversations refuse. Every process is identified and retained independently,
+then frozen and rechecked before targeted termination. Process groups and
+unrelated native parents are never termination targets. The independent authority
+records exit through every retained descriptor, the unchanged boot, preparation
+digest and original process identity. Parent exit without complete execution-tree
+termination cannot release ownership.
+The termination receipt cannot be manufactured from a later absent PID, a reused
+PID, an application restart or a copied claim that a pidfd was checked. A failed
+signal, observation timeout or interrupted operator leaves ownership held.
+
+The application verifies both independently signed phases and the current boot
+before consuming the exact prepared lease multiset in one transaction. It retains
+failed runs, attempts, results, publications, transcript bytes and all original
+deadlines. This records native-parent termination, never successful review or
+proof that historical subprocess effects succeeded. The old conversation and
+work identities cannot replay. The existing quarantined-Chat handoff permits a
+fresh conversation only after completed termination authority is verified; a
+prepared tombstone cannot release the terminal slot. Other native parents,
+projects, services and admission leases remain untouched.
+
+Acceptance uses the real admission store, original receipt verifier, independent
+signature verifier and isolated process-exit observer. Opposing controls must
+refuse wrong boot, parent, generation, receipt, lease, scope, incomplete census,
+unexpired deadline, live run, absent-before-prepare process, missing exit,
+replayed or tampered completion and interrupted transactions. After valid
+consumption, fresh work is admitted while the original work and conversation
+remain denied. The legacy whole-host termination contract below retains its
+different-boot requirement.
+
 ### Prepared whole-host termination of unresolved native work
 
 An independent host/operator authority may prepare physical recovery of an exact

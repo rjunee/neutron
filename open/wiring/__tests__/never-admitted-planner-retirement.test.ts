@@ -269,8 +269,8 @@ test('actual consumer drains the retained parent workspace and detaches without 
     quarantineConversation: (p: Parameters<typeof quarantinePersistentConversation>[0], q: (id: string) => boolean) =>
       quarantinePersistentConversation(p, q, { identity }) }
   expect(getRecord(registry, key)).toBeDefined()
-  expect(session.hasOnlyQuarantineRequest(f.request)).toBe(true)
-  expect(inspectConversationQuarantine(parent, predicate, { request: f.request, identity })).toBe(true)
+  expect(session.hasOnlyQuarantineRequests([f.request])).toBe(true)
+  expect(inspectConversationQuarantine(parent, predicate, { requests: [f.request], identity })).toBe(true)
   expect(await prepareNeverAdmittedPlanner(options, f.preparation)).toEqual({ status: 'prepared' })
   expect(session.turnSlotHeld).toBe(1); expect(f.admission.listLeases()).toEqual([f.lease])
   expect(await retireNeverAdmittedPlanner(options, f.root.signed(f.body))).toEqual({ status: 'released' })
@@ -452,7 +452,7 @@ test('logical reset refuses another positively identified live conversation', as
   pool.set(key, session.pooledAs); childByKey.set(key, child)
   supervisedBySessionKey.set(key, { substrate_instance_id: key, user_id: 'owner', project_id: 'project', cwd: f.dir })
   cleanup.push(() => { pool.delete(key); childByKey.delete(key); supervisedBySessionKey.delete(key) })
-  expect(session.hasOnlyQuarantineRequest(f.request)).toBe(true)
+  expect(session.hasOnlyQuarantineRequests([f.request])).toBe(true)
   const before = f.admission.listLeases()
   expect(await prepareNeverAdmittedPlanner(f.options, f.preparation())).toEqual({ status: 'refused' })
   expect(f.admission.listLeases()).toEqual(before)

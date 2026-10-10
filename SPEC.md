@@ -227,6 +227,13 @@ of the original conversation and exact host-authority drain. Quarantined history
 remains readable, but canonical recovery starts any later conversation fresh,
 without replay (Decisions Log 2026-10-08, conversation quarantine).
 
+An owner-authorized reset may also retire expired native reviews whose original
+signed dispatches identify one exact parent, after an independent operator
+prepares the complete scope and observes that parent's entire attributed execution
+tree terminate through retained process descriptors. This preserves failed-work history and starts any
+successor conversation fresh (Decisions Log 2026-10-10, authenticated parent
+termination). Unsigned historical work retains its existing recovery rules.
+
 A key fenced after loss of ownership evidence remains refused until a gateway
 restart performs fresh reconciliation, even if registry writes recover meanwhile
 (Decisions Log 2026-09-14, "fence duration").
@@ -351,6 +358,21 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-10-10 — Terminate an authenticated expired-review parent without a host reboot.
+
+The owner requires recovery without rebooting a shared host and has authorized
+resetting the affected project conversation. Original child-bound dispatch
+signatures may establish the exact common native parent for expired reviews of
+terminal runs. A distinct prepared operator transaction fences the complete
+project scope and permanently retires its old work and conversation identities
+before targeted termination. Only independent observation of exit through a
+descriptor retained from each live original process, including attributed forks
+and support processes, may authorize atomic lease
+consumption and a fresh conversation. No old review becomes successful and no
+deadline is extended. This deliberately adds a signed-parent recovery protocol;
+the existing whole-host protocol remains necessary for unsigned legacy placement
+and continues to require a different kernel boot.
 
 ### 2026-10-08 — Include explicitly retired dead-producer logical conversation admissions in reset.
 

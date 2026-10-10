@@ -8,7 +8,7 @@ import type { ReplSession } from './repl-session.ts'
 
 type Predicate = (sessionId: string) => boolean
 interface ObservationDeps { identity?: (pid: number) => ProcessIdentity | undefined }
-interface PreparationDeps extends ObservationDeps { request?: BoundedWorkRequest }
+interface PreparationDeps extends ObservationDeps { requests?: readonly BoundedWorkRequest[] }
 
 /** The caller owns the durable project admission fence and complete affected-work
  * census. This local check never treats a quiet pane as native-work completion. */
@@ -38,8 +38,8 @@ function inspect(parent: NativeDispatchParent, quarantined: Predicate, deps: Pre
       const session = Bun.peek(entry) as ReplSession
       if (session.pooledAs !== entry || session.sessionId !== parent.sessionId || session.childGeneration !== parent.childGeneration ||
           session.child.pid !== parent.pid || childByKey.get(key) !== session.child || session.hasChildExited() ||
-          session.activeTurn !== undefined || (deps.request === undefined
-            ? session.turnSlotHeld !== 0 : !session.hasOnlyQuarantineRequest(deps.request))) return undefined
+          session.activeTurn !== undefined || (deps.requests === undefined
+            ? session.turnSlotHeld !== 0 : !session.hasOnlyQuarantineRequests(deps.requests))) return undefined
       matches.push({ key, session })
     }
   }
@@ -51,14 +51,15 @@ export function inspectConversationQuarantine(parent: NativeDispatchParent, quar
   try { return inspect(parent, quarantined, deps) !== undefined } catch { return false }
 }
 
-/** Called only after durable quarantine and accepted-operation drain. No await
+/** Called only after durable quarantine. The caller either drains accepted work
+ * or supplies the complete prepared request set for independently observed exit. No await
  * splits the exact local identity/busy checks from detachment. Never closes,
  * signals, deletes a registry row or submits input on either PTY substrate. */
 export function quarantinePersistentConversation(parent: NativeDispatchParent, quarantined: Predicate,
-  deps: ObservationDeps = {}): boolean {
+  deps: PreparationDeps = {}): boolean {
   try {
     if (!quarantined(parent.sessionId)) return false
-    const found = inspect(parent, quarantined, deps.identity === undefined ? {} : { identity: deps.identity })
+    const found = inspect(parent, quarantined, deps)
     if (found === undefined) return false
     if (found.session !== undefined) fenceLostSession(found.key, found.session, 'conversation permanently quarantined')
     return true

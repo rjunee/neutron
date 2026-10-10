@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { HerdrError, verifyHerdrProtocol, type HerdrRpc } from './herdr-client.ts'
 import { HERDR_PROTOCOL_VERSION, type HerdrLayoutApply, type HerdrLayoutPaneNode, type HerdrProjectLayoutParams, type HerdrPaneRetirementIdentity } from './herdr-protocol.ts'
 import { withFlockSync } from './registry-lock.ts'
-import { readProcessIdentity, type ProcessIdentity } from './process-identity.ts'
+import { classifyRecordedPid, readProcessIdentity, type ProcessIdentity } from './process-identity.ts'
 import { inspectIdleRelicShell, type RelicProcReader } from './relic-shell-census.ts'
 
 /** Null is General; the literal project id "general" is a different scope. */
@@ -21,6 +21,7 @@ export interface ProjectPanePlacement {
 }
 
 export interface QuarantinedChatIdentity {
+  nativeLoop?: 'terminated'
   operationId: string
   sessionId: string
   childGeneration: string
@@ -450,6 +451,13 @@ export class ProjectWorkspaceManager {
         if (!before || before.state !== 'ready' || before.chat?.pane !== identity.pane || before.chat.placeholderArgv
           || !nonempty(identity.operationId) || !nonempty(identity.sessionId) || !nonempty(identity.childGeneration)
           || !nonempty(identity.channelName) || !authorized()) return false
+        const terminated = identity.nativeLoop === 'terminated'
+        const processCurrent = () => terminated
+          ? ['confirmed-gone', 'not-comparable'].includes(classifyRecordedPid(identity.pid, identity.processIdentity))
+          : isDeepStrictEqual(readProcessIdentity(identity.pid), identity.processIdentity)
+        // A dead process cannot bind a recycled pane number. Its original host
+        // birth receipt and completed authority must still identify this pane.
+        if ((terminated && !before.chat.retirementIdentity) || !processCurrent()) return false
         const inspected = await this.inspect(client, scope, key)
         if (inspected.status !== 'live' || inspected.pane !== identity.pane || inspected.revision !== before.revision) return false
         const pane = object(object(await client.call('pane.get', { pane_id: identity.pane })).pane)
@@ -459,12 +467,11 @@ export class ProjectWorkspaceManager {
         const processes = info.foreground_processes
         if (info.pane_id !== identity.pane || !Array.isArray(processes)) return false
         const matches = processes.map(object).filter(p => p.pid === identity.pid)
-        if (matches.length !== 1 || !Array.isArray(matches[0]!.argv)
+        if (terminated ? processes.length !== 0 : matches.length !== 1 || !Array.isArray(matches[0]!.argv)
           || !matches[0]!.argv.includes(identity.sessionId)
           || !matches[0]!.argv.some((arg: unknown) => typeof arg === 'string' && arg.includes(identity.channelName))) return false
         return this.journal.update(rows => {
-          if (!isDeepStrictEqual(rows[key], before) || !authorized()
-            || !isDeepStrictEqual(readProcessIdentity(identity.pid), identity.processIdentity)) return false
+          if (!isDeepStrictEqual(rows[key], before) || !authorized() || !processCurrent()) return false
           const { chat, ...retained } = before
           rows[key] = { ...retained, revision: randomUUID(), quarantinedChats: [
             ...(before.quarantinedChats ?? []), { ...chat!, quarantine: structuredClone(identity) },
