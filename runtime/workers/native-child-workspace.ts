@@ -147,8 +147,10 @@ export function nativeChildWorkspaceCompletion(admission: NativeChildWorkspace):
   return records.get(admission)?.done
 }
 
-/** Host calls only after validated terminal evidence and durable lease release,
- * or refusal before dispatch. Unknown never completes this authority. */
+/** Dispatch ownership closes only after validated terminal evidence and durable
+ * lease release, or refusal before dispatch. A control-only reconstruction that
+ * never owned a dispatch turn may be discarded separately; completing that object
+ * cannot release the original dispatch's workspace or durable ownership. */
 export function completeNativeChildWorkspace(admission: NativeChildWorkspace): void {
   const record = records.get(admission)
   if (!record || record.completed) return

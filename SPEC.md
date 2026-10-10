@@ -198,6 +198,14 @@ work prevent sleep. This lifecycle does not weaken restart adoption or native
 subagent placement (Decisions Log 2026-09-23, project workspaces;
 [`docs/spec-items/project-herdr-workspaces.md`](docs/spec-items/project-herdr-workspaces.md)).
 
+Stopping a Trident run aborts its active driver and requests cancellation of its
+authenticated native child. The original signed deadline also permits that
+cancellation. A durable claim prevents duplicate stop inputs across restart;
+only the matching native tool acknowledgement releases the original ownership.
+Project parents grant `TaskStop` at launch. Existing parents without that grant
+retain their ownership until separately evidenced recovery (Decisions Log
+2026-10-10, native cancellation).
+
 A warm REPL runs in a **herdr pane** (Decisions Log 2026-09-12, "the REPL
 substrate becomes selectable"), which makes it a child of the herdr server
 rather than of the gateway: a **gateway** restart leaves it running and the next
@@ -358,6 +366,19 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-10-10 — Cancel original native work when its run is stopped or its signed deadline expires.
+
+An owner stop must reach the native child instead of only changing a run row.
+The launcher observes the durable stopped state and aborts its driver. For a
+signed original Claude child, the host uses the existing parent turn queue and
+native `TaskStop` tool, with one durable input claim per work request. The
+original launch must already grant the tool; a busy parent is never upgraded
+in place. Only the exact native tool acknowledgement or the existing validated
+worker result releases ownership. Missing acknowledgement preserves the claim
+and permits passive recovery, never another input. Cancellation neither starts
+a replacement worker nor fabricates a completed result. The contract lives in
+`docs/spec-items/trident-build-efficiency.md` under native cancellation.
 
 ### 2026-10-10 — An unresolved retry cannot silently restart planning.
 

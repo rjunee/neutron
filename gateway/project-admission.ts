@@ -5,6 +5,7 @@ import type {
 } from './project-admission-store.ts';
 import type { DispatchAdmission } from '@neutronai/trident/dispatch-admission.ts';
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts';
+import type { NativeCancellationAuthority } from '@neutronai/runtime/workers/claude-native-cancellation.ts';
 import { createNativeDispatchSigner, verifyNativeDispatchNotSubmitted, verifyNativeDispatchChildBound,
   type NativeDispatchAuthority, type NativeDispatchLease } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts';
 
@@ -33,6 +34,7 @@ export type AdmissionProducer = 'chat' | 'acting-turn' | 'work-board' | 'hold-dr
  * token-bound `release` is reserved for refusal before child dispatch.
  */
 export interface NativeChildAdmission {
+  cancellation?(request: BoundedWorkRequest, receipt: unknown): NativeCancellationAuthority | undefined
   /** Permanent operator retirement, including a prepared operation. */
   isRetired?(runId: string, stepId: string): boolean
   admit(runId: string, stepId: string): Promise<AdmittedWork | AdmissionRefusal>
@@ -184,6 +186,16 @@ export class ProjectAdmission {
    */
   forNativeChild(projectId: string | null): NativeChildAdmission {
     return {
+      cancellation: (request, receipt) => {
+        const rows = this.listLeases('liveChild').filter(row => row.scope.projectId === projectId
+          && row.workRef === JSON.stringify([request.run_id, request.step_id]));
+        if (rows.length !== 1) return undefined;
+        const row = rows[0]!, lease = { ...row, reason: 'liveChild' as const };
+        if (!verifyNativeDispatchChildBound(receipt, request, lease)) return undefined;
+        return { lease, current: () => this.store.nativeCancellationCurrent(row),
+          read: () => this.store.readNativeCancellation(row), claim: preparation => this.store.claimNativeCancellation(row, preparation),
+          complete: (preparation, acknowledgement) => this.store.completeNativeCancellation(row, preparation, acknowledgement) };
+      },
       isRetired: (runId, stepId) => this.store.isPlannerRetired(this.scopeFor(projectId), JSON.stringify([runId, stepId])),
       continuation: (request, receipt) => {
         const rows = this.listLeases('liveChild').filter(row => row.scope.projectId === projectId
@@ -226,6 +238,7 @@ export class ProjectAdmission {
       admit: async (runId, stepId) => {
         if (!stepId.trim()) throw new Error('Step reference required');
         const scope = this.scopeFor(projectId);
+        if (this.store.isNativeCancellationRequested(scope, JSON.stringify([runId, stepId]))) return { status: 'fenced', phase: null };
         if (!(await this.registerIfLive(scope))) return { status: 'unknown' };
         const joined = await this.store.admitChild(
           scope, { reason: 'build', workRef: runId }, 'liveChild', this.producerFor('native-child'), JSON.stringify([runId, stepId]));

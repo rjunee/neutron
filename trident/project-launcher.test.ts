@@ -52,6 +52,44 @@ async function fixture() {
 }
 async function settle() { for (let i = 0; i < 5; i++) await Bun.sleep(1) }
 
+test('a durable stop aborts the running driver without waiting for the worker budget', async () => {
+  const f = await fixture()
+  let observed!: AbortSignal
+  f.construct.mockImplementation(async () => ({ runners: {}, workers: {} as never, deps: {} as never,
+    run: async (_request, signal) => { observed = signal!; return new Promise(resolve => {
+      signal!.addEventListener('abort', () => resolve(unknown), { once: true })
+    }) } }))
+  expect((await createProjectLauncher(f.options)(f.input)).status).toBe('fired')
+  expect(observed.aborted).toBe(false)
+  await f.store.update(f.input.run.id, { phase: 'stopped' })
+  await Bun.sleep(150)
+  expect(observed.aborted).toBe(true)
+  expect(f.store.get(f.input.run.id)?.phase).toBe('stopped')
+  expect(f.errors).toEqual([])
+})
+
+test('stop during preparation aborts only its own run and clears the watch on refusal', async () => {
+  const f = await fixture()
+  const sibling = await f.store.create({ slug: 'sibling', project_slug: 'project', repo_path: f.input.run.repo_path, task: 'Other work' })
+  let observed!: AbortSignal
+  let entered!: () => void
+  const preparing = new Promise<void>(resolve => { entered = resolve })
+  const launched = createProjectLauncher({ ...f.options, prepare: async (_input, signal) => {
+    observed = signal; entered()
+    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+    throw signal.reason
+  } })(f.input)
+  await preparing
+  await f.store.update(sibling.id, { phase: 'stopped' })
+  await Bun.sleep(150)
+  expect(observed.aborted).toBe(false)
+  await f.store.update(f.input.run.id, { phase: 'stopped' })
+  expect((await launched).status).toBe('failed')
+  expect(observed.aborted).toBe(true)
+  expect(f.starts()).toBe(0)
+  expect(f.errors).toEqual([])
+})
+
 test('only structured review STOP evidence becomes an escalation, never a matching reason alone', async () => {
   const f = await fixture()
   const reason = 'Review requires orchestrator arbitration: no-progress'
@@ -220,7 +258,7 @@ test('competing launchers reserve once and stopped rows reject both reservation 
   f.complete(merged)
   await settle()
   expect(f.store.get(f.input.run.id)!.inner_result).toBe(reserved)
-  expect(f.errors).toHaveLength(1)
+  expect(f.errors).toEqual([])
 })
 
 test('unconfirmable construction times out then settles; construction failure is failed', async () => {

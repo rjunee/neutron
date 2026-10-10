@@ -18,7 +18,7 @@ async function fixture() {
     return { db, store: new ProjectAdmissionStore(db) };
   };
   const { db, store } = open();
-  for (const file of ['0158_project_admission_fences.sql', '0161_native_host_terminations.sql', '0166_claude_native_continuations.sql', '0168_planner_authority_retirements.sql', '0169_native_conversation_quarantines.sql']) {
+  for (const file of ['0158_project_admission_fences.sql', '0161_native_host_terminations.sql', '0166_claude_native_continuations.sql', '0168_planner_authority_retirements.sql', '0169_native_conversation_quarantines.sql', '0171_claude_native_cancellations.sql']) {
     await db.exec(readFileSync(new URL(`../migrations/${file}`, import.meta.url), 'utf8'));
   }
   await store.register(scope);

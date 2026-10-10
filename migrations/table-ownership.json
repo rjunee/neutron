@@ -52,6 +52,10 @@
       "owner": "gateway/project-admission-store.ts",
       "writers": ["gateway/project-admission-store.ts"]
     },
+    "claude_native_cancellations": {
+      "owner": "gateway/project-admission-store.ts",
+      "writers": ["gateway/project-admission-store.ts"]
+    },
     "projects": {
       "owner": "gateway/projects/sqlite-store.ts",
       "writers": [

@@ -130,6 +130,8 @@ export function createProjectLauncher(options: ProjectLauncherOptions): TridentW
       projectBuildReservation: { kind: 'in-process-driver', gateway_session: projectDriverGatewaySession },
     })
     let reserved = false
+    let cancellationWatch: ReturnType<typeof setInterval> | undefined
+    const stopWatching = () => { clearInterval(cancellationWatch); cancellationWatch = undefined }
     const started = Date.now()
     const launch = (async (): Promise<FireOutcome> => {
       try {
@@ -140,12 +142,23 @@ export function createProjectLauncher(options: ProjectLauncherOptions): TridentW
         const saved = await options.store.compareProjectBuildResult(input.run.id, null, reservation)
         if (!saved) return { status: 'unconfirmed', error: 'Project launch reservation was not acquired' }
         reserved = true
+        const observeCancellation = () => {
+          try {
+            if (options.store.get(input.run.id)?.phase === 'stopped') {
+              controller.abort(new DOMException('Project run stopped', 'AbortError'))
+              stopWatching()
+            }
+          } catch (error) { options.onError(error) }
+        }
+        cancellationWatch = setInterval(observeCancellation, 100)
+        cancellationWatch.unref()
+        observeCancellation()
         const host = await createProjectBuildHost(await options.prepare(input, controller.signal))
         const mode = input.run.bound_pr !== null ? 'bound_pr' : input.run.parent_run_id !== null ? 'wave' : 'implementation'
         const running = host.run({ mode, start: input.resume_checkpoint ? 'resume' : 'fresh',
           ...(input.run.bound_pr !== null ? { bound_pr: input.run.bound_pr } : {}),
           ...(input.run.wave_task_id !== null ? { pinnedTaskId: input.run.wave_task_id } : {}),
-        }, controller.signal)
+        }, controller.signal).finally(stopWatching)
         // A REJECTION IS NOT THE DRIVER'S `unknown`, AND MUST NOT BE LEFT PENDING.
         // The driver authors `unknown` when it MEASURED and could not find out; that
         // outcome legitimately keeps the reservation, because `step()` short-circuits
@@ -159,7 +172,11 @@ export function createProjectLauncher(options: ProjectLauncherOptions): TridentW
         // The original error is rethrown either way so `onError` still reports it.
         fireAndForget('project-build-outcome', running.then(async outcome => {
           const written = await options.store.compareProjectBuildResult(input.run.id, reservation, projectBuildResult(outcome, { ...input, run: options.store.get(input.run.id) ?? input.run }))
-          if (!written) throw Error('Project outcome write was not confirmed')
+          if (!written) {
+            // A stop owns the terminal row; the cancelled driver cannot replace it.
+            if (options.store.get(input.run.id)?.phase === 'stopped') return
+            throw Error('Project outcome write was not confirmed')
+          }
           // THE DRIVER SETTLING IS OTHERWISE UNOBSERVABLE, and that blindness cost two
           // acceptance runs. `compareProjectBuildResult` writes `inner_result` and nothing
           // else: `last_advanced_at` does not move (`store.ts:1044-1051`) and no stage event
@@ -188,6 +205,7 @@ export function createProjectLauncher(options: ProjectLauncherOptions): TridentW
         }), options.onError)
         return { status: 'fired', error: null }
       } catch (error) {
+        stopWatching()
         if (reserved) await options.store.compareProjectBuildResult(input.run.id, reservation, JSON.stringify({ ok: false, checkpoint: 'inner-error', terminalCause: String(error) })).catch(options.onError)
         return { status: 'failed', error: String(error) }
       }

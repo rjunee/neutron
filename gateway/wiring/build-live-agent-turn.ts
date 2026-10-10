@@ -69,7 +69,7 @@ import {
   VALUE_BYTE_CAP,
 } from '@neutronai/channels/button-primitive.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
-import { SUBAGENT_TOOL_NAME, SUBAGENT_CONTINUATION_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
+import { SUBAGENT_TOOL_NAME, SUBAGENT_CONTINUATION_TOOL_NAME, SUBAGENT_STOP_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import { assembleSystemPrompt } from '@neutronai/runtime/system-prompt.ts'
@@ -387,7 +387,7 @@ export const LIVE_AGENT_TOOL_NAMES = [
  * (`spawn.ts:1550`) respawned the child on the mismatch. A test that
  * string-matches both call sites can only notice drift after it happens; one
  * shared value makes the drift unrepresentable. */
-export const PROJECT_REPL_TOOL_DEFS: ToolDef[] = builtinToolDefs([...LIVE_AGENT_TOOL_NAMES, SUBAGENT_CONTINUATION_TOOL_NAME])
+export const PROJECT_REPL_TOOL_DEFS: ToolDef[] = builtinToolDefs([...LIVE_AGENT_TOOL_NAMES, SUBAGENT_CONTINUATION_TOOL_NAME, SUBAGENT_STOP_TOOL_NAME])
 
 /**
  * EXPORTED (ISSUES #504) because the warm REPL's `--tools` surface is a
