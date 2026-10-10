@@ -59,5 +59,12 @@ exempting real environment reads, and the ledger expectations include migration
 passed. Deliberately removing the request binding and inserting an environment
 read each made its respective regression test fail; both mutations were restored.
 
+The second full gate exercised all 1,814 files: 28,592 tests passed, 24 skipped
+and three existing hung-planner cases failed because the cancellation diagnostic
+omitted the word `unknown`. The outcome was correctly typed unknown and retained
+ownership, but its text no longer stated that uncertainty explicitly. Restoring
+that wording passes all three original timeout cases and their 21 assertions,
+including dispatch counts and lease ownership. No test expectation was relaxed.
+
 Full local validation receipt will be recorded after the publication candidate
 finishes the required shared-host gate.

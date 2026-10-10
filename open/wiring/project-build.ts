@@ -919,7 +919,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         admission: context.nativeChildAdmission, run: () => context.store.get(run.id) })
       return cancellation.kind === 'stopped'
         ? { kind: 'failed' as const, class: 'killed' as const, detail: 'The original native child acknowledged cancellation.' }
-        : { kind: 'unknown' as const, detail: `Native cancellation ${cancellation.reason}; original child ownership retained.` }
+        : { kind: 'unknown' as const, detail: `Native cancellation remains unknown (${cancellation.reason}); original child ownership retained.` }
     }
     const finish: typeof runner.run = async (...args) => {
       let deadline = Date.now() + args[0].budget.wall_ms
