@@ -42,7 +42,7 @@ async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequ
   for (const step of ['review-one', 'review-two']) {
     let request: BoundedWorkRequest = { run_id: run.id, step_id: step, role: 'review', model_id: 'model', effort: null,
       cwd: dir, writable: false, network: true, tools: 'read-only', brief: { path: join(state, `${step}.brief`), integrity: 'original' },
-      result: { path: join(state, `${step}.result`), schema: 'verdict' }, thread: null, budget: { wall_ms: 100 }, needs_approval_decision: false }
+      result: { path: join(state, `${step}.result`), schema: step === 'review-one' ? 'project-review' : 'verdict' }, thread: null, budget: { wall_ms: 100 }, needs_approval_decision: false }
     request = change?.(request) ?? request
     const key = { run_id: run.id, step_id: step, attempt_id: 'dispatch' }
     await attempts.admit({ ...key, phase: 'review_rubric', task_id: 'task', head_sha: 'a'.repeat(40), role: request.role, review_seat: null,

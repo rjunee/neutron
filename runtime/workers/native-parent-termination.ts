@@ -73,6 +73,8 @@ export function verifyNativeParentTerminationPreparation(value: unknown, authori
       || !Array.isArray(launch.argv) || !launch.argv.every(nonempty)
       || !Array.isArray(launch.tools) || !launch.tools.includes('Agent')
       || !Array.isArray(b.children) || b.children.length === 0 || b.children.length > 64) return false
+    // Standalone and panel reviews use different result formats. Their schema
+    // does not grant or revoke authority to terminate the original execution.
     const first = b.children[0]!.lease
     const tokens = new Set<string>(), work = new Set<string>(), agents = new Set<string>()
     for (const { lease, dispatch } of b.children) {
@@ -81,7 +83,7 @@ export function verifyNativeParentTerminationPreparation(value: unknown, authori
         || !isDeepStrictEqual(dispatch.body.parent, p) || !isDeepStrictEqual(lease.scope, first.scope)
         || lease.scope.projectId !== launch.projectId || lease.generation !== first.generation
         || request.role !== 'review' || request.writable !== false || request.tools !== 'read-only'
-        || request.result.schema !== 'verdict' || !Number.isSafeInteger(dispatch.body.deadlineMs)
+        || !Number.isSafeInteger(dispatch.body.deadlineMs)
         || dispatch.body.deadlineMs! <= 0 || tokens.has(lease.token) || work.has(lease.workRef) || agents.has(child)) return false
       tokens.add(lease.token); work.add(lease.workRef); agents.add(child)
     }

@@ -10,7 +10,9 @@ operation for signed, expired reviews of terminal runs.
 preparation and completion against the configured operator pin and original
 child-bound dispatch signatures. `open/wiring/native-parent-termination.ts`
 joins those proofs to canonical runs, attempts, receipts, complete project leases,
-current kernel boot and native-parent census. The owner-authenticated prepare
+current kernel boot and native-parent census. Both standalone `project-review`
+and panel `verdict` requests are eligible; output format supplies no termination
+authority. The owner-authenticated prepare
 and consume routes are mounted in `open/composer.ts`.
 
 `gateway/project-admission-store.ts` prepares one maintenance hold and permanent
@@ -37,5 +39,7 @@ other-project preservation. Three mutations removing operator authentication,
 the live-parent refusal or complete-lease checks each failed the opposing tests.
 An ephemeral real turn through `createClaudeCodeSubstrateAuto`, the retained Bun
 PTY backend and registered native relay completed in approximately four seconds.
+Read-only checks also matched the three actual retained dispatch receipts and
+canonical terminal-run/attempt records, including their mixed result formats.
 These checks do not establish deployment or fresh unattended sequence acceptance;
 the independent operator must still supply an actual retained-process exit proof.
