@@ -67,7 +67,7 @@ import { PLANNER_ROLE, dispatchPlannerWork, requiresPlannerWork } from '@neutron
 import { routeCodegenCancel } from '@neutronai/gateway/codegen-cancel-router.ts'
 import { CodegenTaskNotFoundError, type CodegenOrchestrator } from '@neutronai/codegen-core'
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
-import { projectInstallAvailableBytes, projectSuiteIdentityMeasurement } from '../wiring/project-build-dependencies.ts'
+import { PORTABLE_RUNNER_FILES, projectInstallAvailableBytes, projectSuiteIdentityMeasurement } from '../wiring/project-build-dependencies.ts'
 import { isolatePackageLauncherEnvironment } from './package-launcher-fixture-env.ts'
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { access, appendFile, chmod, copyFile, cp, link, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
@@ -1193,7 +1193,8 @@ async function fixture(options: { taskSequence?: boolean; moreTasks?: boolean; s
       await rm(join(repo, 'node_modules'), { recursive: true, force: true })
       await rm(join(repo, 'app', 'node_modules'), { recursive: true, force: true })
       if (options.bunPackageSuite) {
-        for (const path of ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh']) {
+        // The whole measured runner closure, exactly as portable identity reads it.
+        for (const path of PORTABLE_RUNNER_FILES) {
           await mkdir(dirname(join(repo, path)), { recursive: true })
           await copyFile(new URL(`../../${path}`, import.meta.url), join(repo, path))
         }
@@ -5160,7 +5161,7 @@ test(`prepared host suite receipt survives reconstruction and handles ${changed}
 
 for (const launcher of ['bare', 'package'] as const)
 for (const changed of ['none', 'head', 'dependencies', 'environment', 'strategy', 'subset', 'legacy', 'red', 'invalidated',
-  ...(launcher === 'package' ? ['hooks', 'config', 'tool-resolution', 'bash-shadow', 'node-absent', 'startup-env', 'runner', 'inner-env'] as const : [])] as const)
+  ...(launcher === 'package' ? ['hooks', 'config', 'tool-resolution', 'bash-shadow', 'node-absent', 'startup-env', 'runner', 'cost-profile', 'inner-env'] as const : [])] as const)
 test(`prepared cross-run ${launcher} suite proof handles ${changed} inputs in a distinct retry worktree`, async () => {
   if (launcher === 'package') cleanups.push(isolatePackageLauncherEnvironment())
   // The outer CI shard selects this test, not the nested project's full suite.
@@ -5254,6 +5255,8 @@ test(`prepared cross-run ${launcher} suite proof handles ${changed} inputs in a 
   }
   if (changed === 'config') await writeFile(join(destination, 'bunfig.toml'), '[run]\nshell = "system"\n')
   if (changed === 'runner') await appendFile(join(destination, 'scripts/run-tests.sh'), '\n# changed runner\n')
+  // The measured shard profile is a runner input (#1447): one changed byte refuses reuse.
+  if (changed === 'cost-profile') await appendFile(join(destination, 'scripts/lib/test-cost-profile.json'), '\n')
   if (changed === 'inner-env') await writeFile(join(destination, '.env'), 'ENV=/unread/fixture-startup\n')
   if (changed === 'tool-resolution' || changed === 'bash-shadow') {
     // An ancestor PATH shadow must invalidate even though it is outside the
@@ -5288,14 +5291,23 @@ test(`prepared cross-run ${launcher} suite proof handles ${changed} inputs in a 
     cleanups.push(() => { if (previous === undefined) delete process.env.ENV; else process.env.ENV = previous })
     process.env.ENV = '/unread/fixture-startup'
   }
-  if (['hooks', 'config', 'runner'].includes(changed)) {
+  if (['hooks', 'config', 'runner', 'cost-profile'].includes(changed)) {
     expect((await spawnCapture(['git', 'add', '.'], destination)).ok).toBe(true)
     expect((await spawnCapture(['git', 'commit', '-m', 'test: changed launcher inputs'], destination)).ok).toBe(true)
+  }
+  if (launcher === 'package' && ['none', 'runner', 'cost-profile'].includes(changed)) {
+    // The runner closure is byte-measured against the host. A new commit alone
+    // would change the identity; a changed closure file must refuse portable
+    // proof outright, while the unchanged closure still measures one.
+    const observation = await projectSuiteIdentityMeasurement(destination, undefined, 'bun run test')
+    expect(observation?.identity).toMatch(/^[a-f0-9]{64}$/)
+    if (changed === 'none') expect(observation?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+    else expect(observation?.portableIdentity).toBeUndefined()
   }
   const host = await createProjectBuildHost(prepared)
   const measured = await host.deps.measure()
   if (measured.kind !== 'known') throw Error('Expected measured retry')
-  if (['head', 'hooks', 'config', 'runner'].includes(changed)) {
+  if (['head', 'hooks', 'config', 'runner', 'cost-profile'].includes(changed)) {
     // The review gate additionally binds the build checkpoint. A moved head
     // cannot inherit that authority even after publication acquires fresh proof.
     expect(await host.deps.reviewSuite!(measured.value, 1)).toMatchObject({ kind: 'unknown' })

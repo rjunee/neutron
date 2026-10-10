@@ -8,12 +8,13 @@ reopen that item until the acceptance criteria are reconciled after merge.
 
 ### What this slice delivers
 
-The first of two dependent tasks: the measured timing input and its collector.
-The runner (`scripts/run-tests.sh`) does **not** read the profile yet. Its shard
-split is unchanged by this slice: special lanes are still dealt round-robin and
-only the general lane is weighted by the `BASE_COST_MS`/`MIG_COST_MS` estimate.
-The follow-on task replaces that split with one measured all-lane computation and
-adds the profile, its validator and the planner to the portable runner closure.
+Two dependent tasks. The first (this section through "Validation evidence")
+delivered the measured timing input and its collector without touching the
+runner. The second ("Runner consumption" onward) replaced the runner's shard
+split — special lanes dealt round-robin, only the general lane weighted by the
+`BASE_COST_MS`/`MIG_COST_MS` estimate — with one measured all-lane computation
+that reads the profile, and added the profile, its validator and the planner to
+the portable runner closure.
 
 - `scripts/lib/test-cost-profile.ts` — the contract. A pure module (no imports,
   no side effects) exporting `SCHEMA` (`neutron-test-cost-profile/v1`), `LANES`,
@@ -122,8 +123,8 @@ shard 1 with 628 cases, all timed, summing to 294.58432 s.
 
 The observed CI job wall times of the same run were 536, 377, 329 and 355
 seconds. Those include setup, the shard-4 app step, discovery and contention,
-and are a different quantity from the case-time sums above. No simulated
-makespan is reported in this slice, because no new assignment exists yet.
+and are a different quantity from the case-time sums above. The simulated
+makespan of the new assignment is reported under "Simulated makespan" below.
 
 ### The six unmeasured files
 
@@ -151,3 +152,153 @@ file, like a new or renamed one, the conservative fallback weight.
   `app/tsconfig.json` (`app/__tests__/support/mount.tsx`, an unused
   `@ts-expect-error` on the `react-dom/client` import), which this change does
   not touch.
+
+### Runner consumption
+
+- `scripts/lib/shard-partition.ts` is the one planner. Imports: only
+  `./test-cost-profile.ts` and `node:fs`; no side effects on import; the CLI runs
+  under `import.meta.main`. It exports `BASE_COST_MS` (150) and `MIG_COST_MS`
+  (137), moved here from the runner, `MIGRATION_CALL`, `estimateMicros`,
+  `lanePercentile90`, `planShards`, `formatSeconds` and the CLI body `runCli`.
+  Weight: the measured `costMicros` when the exact path has a `files` record;
+  otherwise `max((BASE_COST_MS + MIG_COST_MS × migration calls) × 1000, P90)`,
+  where P90 is the nearest-rank 90th percentile (index `ceil(0.9·N) − 1`
+  ascending) of measured costs in the file's current lane, or of all measured
+  costs when that lane has none. Only fallback files are read; an unreadable one
+  is fatal. Order: weight descending, path ascending, input index; each file goes
+  to the shard with the lowest (weight sum, file count, index), which leaves no
+  shard empty while files ≥ shards, even at weight 0. Integer microseconds
+  throughout, with a safe-integer check on every sum. Input validation refuses an
+  empty list, an unknown lane, an empty path or one with a tab or line break, a
+  duplicate path, and a shard count outside 1..64. Records for paths no longer
+  discovered are counted as stale and never execute.
+- CLI: `--profile <file> --validate`, or `--shard <i>/<n>` with `<lane>\t<path>`
+  lines on stdin. It computes everything before printing; a failure writes only
+  `run-tests: FATAL — test cost profile invalid: …` or
+  `run-tests: FATAL — shard planner: …` to stderr, with empty stdout and a
+  nonzero exit.
+- `scripts/run-tests.sh`, replaced in place with no flag and no second scheduler.
+  `BASE_COST_MS`, `MIG_COST_MS`, `SHARD_WEIGHT_LOG`, `_slice`, the round-robin
+  cursor and `_weigh_and_pack` are gone, with the comment premises that justified
+  them. Inside the existing shard-spec validation, before discovery, the socket
+  preflight and the Bun discovery probe, a sharded run executes
+  `bun --no-env-file scripts/lib/shard-partition.ts --profile … --validate`
+  (plain `bun`, never the selftests' fake) and exits 1 on failure. Unsharded runs
+  never reach it. The lane split now records each file's lane, and §2c writes a
+  manifest of every discovered file with its lane, runs the planner into files
+  (not a process substitution, so its status is observable), and fails closed on
+  a nonzero exit, a planned input or assignment total that is not the discovered
+  total, a table whose row count is not `n` or whose file sum is not the total,
+  an assignment count that differs from this shard's row, an empty shard while
+  files ≥ shards, or any assigned path that is not a discovered file in that same
+  lane. The lane arrays are rebuilt by filtering the discovery-ordered manifest,
+  so each file keeps its lane and order; section 3 (lane runners, timeouts,
+  retries, the audit) is unchanged. Every shard prints the whole table and
+  `run-tests: shard plan simulated makespan <s>s (sum of measured case-time
+  weights + fallbacks, not CI wall time); profile run <id>: <used> records used,
+  <stale> stale`.
+
+### Simulated makespan
+
+The real planner's tables, from `NEUTRON_TEST_PLAN_ONLY=1` runs of the runner on
+this branch's tree (1,812 discovered files: the profile's 1,809 plus three new
+test files) with the committed profile. All 1,803 measured records are used and
+none is stale; 9 files take the fallback (the 6 recorded as unmeasured and the 3
+new files).
+
+| plan | per-shard weight (s) | files per shard | fallback per shard | simulated makespan |
+|---|---|---|---|---|
+| 1 shard | 1398.652870 | 1812 | 9 | 1398.652870 s |
+| 2 shards | 699.326440 / 699.326430 | 901 / 911 | 5 / 4 | 699.326440 s |
+| 4 shards | 349.663230 / 349.663220 / 349.663210 / 349.663210 | 420 / 464 / 464 / 464 | 0 / 3 / 4 / 2 | 349.663230 s |
+
+At four shards the largest measured per-shard sum of what the planner actually
+dispatches is 349.66323 s, 71.9% of the baseline assignment's 486.16441 s (the
+acceptance bound is 80%). The 1,357.57414 s of measured cost plus 41.07873 s of
+fallback weight gives a mean of 349.66 s per shard, against a heaviest single
+file of 294.58432 s, so the plan is at the lower bound. The Open build E2E file
+sits on shard 1 with 55.08 s of other measured weight; the other three shards
+carry about 349.66 s each. These are simulated sums of case-time weights, not a
+prediction of job time.
+
+### Portable closure
+
+`PORTABLE_RUNNER_FILES` in `open/wiring/project-build-dependencies.ts` is now
+exported and adds `scripts/lib/shard-partition.ts`,
+`scripts/lib/test-cost-profile.ts` and `scripts/lib/test-cost-profile.json`. No
+other identity logic changed: every listed file is byte-compared against the host
+and digested into the runner identity, so changed bytes or a missing file refuse
+portable reuse. A sharded run was already never portable (`NEUTRON_TEST_SHARD`
+is outside the admitted tuning variables); the planner files are declared because
+they are runner inputs. The runner-copying fixtures in
+`open/__tests__/project-suite-identity.test.ts` and
+`open/__tests__/project-build-e2e.test.ts` iterate the exported list. A closure
+guard derives the closure from the sources (every non-comment
+`${SCRIPT_DIR}/<rel>` in shell files, static `import`/`from`/`import()` in
+TypeScript with only `node:` or relative specifiers allowed, JSON as leaves) and
+requires set equality with the list; in-memory controls show a dropped entry and
+an added relative import both mismatch, and a package import is refused.
+
+### Mutation evidence
+
+Each was applied to production code, run, and restored (restoration verified by
+content comparison):
+
+1. Planner ignores the profile (measured weight replaced by the content
+   estimate): the 4-shard census benchmark fails, 560.7489 s against the
+   388.931528 s bound; 3 of 14 shard tests fail.
+2. `origin/main`'s `scripts/run-tests.sh` (round-robin special lanes, estimated
+   general lane) in place of the new one: the 4-shard census benchmark fails at
+   477.41582 s, and the tests that expect the plan table fail; 4 of 14 shard
+   tests fail.
+3. Table weights reported as 0: the weight accounting assertion fails
+   (received 0); 3 of 14 shard tests fail.
+4. Planner drops its last output line: the runner refuses with
+   `run-tests: FATAL — shard 2 has 463 assignments but its table row says 464.`;
+   5 of 14 shard tests fail.
+5. Fallback weight 0: 6 of 40 planner tests fail (every fallback case and the
+   CLI table).
+6. Path tie-break removed (equal weights fall through to input index): the
+   permutation-invariance test and the explicit tie test fail.
+7. The early profile check run unsharded as well: 3 runner selftests fail,
+   including the unsharded corrupt-profile case.
+8. A closure entry dropped: removing the profile fails the closure guard and the
+   changed-bytes identity test; removing the planner fails all three closure
+   tests; removing the profile also fails the package `cost-profile` prepared
+   cross-run case.
+
+### Validation counts
+
+Worker Stage 1 (subset evidence; the host runs the required full suite):
+
+- `bun test scripts/__tests__/shard-partition.test.ts scripts/__tests__/run-tests-shard.test.ts scripts/__tests__/run-tests-http-lane.test.ts scripts/run-tests-selftest.test.ts scripts/__tests__/test-cost-profile.test.ts scripts/ci/collect-test-cost-profile.test.ts scripts/__tests__/discover-test-files.test.ts scripts/ci/ci-workflow.test.ts scripts/__tests__/spec-items-index.test.ts`:
+  256 pass, 0 fail.
+- The other 12 test files in `scripts/` and `scripts/__tests__/`: 200 pass, 0 fail.
+- `bun test open/__tests__/project-suite-identity.test.ts open/__tests__/project-suite-identity-mutation.test.ts`:
+  51 pass, 0 fail.
+- `bun test open/__tests__/project-build-e2e.test.ts -t 'prepared cross-run'`:
+  27 pass, 0 fail (bare and package launchers, including the new
+  `cost-profile` variant).
+- `bash scripts/ci/lint.sh` passes. `bash scripts/ci/typecheck-all.sh` passes the
+  root `tsconfig.json`; its only failure is the pre-existing `app/tsconfig.json`
+  error in `app/__tests__/support/mount.tsx`, which this change does not touch.
+
+### Limits
+
+- Shard 4 also runs the app co-residency step (`bun test --isolate
+  app/__tests__/`) outside the partition, so its job carries work the table does
+  not show.
+- Case-time weights exclude process start, imports and setup outside a case, and
+  lanes run in separate processes with different concurrency, so equal weights
+  do not mean equal job times.
+- New and renamed files take the fallback until the profile is regenerated from a
+  newer run; the profile ages as the suite changes.
+
+### Observed CI wall time
+
+The builder pushes nothing before publication, so it cannot observe this
+change's exact-head CI. The observed job wall times come from the published
+head's exact-head CI run and are reconciled after merge against the acceptance
+criteria in `docs/spec-items/host-test-suite-efficiency.md`. No observed time is
+claimed here, the simulated figures above are not a forecast of it, and the
+historical five-minute estimate is not promised.

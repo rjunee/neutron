@@ -231,6 +231,73 @@ one `--isolate` invocation, so app co-residency is checked independently of the
 matrix grouping. There is no hidden skip list. "CI is green" and "the local
 suite passes" now mean the same thing, up to toolchain version.
 
+### Cross-runner sharding
+
+`NEUTRON_TEST_SHARD=<i>/<n>` runs one slice of the suite. Discovery, the Bun
+cross-check and the lane split still run over the **whole** set on every shard;
+only the execution list is sliced. Unsharded runs are untouched by everything in
+this section and never read the profile.
+
+**One measured all-lane partition (#1447).** Every discovered file of every lane
+enters one deterministic computation, `scripts/lib/shard-partition.ts`, which the
+runner calls and the tests import. A file's weight is its **measured** cost from
+the committed profile `scripts/lib/test-cost-profile.json`: integer microseconds,
+the sum of the case durations Bun reported for that file inside one runner
+execution section of one real CI run. A file with no measured record (new,
+renamed, or recorded as unmeasured because no case printed a duration) takes a
+conservative fallback, never zero: the larger of the content estimate
+(`BASE_COST_MS + MIG_COST_MS ×` its `applyMigrations(` calls, 150 ms + 137 ms
+each) and the nearest-rank 90th percentile of the measured costs recorded for its
+current lane (all lanes, if that lane has none). Profile records for files that
+are no longer discovered are counted as stale and ignored. Files go heaviest
+first (ties by path) to the shard with the lowest weight sum, then the fewest
+files, then the lowest index. Each shard then runs its files in their original
+lanes, in discovery order, under the unchanged isolation, serial, timeout and
+retry rules.
+
+**Refusal.** A sharded run validates the profile before discovery and before any
+Bun test process; an invalid profile exits 1 with
+`run-tests: FATAL — test cost profile invalid: <reason>`. The planner's input
+count, assignment totals, table and every assigned path are checked against the
+discovered set before the run; any disagreement is fatal rather than a shorter
+list.
+
+**What every shard prints.** The whole table, identical on every runner:
+
+```
+run-tests: shard <k> est <seconds>s over <N> files (measured <M>, fallback <F>)
+run-tests: shard plan simulated makespan <seconds>s (sum of measured case-time weights + fallbacks, not CI wall time); profile run <run-id>: <used> records used, <stale> stale
+```
+
+Three numbers are different things and must not be quoted for one another:
+
+- the *measured cost estimate* — the profile weights. They exclude process start,
+  imports, setup outside a case and any overlap;
+- the *simulated makespan* — the largest table weight for this plan. Computed,
+  never observed;
+- the *observed CI wall time* — a job's elapsed time in a real run. It also
+  contains setup, install, discovery, the shard-4 app step and runner contention.
+
+**Provenance and regeneration.** The profile records its workflow run id, head
+SHA, shard count, and per job the job id, the SHA-256 of the exact retained log
+bytes and its measured/unmeasured counts and cost sum. It stores no log text,
+test name, host path or credential. To regenerate it from a newer green CI run,
+fetch each shard job's log to a scratch directory **outside the repository**
+(never commit logs) and run the collector:
+
+```
+gh api --allow-escape-sequences repos/<owner>/<repo>/actions/jobs/<job-id>/logs > <scratch>/shard<k>.log   # each job
+bun scripts/ci/collect-test-cost-profile.ts --run-id <run-id> --head-sha <head-sha> --shard-count <n> \
+  --job 1=<job-id-1>=<scratch>/shard1.log ... --job <n>=<job-id-n>=<scratch>/shard<n>.log \
+  --out scripts/lib/test-cost-profile.json
+```
+
+`--check <file>` instead of `--out` re-derives and compares byte for byte. The
+profile, `scripts/lib/test-cost-profile.ts` and the planner are runner inputs:
+they sit in the measured portable runner closure (`PORTABLE_RUNNER_FILES` in
+`open/wiring/project-build-dependencies.ts`), so changing any of them refuses
+portable suite reuse.
+
 ### A skip is not a pass, and an empty check is not a clean check
 
 The parity above is about *files*: every discovered file runs in both places. It is not
@@ -295,6 +362,7 @@ Three residual non-hermeticities remain, and each needs its own card:
 | `NEUTRON_TEST_TIMEOUT` | `15000` | per-test timeout (ms) for general chunks and the real-HTTP lane |
 | `NEUTRON_TEST_JOBS` | `1` | general chunks run **concurrently** (1 = sequential) |
 | `NEUTRON_BUN_BIN` | `bun` | bun binary |
+| `NEUTRON_TEST_SHARD` | unset | `<i>/<n>`: run one slice of the measured all-lane partition (see Cross-runner sharding) |
 | `NEUTRON_TEST_PGLITE_RETRIES` | `2` | lane re-runs on transient failure |
 | `NEUTRON_TEST_PGLITE_CONCURRENCY` | `1` | `--max-concurrency` for the lane |
 | `NEUTRON_TEST_PGLITE_TIMEOUT` | `90000` | per-test timeout (ms) for the lane (real-WASM boots use 60s internally) |

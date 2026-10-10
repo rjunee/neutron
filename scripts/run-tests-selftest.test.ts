@@ -21,7 +21,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -177,9 +177,9 @@ interface RunResult {
  * FATAL/WARNING lines to stderr, and execFileSync returns only stdout on exit 0 —
  * without the merge a success-path WARNING would be invisible to assertions.
  */
-function runRunTests(h: Harness, extraEnv: Record<string, string> = {}): RunResult {
+function runRunTests(h: Harness, extraEnv: Record<string, string> = {}, script: string = RUN_TESTS): RunResult {
   try {
-    const out = execFileSync('bash', ['-c', 'bash "$1" 2>&1', 'bash', RUN_TESTS], {
+    const out = execFileSync('bash', ['-c', 'bash "$1" 2>&1', 'bash', script], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'pipe'],
       // HERMETIC against the ambient environment. These fixtures assert exact
@@ -251,6 +251,119 @@ describe('G8 run-tests.sh — chunk math', () => {
         NEUTRON_TEST_NO_PGLITE_LANE: '1',
       })
       expect(out).toContain('1 general chunks of <=4')
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+})
+
+/**
+ * A copy of the runner and the shard planner's inputs, with a profile of our
+ * choosing, so a corrupt timing input can be exercised without touching the
+ * committed one. The copy's SCRIPT_DIR is its own scripts dir, which is exactly
+ * where the runner reads the profile from.
+ */
+function runnerCopy(h: Harness, profileText: string): string {
+  const scripts = join(h.dir, 'runner-copy', 'scripts')
+  mkdirSync(join(scripts, 'lib'), { recursive: true })
+  copyFileSync(RUN_TESTS, join(scripts, 'run-tests.sh'))
+  for (const name of ['discover-test-files.sh', 'shard-partition.ts', 'test-cost-profile.ts']) {
+    copyFileSync(fileURLToPath(new URL(`./lib/${name}`, import.meta.url)), join(scripts, 'lib', name))
+  }
+  writeFileSync(join(scripts, 'lib', 'test-cost-profile.json'), profileText)
+  return join(scripts, 'run-tests.sh')
+}
+
+describe('run-tests.sh — measured shard partition inputs (#1447)', () => {
+  const committed = readFileSync(fileURLToPath(new URL('./lib/test-cost-profile.json', import.meta.url)), 'utf8')
+  const corruptions: [string, string][] = [
+    ['truncated JSON', committed.slice(0, 200)],
+    ['a negative cost', committed.replace(/"costMicros": (\d+)/, '"costMicros": -$1')],
+  ]
+
+  for (const [name, corrupt] of corruptions) {
+    test(`a sharded run with ${name} in the profile refuses before ANY Bun process`, () => {
+      expect(corrupt).not.toBe(committed)
+      const h = harness(2)
+      try {
+        const calls = join(h.dir, 'bun-calls')
+        const result = runRunTests(h, {
+          FAKE_BUN_DISC: '2',
+          FAKE_BUN_ANY_CALLS: calls,
+          NEUTRON_TEST_SHARD: '1/2',
+        }, runnerCopy(h, corrupt))
+        expect(result.code).toBe(1)
+        expect(result.out).toContain('run-tests: FATAL — test cost profile invalid: ')
+        expect(result.out).toContain('No tests were run.')
+        // Not one Bun test process — not even the discovery probe.
+        expect(existsSync(calls) ? readFileSync(calls, 'utf8') : '').toBe('')
+        expect(result.out).not.toContain('bun-discovered:')
+        expect(result.out).not.toContain('run-tests: PASS')
+      } finally {
+        rmSync(h.dir, { recursive: true, force: true })
+      }
+    })
+  }
+
+  test('an unsharded run never reads the profile: the same corrupt copy passes as before', () => {
+    const h = harness(2)
+    try {
+      const calls = join(h.dir, 'bun-calls')
+      const result = runRunTests(h, {
+        FAKE_BUN_DISC: '2',
+        FAKE_BUN_ANY_CALLS: calls,
+        NEUTRON_TEST_NO_PGLITE_LANE: '1',
+      }, runnerCopy(h, corruptions[0]![1]))
+      expect(result.code).toBe(0)
+      expect(result.out).toContain('run-tests: PASS')
+      expect(result.out).toContain('1 general chunks of <=100')
+      expect(result.out).not.toContain('test cost profile')
+      expect(result.out).not.toMatch(/^run-tests: shard \d+ est /m)
+      expect(result.out).not.toContain('simulated makespan')
+      expect(readFileSync(calls, 'utf8')).toContain('__neutron_runtests_no_match__')
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('sharded, each file still runs in its own lane invocation with that lane\'s flags', () => {
+    // f1 mentions the WASM engine, so it is a quarantine-lane file; f0 is general.
+    const h = harness(2, [1])
+    try {
+      const executed: string[] = []
+      for (const spec of ['1/2', '2/2']) {
+        const calls = join(h.dir, `bun-calls-${spec.replace('/', '-')}`)
+        const result = runRunTests(h, {
+          FAKE_BUN_DISC: '2',
+          FAKE_BUN_ANY_CALLS: calls,
+          NEUTRON_TEST_SHARD: spec,
+          NEUTRON_TEST_CONCURRENCY: '7',
+          NEUTRON_TEST_TIMEOUT: '1234',
+        })
+        expect(result.code).toBe(0)
+        expect(result.out).toContain('run-tests: PASS')
+        expect(result.out).toContain(`(shard ${spec})`)
+        // Every shard prints the same two-row table and the makespan line.
+        expect(result.out.match(/^run-tests: shard [12] est \d+\.\d{6}s over 1 files \(measured 0, fallback 1\)/gm)).toHaveLength(2)
+        expect(result.out).toContain('simulated makespan')
+        const lines = readFileSync(calls, 'utf8').trim().split('\n')
+          .filter((l) => !l.includes('__neutron_runtests_no_match__'))
+        expect(lines).toHaveLength(1)
+        const line = lines[0]!
+        if (line.includes(h.files[1]!)) {
+          expect(line).toContain('--max-concurrency=1')
+          expect(line).toContain('--timeout=90000')
+          expect(line).not.toContain(h.files[0]!)
+          expect(result.out).toContain('PGLite quarantine lane: 1 files')
+        } else {
+          expect(line).toContain(h.files[0]!)
+          expect(line).toContain('--max-concurrency=7')
+          expect(line).toContain('--timeout=1234')
+        }
+        executed.push(...h.files.filter((f) => line.includes(f)))
+      }
+      // Exactly once across the two shards.
+      expect(executed.slice().sort()).toEqual(h.files.slice().sort())
     } finally {
       rmSync(h.dir, { recursive: true, force: true })
     }
