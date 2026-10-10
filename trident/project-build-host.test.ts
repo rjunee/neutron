@@ -71,7 +71,7 @@ async function fixture() {
 }
 
 test.each([
-  ['plan', 2, true], ['plan', 3, true], ['plan', 4, true], ['plan', 5, false],
+  ['plan', 2, true], ['plan', 3, true], ['plan', 4, true], ['plan', 5, false], ['plan', 6, false],
   ['build', 4, false], ['review', 4, false], ['fix', 4, false],
 ] as const)('legacy reservation recognizes only supported current brief identities: %s v%i', async (changedRole, version, allowed) => {
   const f = await fixture()

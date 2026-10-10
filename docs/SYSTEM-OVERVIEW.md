@@ -7082,7 +7082,9 @@ atomically. Their version-6 brief describes that tool boundary; builders and
 file-writing reviewers still receive the complete file-envelope contract.
 Authenticated pending and retained retry work can keep its earlier brief bytes
 and grants. An old file by itself grants no recovery authority, and changed
-inputs still refuse reuse.
+inputs still refuse reuse. Settled merge and proof-only retry readers select the
+exact pinned version-5 or version-6 closed planner artifact; an unsupported
+closed planner version cannot authorize retained-result recovery.
 
 The repository's `SPEC.md` remains authoritative governance context for the
 planner, but its presence or absence never selects execution grouping. Both

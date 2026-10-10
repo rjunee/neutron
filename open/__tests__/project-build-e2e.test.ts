@@ -4732,7 +4732,7 @@ test(`base drift refresh retains terminal task work and renews release evidence:
   expect(changed).not.toContain('upstream.ts')
 }, 120_000)
 
-for (const retryCase of ['healthy', 'legacy-v4', 'legacy-v5', 'still-red', 'ceiling', 'model', 'policy', 'brief'] as const)
+for (const retryCase of ['healthy', 'legacy-v4', 'legacy-v5', 'unknown-plan-version', 'still-red', 'ceiling', 'model', 'policy', 'brief'] as const)
 test(`settled proof-only fix retry retains the candidate but buys fresh proof and review: ${retryCase}`, async () => {
   const task = 'Record a note and verify the completed candidate with the required regression suite'
   const f = await fixture({ dispatchTask: task, suiteExit: 1, maxRounds: 3 })
@@ -4746,7 +4746,7 @@ test(`settled proof-only fix retry retains the candidate but buys fresh proof an
       return dispatched ? prepared : historicalV4Planner(f, prepared, () => { dispatched = true })
     }
   }
-  if (retryCase === 'legacy-v5') {
+  if (retryCase === 'legacy-v5' || retryCase === 'unknown-plan-version') {
     const prepare = f.prepare
     let first = true
     f.prepare = async () => {
@@ -4754,8 +4754,9 @@ test(`settled proof-only fix retry retains the candidate but buys fresh proof an
       if (!first) return prepared
       first = false
       const worker = prepared.workers.plan
-      const path = worker.request.brief.path.replace('strategy-v6', 'strategy-v5')
-      const brief = historicalPlannerBrief(await readFile(worker.request.brief.path, 'utf8'))
+      const path = worker.request.brief.path.replace('strategy-v6', retryCase === 'legacy-v5' ? 'strategy-v5' : 'strategy-v7')
+      const current = await readFile(worker.request.brief.path, 'utf8')
+      const brief = retryCase === 'legacy-v5' ? historicalPlannerBrief(current) : current
       await writeFile(path, brief)
       worker.request = { ...worker.request, brief: { path, integrity: briefIntegrity(brief) } }
       expect(worker.request).toMatchObject({ tools: 'edit', network: false })
@@ -4784,6 +4785,11 @@ test(`settled proof-only fix retry retains the candidate but buys fresh proof an
     failure_reason: first.kind === 'failed' ? first.detail : 'Unexpected fixture outcome' })
   const prior = f.store.get(f.row.id)!
   const source = retryModeSource(f.store, prior)
+  if (retryCase === 'unknown-plan-version') {
+    expect(source).toBeNull()
+    expect(f.store.stageEvents(prior.id)).toEqual(originalEvents)
+    return
+  }
   expect(source?.state.checkpoint).toMatchObject({ stage: 'built', head: original.head, round: 2,
     previousReview: original.previousReview, findings: original.findings })
   expect(source?.state.checkpoint.pending).toBeUndefined()

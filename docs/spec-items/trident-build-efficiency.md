@@ -234,6 +234,8 @@ barrier at `trident/build-run.ts:691-697`.
   File-writing workers still receive their complete envelope contract. New brief
   bytes must not rewrite an authenticated pending or retained retry identity;
   verify unchanged recovery and changed-input refusal in the consuming E2E suite.
+  Exercise retained-result recovery for the newly delivered brief as well as
+  prior authenticated versions; an unsupported version remains ineligible.
 
 - [ ] **Preparation and proof reuse is tied to measured inputs.** Reuse validated
   setup or suite evidence only under its existing identity contract, including
