@@ -133,8 +133,16 @@ function lanesOf(out: string, census: string[]): Record<'general' | 'wasm' | 'de
 // The committed measured profile — the same bytes the runner's planner reads.
 const profile = parseTestCostProfile(readFileSync(join(ROOT, 'scripts', 'lib', 'test-cost-profile.json'), 'utf8'))
 const measuredCost = new Map(profile.files.map((f) => [f.path, f.costMicros]))
-/** The baseline: the largest measured per-shard case-time sum of run 38001520250. */
-const BASELINE_MAX_MICROS = Math.max(...profile.source.jobs.map((j) => j.costMicros))
+/**
+ * The FIXED historical baseline: the largest measured per-shard case-time sum of
+ * run 38001520250 under the old round-robin plus estimate partition (486.16441 s).
+ * Deliberately a constant, not derived from the committed profile's own jobs: a
+ * profile regenerated from a run that already used this balanced partition has a
+ * largest job near 350 s, and 80% of THAT is below the single ~295 s E2E file, so
+ * a derived baseline would make the benchmark unsatisfiable after a routine
+ * regeneration. See docs/testing-runner.md, "Provenance and regeneration".
+ */
+const BASELINE_MAX_MICROS = 486_164_410
 const measuredSum = (paths: string[]) => paths.reduce((sum, path) => sum + (measuredCost.get(path) ?? 0), 0)
 const HEAVY = './open/__tests__/project-build-e2e.test.ts'
 
@@ -195,11 +203,11 @@ describe('run-tests.sh shard partition', () => {
       // BENCHMARK FIRST, from the dispatched census alone, before any table is
       // parsed: a runner that ignores the profile, or the old round-robin plus
       // estimate split, prints no honest table and must fail HERE, on what it
-      // actually dispatches. The baseline is the largest measured shard sum of the
-      // run the profile was collected from (486.16441 s).
+      // actually dispatches. The baseline is the fixed historical constant above:
+      // the largest measured shard sum of run 38001520250 (486.16441 s), not
+      // whatever the currently committed profile's jobs happen to sum to.
       const censusSums = slices.map(measuredSum)
       if (n === 4) {
-        expect(BASELINE_MAX_MICROS).toBe(486_164_410)
         expect(Math.max(...censusSums)).toBeLessThanOrEqual(0.8 * BASELINE_MAX_MICROS)
       }
 
@@ -247,9 +255,24 @@ describe('run-tests.sh shard partition', () => {
     // index gave its shard an ordinary share of everything else too. Reuses the
     // n=4 outputs captured above rather than re-planning.
     expect(outs4).toHaveLength(4)
+    // HEAVY is a literal path. If that file is renamed or split, its stale profile
+    // record still passes the weight check below but no shard dispatches it, so
+    // say what to do instead of failing an opaque length assertion.
+    if (!all.includes(HEAVY)) {
+      throw new Error(
+        `${HEAVY} is no longer discovered (renamed or split?). Regenerate scripts/lib/test-cost-profile.json ` +
+          'with scripts/ci/collect-test-cost-profile.ts from a green CI run and update HEAVY here; ' +
+          'see docs/testing-runner.md, "Provenance and regeneration".',
+      )
+    }
     expect(measuredCost.get(HEAVY)).toBeGreaterThan(0.5 * BASELINE_MAX_MICROS)
     const owners = censuses4.map((c, i) => (c.includes(HEAVY) ? i : -1)).filter((i) => i >= 0)
-    expect(owners).toHaveLength(1)
+    if (owners.length !== 1) {
+      throw new Error(
+        `${HEAVY} is dispatched by ${owners.length} of 4 shards, expected exactly 1. If the file was renamed or ` +
+          'split, regenerate scripts/lib/test-cost-profile.json (docs/testing-runner.md, "Provenance and regeneration").',
+      )
+    }
     const owner = owners[0]!
     // Still in its own lane on the shard that runs it.
     expect(lanesOf(outs4[owner]!, censuses4[owner]!).http).toContain(HEAVY)

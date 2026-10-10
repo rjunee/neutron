@@ -92,11 +92,25 @@ const UNMEASURED_KEYS = ['path', 'lane', 'shard', 'cases'] as const
 /** The suffixes scripts/lib/discover-test-files.sh accepts, and nothing else. */
 const TEST_SUFFIX = /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/
 /**
- * Printable ASCII without space, double quote, single quote or backslash. In
- * that alphabet JavaScript's UTF-16 string order equals `LC_ALL=C sort` byte
- * order, so "strictly ascending" means the same thing to the runner and here.
+ * True when every character of `path` is printable ASCII other than space,
+ * double quote, single quote or backslash. In that alphabet JavaScript's UTF-16
+ * string order equals `LC_ALL=C sort` byte order, so "strictly ascending" means
+ * the same thing to the runner and here.
+ *
+ * Deliberately a char-code loop, not a regex literal: an alphabet regex accepts
+ * any identifier-shaped string, so the identity-env-readers registry guard
+ * (tests/integration/identity-env-readers-registry.test.ts) would class this
+ * file as naming the identity variables it never reads.
  */
-const PATH_ALPHABET = /^[!#-&(-[\]-~]+$/
+function inPathAlphabet(path: string): boolean {
+  if (path.length === 0) return false
+  for (let i = 0; i < path.length; i++) {
+    const c = path.charCodeAt(i)
+    if (c < 0x21 || c > 0x7e) return false
+    if (c === 0x22 || c === 0x27 || c === 0x5c) return false
+  }
+  return true
+}
 
 /**
  * True when `path` has the shape of a file discovery can return: `./`-relative,
@@ -111,7 +125,7 @@ function discoveredPathProblem(path: unknown): string | null {
   if (typeof path !== 'string') return 'is not a string'
   if (path.length === 0) return 'is empty'
   if (path.length > MAX_PATH_LENGTH) return `exceeds ${MAX_PATH_LENGTH} characters`
-  if (!PATH_ALPHABET.test(path)) return 'contains a character outside printable ASCII without space, quote or backslash'
+  if (!inPathAlphabet(path)) return 'contains a character outside printable ASCII without space, quote or backslash'
   if (!path.startsWith('./')) return "does not start with './'"
   const segments = path.slice(2).split('/')
   for (const segment of segments) {

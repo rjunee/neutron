@@ -298,6 +298,30 @@ they sit in the measured portable runner closure (`PORTABLE_RUNNER_FILES` in
 `open/wiring/project-build-dependencies.ts`), so changing any of them refuses
 portable suite reuse.
 
+**Regenerating breaks pinned tests on purpose: re-baseline them in the same
+change.** Several tests pin the evidence of run 38001520250 so that a silently
+substituted profile cannot pass as the reviewed one. A regenerated profile turns
+them red until they are updated to the new run's numbers:
+
+- `scripts/__tests__/test-cost-profile.test.ts`, "the committed profile": the
+  run id, head SHA, shard count and job ids; the measured/unmeasured file counts
+  and the four per-job `costMicros` sums; and the heavy E2E file's record
+  (`lane`, `shard`, `cases`, `costMicros`). Replace each with the value the
+  collector derived from the new logs, and rename the `describe` to the new run.
+- `scripts/__tests__/run-tests-shard.test.ts`, `HEAVY`: the literal path of the
+  heaviest special-lane file. If that file is renamed or split, the test fails
+  with a message naming this procedure; point `HEAVY` at the new heaviest
+  real-HTTP-lane file in the regenerated profile.
+
+Do **not** re-baseline `BASELINE_MAX_MICROS` in `run-tests-shard.test.ts`. It is
+the fixed historical constant 486 164 410 µs (486.16441 s), the largest
+per-shard case-time sum under the old round-robin partition, and the 4-shard
+benchmark asserts the balanced plan's largest shard is at most 80% of it. It is
+deliberately not derived from the current profile: a profile collected from a run
+that already used the balanced partition has a largest job near 350 s, and 80%
+of that is below the ~295 s E2E file alone, so a derived baseline would make the
+benchmark impossible to pass.
+
 ### A skip is not a pass, and an empty check is not a clean check
 
 The parity above is about *files*: every discovered file runs in both places. It is not
