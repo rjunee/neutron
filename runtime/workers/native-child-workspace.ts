@@ -136,6 +136,13 @@ export function independentNativeChildren(next: NativeChildWorkspace | undefined
       && a.paths.every(left => b.paths.every(right => !contains(left, right) && !contains(right, left)))))
 }
 
+/** Continuation is for an already-proven original child, never a new workspace
+ * that happens to be independent. Dispatch may admit an unbound next child;
+ * continuation must retain the stronger original-child binding. */
+export function independentNativeChildContinuation(next: NativeChildWorkspace | undefined, prior: NativeChildWorkspace | undefined): boolean {
+  return !!next && records.get(next)?.bound === true && independentNativeChildren(next, prior)
+}
+
 export function nativeChildWorkspaceCompletion(admission: NativeChildWorkspace): Promise<void> | undefined {
   return records.get(admission)?.done
 }

@@ -10,7 +10,7 @@ import { readNativeParentLaunchEvidence, recordNativeParentLaunchEvidence, type 
 import { prepareAdoptedNativeParentLaunch } from '../adapters/claude-code/persistent/adopted-native-parent-launch.ts'
 import { readProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
 import { createNativeDispatchSigner, type NativeDispatchLease } from './claude-native-dispatch-receipt.ts'
-import { admitNativeChildWorkspace, bindNativeChildWorkspace, completeNativeChildWorkspace } from './native-child-workspace.ts'
+import { admitNativeChildWorkspace, bindNativeChildWorkspace, completeNativeChildWorkspace, independentNativeChildContinuation } from './native-child-workspace.ts'
 import { reserveTrailerSlot } from './trailer-slot.ts'
 import { CLAUDE_CONTINUATION_PROFILE, continueClaudeNativeChild, type ClaudeContinuationOptions } from './claude-native-continuation.ts'
 import { decodeProjectTrailer } from './project-runners.ts'
@@ -53,8 +53,9 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
     })
     observed?.record(session)
   } else if (profile !== 'missing') recordNativeParentLaunchEvidence(session, launch)
+  const pending = [{ runId: 'run', stepId: 'build:0', generation: 0 }]
   const admit = (session: ReplSession) => admitNativeChildWorkspace({ session, request, runId: 'run', worktree: cwd, branch: 'work', generation: 0,
-    pending: () => [{ runId: 'run', stepId: 'build:0', generation: 0 }],
+    pending: () => pending,
     git: async args => args[0] === 'symbolic-ref' ? 'refs/heads/work' : args.includes('--show-toplevel') ? cwd : args.includes('--absolute-git-dir') ? gitDir : common })
   const workspace = await admit(session)
   cleanup.push(async () => completeNativeChildWorkspace(workspace))
@@ -109,8 +110,72 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
     cleanup.push(async () => completeNativeChildWorkspace(workspace))
     return { ...options, session: restored, workspace }
   }
-  return { options, session, request, inputs, invoke, restore, childPath, transcript, recordInvocation, capacity, claims, saved: () => saved }
+  const addPeer = async (input: { session: ReplSession } = { session }, conflict = false) => {
+    const peerCwd = conflict ? cwd : join(dir, 'peer'), peerGit = conflict ? gitDir : join(common, 'peer')
+    await Promise.all([peerCwd, peerGit].map(path => mkdir(path, { recursive: true })))
+    const peerRequest = { ...request, run_id: 'peer', step_id: 'build:peer', cwd: peerCwd,
+      result: { ...request.result, path: join(stateDir, 'peer.result') } }
+    pending.push({ runId: 'peer', stepId: 'build:peer', generation: 0 })
+    const workspace = await admitNativeChildWorkspace({ session: input.session, request: peerRequest,
+      runId: 'peer', worktree: peerCwd, branch: conflict ? 'work' : 'peer', generation: 0, pending: () => pending,
+      git: async args => args[0] === 'symbolic-ref' ? `refs/heads/${conflict ? 'work' : 'peer'}`
+        : args.includes('--show-toplevel') ? peerCwd : args.includes('--absolute-git-dir') ? peerGit : common })
+    let yieldDispatch!: () => void
+    await input.session.acquireTurn(yieldSlot => { yieldDispatch = yieldSlot }, workspace)
+    bindNativeChildWorkspace(workspace)
+    yieldDispatch()
+    const complete = () => { pending.splice(pending.findIndex(row => row.runId === 'peer'), 1); completeNativeChildWorkspace(workspace) }
+    cleanup.push(async () => { completeNativeChildWorkspace(workspace) })
+    return { workspace, complete }
+  }
+  return { options, session, request, inputs, invoke, restore, addPeer, childPath, transcript, recordInvocation, capacity, claims, saved: () => saved }
 }
+
+test('verified reconstructed continuation reaches signed capacity and original input while its compatible peer stays live', async () => {
+  const f = await fixture(), restored = await f.restore(), peer = await f.addPeer(restored)
+  expect(independentNativeChildContinuation(restored.workspace, peer.workspace)).toBe(false)
+  expect(await f.invoke({ ...restored, deadline: Date.now() + 1000 })).toMatchObject({ kind: 'submitted' })
+  expect(independentNativeChildContinuation(restored.workspace, peer.workspace)).toBe(true)
+  expect(f.inputs).toHaveLength(1)
+  expect(f.claims.size).toBe(1)
+  expect(restored.session.turnSlotHeld).toBe(1)
+  await f.recordInvocation()
+  expect(await f.invoke(restored)).toMatchObject({ kind: 'submitted', evidence: 'exact-tool-invocation' })
+  expect(f.inputs).toHaveLength(1)
+  expect(restored.session.turnSlotHeld).toBe(1)
+  peer.complete()
+  await Promise.resolve()
+  expect(restored.session.turnSlotHeld).toBe(0)
+})
+
+test.each(['forged-receipt', 'stale-authority'] as const)('reconstructed %s cannot bind a continuation or bypass its peer', async mode => {
+  const f = await fixture(), restored = await f.restore(), peer = await f.addPeer(restored)
+  const options = mode === 'forged-receipt' ? { ...restored, receipt: { ...structuredClone(restored.receipt as object), signature: 'forged' } }
+    : { ...restored, authority: { ...restored.authority, current: () => false } }
+  expect(await f.invoke(options)).toEqual({ kind: 'unknown', reason: mode === 'forged-receipt' ? 'identity-unknown' : 'capacity-unavailable' })
+  expect(independentNativeChildContinuation(restored.workspace, peer.workspace)).toBe(false)
+  expect(f.inputs).toHaveLength(0)
+  expect(f.saved()).toBeUndefined()
+  expect(f.capacity.requests.filter(row => row.kind !== 'claude-native-register')).toHaveLength(0)
+  expect(restored.session.turnSlotHeld).toBe(1)
+})
+
+test('cancellation while the signed consumer waits for a conflicting peer removes only its queued turn', async () => {
+  const f = await fixture(), restored = await f.restore(), peer = await f.addPeer(restored, true), cancelled = new AbortController()
+  const result = f.invoke({ ...restored, signal: cancelled.signal })
+  const until = Date.now() + 1000
+  while (restored.session.turnSlotHeld !== 2 && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 1))
+  expect(restored.session.turnSlotHeld).toBe(2)
+  cancelled.abort()
+  expect(await result).toEqual({ kind: 'unknown', reason: 'budget-expired' })
+  expect(restored.session.turnSlotHeld).toBe(1)
+  expect(f.saved()).toBeUndefined()
+  expect(f.capacity.requests.filter(row => row.kind !== 'claude-native-register')).toHaveLength(0)
+  peer.complete()
+  await Promise.resolve()
+  expect(restored.session.turnSlotHeld).toBe(0)
+  expect(f.inputs).toHaveLength(0)
+})
 
 test('all-full retains the original claim opportunity until fresh signed capacity permits that same child', async () => {
   const f = await fixture()

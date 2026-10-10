@@ -17,7 +17,7 @@ import type { SessionSizeWatchdog } from './session-size-watchdog.ts'
 import { CHILD_KILL_GRACE_MS, ZERO_USAGE, defaultIsPidAlive } from './signatures.ts'
 import type { ActiveTurn } from './types.ts'
 import { defaultSinkTokenPath, loadOrCreateSinkToken } from './sink-coordinates.ts'
-import { independentNativeChildren, markNativeChildWorkspaceAmbiguous, nativeChildWorkspaceAmbiguous, nativeChildWorkspaceCompletion, ownsNativeChildWorkspace, sameNativeChildWorkspace, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
+import { independentNativeChildren, independentNativeChildContinuation, markNativeChildWorkspaceAmbiguous, nativeChildWorkspaceAmbiguous, nativeChildWorkspaceCompletion, ownsNativeChildWorkspace, sameNativeChildWorkspace, type NativeChildWorkspace } from '../../../workers/native-child-workspace.ts'
 import type { BoundedWorkRequest } from '../../../bounded-work.ts'
 import { nativeRelayRouteFingerprint } from '../../../workers/claude-capacity-client.ts'
 
@@ -607,8 +607,8 @@ export class ReplSession {
 
   /** Serializes another parent submission for the same admitted child without
    * waiting for that child to finish itself. Its durable busy lease stays held. */
-  acquireContinuationTurn(workspace: NativeChildWorkspace): Promise<() => void> {
-    return this.acquireTurnSlot(undefined, workspace, true)
+  acquireContinuationTurn(workspace: NativeChildWorkspace, signal?: AbortSignal): Promise<() => void> {
+    return this.acquireTurnSlot(undefined, workspace, true, signal)
   }
 
   /** Acquire the per-session write slot and a busy lease. A background dispatcher
@@ -619,8 +619,9 @@ export class ReplSession {
     return this.acquireTurnSlot(backgroundDispatch, workspace, false)
   }
 
-  private async acquireTurnSlot(backgroundDispatch: ((yieldDispatch: () => void) => void) | undefined, workspace: NativeChildWorkspace | undefined, continuation: boolean): Promise<() => void> {
+  private async acquireTurnSlot(backgroundDispatch: ((yieldDispatch: () => void) => void) | undefined, workspace: NativeChildWorkspace | undefined, continuation: boolean, signal?: AbortSignal): Promise<() => void> {
     this.assertConversationAvailable()
+    signal?.throwIfAborted()
     let parentReleased = false
     const release = () => {
       if (parentReleased) return
@@ -642,13 +643,26 @@ export class ReplSession {
     // already strikes: a turn admitted under a grant that was in force runs to
     // completion, and the teardown happens the moment no committed turn is left.
     this.turnSlotHeld += 1
-    await new Promise<void>(grant => {
-      this.parentQueue.push({ continuation, grant, blocked: () => [...this.backgroundChildren.values()].some(prior =>
+    await new Promise<void>((grant, reject) => {
+      const entry = { continuation, grant: () => { signal?.removeEventListener('abort', abort); grant() }, blocked: () => [...this.backgroundChildren.values()].some(prior =>
         !(continuation && sameNativeChildWorkspace(workspace, prior)) && !nativeChildWorkspaceAmbiguous(prior)
-        && (!backgroundDispatch || !independentNativeChildren(workspace, prior))) })
+        && !(backgroundDispatch && independentNativeChildren(workspace, prior)
+          || continuation && independentNativeChildContinuation(workspace, prior))) }
+      const abort = () => {
+        const index = this.parentQueue.indexOf(entry)
+        if (index < 0) return // Already granted: the post-acquisition check owns release.
+        this.parentQueue.splice(index, 1)
+        this.turnSlotHeld -= 1
+        signal?.removeEventListener('abort', abort)
+        reject(signal?.reason ?? new Error('Continuation queue cancelled'))
+        this.drainParentQueue()
+      }
+      this.parentQueue.push(entry)
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) { abort(); return }
       this.drainParentQueue()
     })
-    try { this.assertConversationAvailable() } catch (error) {
+    try { signal?.throwIfAborted(); this.assertConversationAvailable() } catch (error) {
       this.turnSlotHeld -= 1
       release()
       throw error
