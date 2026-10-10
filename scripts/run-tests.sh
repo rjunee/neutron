@@ -149,6 +149,24 @@ while IFS= read -r credential_key; do
   esac
 done < <(compgen -A variable)
 
+# Tests measure the package launcher; they must not BE launched by it. `bun run
+# test` exports npm_*/BUN_*/NODE variables into this shell, and the production
+# package-identity probe (bunPackageLauncherIdentity in
+# open/wiring/project-build-dependencies.ts) rightly refuses any inherited
+# launcher variable. Left in place, every test that measures a fixture's
+# portable launcher saw the suite's OWN launcher and went red under `bun run
+# test`, while `bash scripts/run-tests.sh` (CI) and plain `bun test` were green.
+# Scrub exactly that predicate's names for the test processes only; the probe
+# itself is unchanged. NODE_ENV is kept; ENV only matters when non-empty.
+# SHELLOPTS/BASHOPTS are bash-readonly and `bun run` does not export them.
+while IFS= read -r launcher_key; do
+  case "$launcher_key" in
+    NODE_ENV) ;;
+    npm_*|NPM_*|BUN_*|NODE|NODE_*) unset "$launcher_key" || exit 1 ;;
+    ENV) if [ -n "${ENV:-}" ]; then unset ENV || exit 1; fi ;;
+  esac
+done < <(compgen -e)
+
 # SCRIPT_DIR = where this script + its sibling libs live (used to source the
 # shared discovery helper). ROOT = the checkout under test (cwd for discovery +
 # bun); defaults to this script's repo, NEUTRON_TEST_ROOT overrides it (CI / for

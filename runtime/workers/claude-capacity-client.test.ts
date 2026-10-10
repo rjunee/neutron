@@ -1,7 +1,12 @@
 import { afterEach, expect, test } from 'bun:test'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { BoundedWorkRequest } from '../bounded-work.ts'
-import { nativeQuotaEpisodeId, type ClaudeCapacityInput, type ClaudeContinuationControlInput } from './claude-capacity-client.ts'
-import { capacityFixture } from './claude-capacity-client.test-support.ts'
+import { CLAUDE_CAPACITY_PIN_DIRECTORY, loadClaudeCapacityPin, nativeQuotaEpisodeId, nativeRelayRouteFingerprint, NativeRelayUnavailable,
+  resolveClaudeCapacityPin, type ClaudeCapacityInput, type ClaudeContinuationControlInput } from './claude-capacity-client.ts'
+import { capacityFixture, unprovisionedClaudeCapacityPin } from './claude-capacity-client.test-support.ts'
+import { prepareNativeRequestRelay } from '../adapters/claude-code/persistent/native-request-relay.ts'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -88,4 +93,43 @@ test('an expired original deadline permits only a bounded cancellation control',
   await new Promise(resolve => setTimeout(resolve, 35))
   expect(await f.control({ ...intent, action: 'promote', toolUseId: 'tool', resumedAgentId: f.input.childId })).toBe(false)
   expect(await f.control({ ...intent, action: 'cancel', signal: AbortSignal.timeout(1000), deadline: Date.now() + 1000 })).toBe(true)
+})
+
+// POSITIVE CONTROL for the injected pin seam (host-suite-baseline-green). Tests
+// that model an unregistered self-host inject an absent source; this proves the
+// production loader itself still refuses a present broken pin in every consumer
+// and that only absence selects native self-host authentication.
+test('a present but untrusted pin refuses in every consumer and never falls back to native authentication', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'capacity-pin-control-'))
+  const host = await capacityFixture(); cleanup.push(host.close)
+  try {
+    expect(loadClaudeCapacityPin(directory)).toBeUndefined()
+    // A well-formed pin in a directory and file that are not root-protected:
+    // present, therefore authoritative, and broken, therefore refused.
+    await writeFile(join(directory, `${process.geteuid!()}.json`), JSON.stringify(host.pin), { mode: 0o600 })
+    const broken = () => loadClaudeCapacityPin(directory)
+    const consumers: (() => unknown)[] = [broken, () => resolveClaudeCapacityPin(broken),
+      () => nativeRelayRouteFingerprint(broken),
+      () => prepareNativeRequestRelay({ ANTHROPIC_API_KEY: 'synthetic-direct' }, broken)]
+    for (const consumer of consumers) {
+      let refused: unknown
+      try { consumer() } catch (error) { refused = error }
+      expect(refused).toBeInstanceOf(NativeRelayUnavailable)
+      expect(refused).toMatchObject({ substrateErrorClass: 'repl_unreconciled' })
+    }
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('an omitted pin source is the production loader, and only an injected source models an absent host', () => {
+  const observe = (read: () => unknown) => {
+    try { return { value: read() } } catch (error) { return { refused: error instanceof NativeRelayUnavailable } }
+  }
+  const production = observe(() => loadClaudeCapacityPin(CLAUDE_CAPACITY_PIN_DIRECTORY))
+  expect(observe(() => resolveClaudeCapacityPin())).toEqual(production)
+  expect(observe(() => loadClaudeCapacityPin())).toEqual(production)
+  expect(observe(() => nativeRelayRouteFingerprint()))
+    .toEqual(observe(() => nativeRelayRouteFingerprint(() => loadClaudeCapacityPin(CLAUDE_CAPACITY_PIN_DIRECTORY))))
+  expect(resolveClaudeCapacityPin(unprovisionedClaudeCapacityPin)).toBeUndefined()
+  expect(nativeRelayRouteFingerprint(unprovisionedClaudeCapacityPin)).toBeUndefined()
+  expect(prepareNativeRequestRelay({}, unprovisionedClaudeCapacityPin)).toBeUndefined()
 })

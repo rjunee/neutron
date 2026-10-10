@@ -759,3 +759,48 @@ describe('G8 run-tests.sh — end-to-end smoke on the REAL bun', () => {
     }
   })
 })
+
+describe('run-tests.sh — test processes never inherit the package launcher', () => {
+  test('npm_/NPM_/BUN_/NODE launcher variables are scrubbed; NODE_ENV and unrelated variables survive', () => {
+    // `bun run test` exports its own launcher identity into the runner. Tests that
+    // measure a fixture's portable package launcher must see a clean environment,
+    // exactly as under CI's `bash scripts/run-tests.sh`. Every Bun invocation
+    // (discovery probe and lanes) records the environment it received.
+    const h = harness(2)
+    const dumps = join(h.dir, 'env-dumps')
+    mkdirSync(dumps)
+    const recording = join(h.dir, 'recording-bun')
+    writeFileSync(recording, `#!/usr/bin/env bash\nenv > "${dumps}/$$.env"\nexec "${h.fakeBun}" "$@"\n`)
+    chmodSync(recording, 0o755)
+    try {
+      const { code, out } = runRunTests({ ...h, fakeBun: recording }, {
+        FAKE_BUN_DISC: '2',
+        NEUTRON_TEST_NO_PGLITE_LANE: '1',
+        npm_lifecycle_event: 'test',
+        npm_config_user_agent: 'bun/synthetic',
+        NPM_CONFIG_PREFIX: '/synthetic',
+        BUN_OPTIONS: '--synthetic',
+        NODE: '/synthetic/node',
+        NODE_OPTIONS: '--synthetic',
+        ENV: '/synthetic/env',
+        NODE_ENV: 'test',
+        HOST_SUITE_UNRELATED: 'kept',
+      })
+      expect(out).toContain('run-tests: PASS')
+      expect(code).toBe(0)
+      const seen = readdirSync(dumps).map(name => readFileSync(join(dumps, name), 'utf8'))
+      // The discovery probe plus at least one general chunk.
+      expect(seen.length).toBeGreaterThanOrEqual(2)
+      for (const env of seen) {
+        const lines = env.split('\n')
+        const names = lines.map(line => line.slice(0, line.indexOf('='))).filter(Boolean)
+        expect(names.filter(name => /^(npm_|NPM_|BUN_)/.test(name)
+          || name === 'NODE' || name === 'ENV' || name.startsWith('NODE_') && name !== 'NODE_ENV')).toEqual([])
+        expect(lines).toContain('NODE_ENV=test')
+        expect(lines).toContain('HOST_SUITE_UNRELATED=kept')
+      }
+    } finally {
+      rmSync(h.dir, { recursive: true, force: true })
+    }
+  })
+})

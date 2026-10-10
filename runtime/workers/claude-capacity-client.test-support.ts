@@ -4,8 +4,16 @@ import { createServer, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { connectClaudeCapacity, connectClaudeContinuation, nativeQuotaEpisodeId, registerClaudeNativeRelay,
-  type ClaudeCapacityPin, type AcquireClaudeCapacity, type ControlClaudeContinuation } from './claude-capacity-client.ts'
+  type ClaudeCapacityPin, type ClaudeCapacityPinSource, type AcquireClaudeCapacity, type ControlClaudeContinuation } from './claude-capacity-client.ts'
 import { readProcessIdentity } from '../adapters/claude-code/persistent/process-identity.ts'
+
+/** A host with no provisioned native relay pin: exactly CI and an ordinary
+ * self-host. Pass it to `prepareNativeRequestRelay` or
+ * `nativeRelayRouteFingerprint` where a case models an unregistered self-host,
+ * so a pin provisioned on the invoking host cannot change the outcome even
+ * outside the private test mount namespace. Test-only; production omits the
+ * source and keeps reading the provisioned pin. */
+export const unprovisionedClaudeCapacityPin: ClaudeCapacityPinSource = () => undefined
 
 /** Fake host, real Unix transport and signatures; no credentials or provider. */
 export async function capacityFixture(mode = 'available', modelId = 'claude-fable-5-1') {

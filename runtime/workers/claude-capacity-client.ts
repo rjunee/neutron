@@ -54,8 +54,26 @@ const MAX_AGE_MS = 30_000
 
 export const NATIVE_RELAY_BASE_URL = 'http://127.0.0.1:0'
 
+/** The host-provisioned pin directory. The production pin source reads only here. */
+export const CLAUDE_CAPACITY_PIN_DIRECTORY = '/etc/neutron/claude-capacity'
+
+/** Injected pin source, passed through dependency surfaces only (never an env
+ * var, flag or file). Omitted means {@link loadClaudeCapacityPin}, so production
+ * keeps reading the provisioned pin and a present broken pin still refuses.
+ * Tests whose fake children model an unregistered self-host inject an absent
+ * source so a pin provisioned on the build host cannot change their outcome. */
+export type ClaudeCapacityPinSource = () => ClaudeCapacityPin | undefined
+
+/** An explicit pin, an injected source, or omitted (the production source). */
+export function resolveClaudeCapacityPin(
+  source: ClaudeCapacityPin | ClaudeCapacityPinSource = loadClaudeCapacityPin,
+): ClaudeCapacityPin | undefined {
+  return typeof source === 'function' ? source() : source
+}
+
 /** Stable across account rotation; host route AND local wire protocol bind warm reuse. */
-export function nativeRelayRouteFingerprint(pin: ClaudeCapacityPin | undefined = loadClaudeCapacityPin()): string | undefined {
+export function nativeRelayRouteFingerprint(source?: ClaudeCapacityPin | ClaudeCapacityPinSource): string | undefined {
+  const pin = resolveClaudeCapacityPin(source)
   if (!pin) return undefined
   if (!validPin(pin)) throw new NativeRelayUnavailable('Native quota relay pin is invalid')
   return `native-relay-v3:${hash(JSON.stringify([pin.hostId, pin.instanceId, pin.socketPath, pin.publicKey, NATIVE_RELAY_BASE_URL]))}`
@@ -69,11 +87,12 @@ function protectedDirectory(path: string): void {
   if (parent !== path) protectedDirectory(parent)
 }
 
-/** Absence selects native self-host authentication. A present broken pin never falls back. */
-export function loadClaudeCapacityPin(): ClaudeCapacityPin | undefined {
+/** Absence selects native self-host authentication. A present broken pin never falls back.
+ * Production omits `directory`; the positive control names a fixture directory. */
+export function loadClaudeCapacityPin(directory: string = CLAUDE_CAPACITY_PIN_DIRECTORY): ClaudeCapacityPin | undefined {
   const uid = process.geteuid?.()
   if (!Number.isSafeInteger(uid)) return undefined
-  const path = `/etc/neutron/claude-capacity/${uid}.json`
+  const path = `${directory}/${uid}.json`
   try { lstatSync(path) } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
     throw new NativeRelayUnavailable('Native quota relay registration is unreadable')
