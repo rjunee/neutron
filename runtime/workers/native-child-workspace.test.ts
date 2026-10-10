@@ -191,6 +191,110 @@ test('a continuation cannot bypass a different bound background child', async ()
   release()
 })
 
+test.each(['readers', 'writers', 'writer then reader', 'reader then writer'] as const)('compatible bound %s continue without waiting for peer completion', async mode => {
+  const readOnly = mode === 'writer then reader' ? [false, true] as const
+    : mode === 'reader then writer' ? [true, false] as const : mode === 'readers'
+  const f = await fixture(mode === 'readers', readOnly)
+  for (const workspace of f.workspaces) {
+    let yieldOriginal!: () => void
+    const release = await f.session.acquireTurn(yieldSlot => { yieldOriginal = yieldSlot }, workspace)
+    bindNativeChildWorkspace(workspace)
+    yieldOriginal(); release()
+  }
+  expect(f.session.turnSlotHeld).toBe(2)
+  let ordinaryEntered = false, active = 0, maximumActive = 0
+  const ordinary = f.session.acquireTurn().then(release => { ordinaryEntered = true; release() })
+  const entered = [barrier(), barrier()], finish = [barrier(), barrier()], order: number[] = []
+  const continuations = f.workspaces.map(async (workspace, index) => {
+    const release = await f.session.acquireContinuationTurn(workspace)
+    maximumActive = Math.max(maximumActive, ++active)
+    order.push(index); entered[index]!.release()
+    try { await finish[index]!.promise } finally { active--; release() }
+  })
+  try {
+    // The ceiling catches a deadlock; admission is proven before either native
+    // child's completion, with barriers keeping parent submissions distinct.
+    expect(await Promise.race([entered[0]!.promise.then(() => true), Bun.sleep(1000).then(() => false)])).toBe(true)
+    expect(order).toEqual([0])
+    expect(ordinaryEntered).toBe(false)
+    finish[0]!.release()
+    expect(await Promise.race([entered[1]!.promise.then(() => true), Bun.sleep(1000).then(() => false)])).toBe(true)
+    expect(order).toEqual([0, 1])
+    expect(maximumActive).toBe(1)
+    expect(ordinaryEntered).toBe(false)
+    finish[1]!.release()
+    await Promise.all(continuations)
+    expect(f.session.turnSlotHeld).toBe(3) // Two children and the queued ordinary turn.
+  } finally {
+    for (const gate of finish) gate.release()
+    f.complete(0); f.complete(1)
+    await Promise.all([...continuations, ordinary])
+  }
+  expect(ordinaryEntered).toBe(true)
+  expect(f.session.turnSlotHeld).toBe(0)
+})
+
+test.each(['none', 'result', 'branch'] as const)('bound continuation retains the conflicting peer fence: %s', async conflict => {
+  const f = await fixture(conflict === 'none', false, conflict)
+  let yieldOriginal!: () => void, entered = false
+  const releaseOriginal = await f.session.acquireTurn(yieldSlot => { yieldOriginal = yieldSlot }, f.workspaces[0])
+  bindNativeChildWorkspace(f.workspaces[0]!)
+  bindNativeChildWorkspace(f.workspaces[1]!)
+  yieldOriginal(); releaseOriginal()
+  const waiting = f.session.acquireContinuationTurn(f.workspaces[1]!).then(release => { entered = true; release() })
+  try {
+    for (let count = 0; count < 8; count++) await Promise.resolve()
+    expect(entered).toBe(false)
+  } finally { f.complete(0); f.complete(1); await waiting }
+  expect(entered).toBe(true)
+  expect(f.session.turnSlotHeld).toBe(0)
+})
+
+test('cancelled continuation leaves no queued turn and retains the live child fence', async () => {
+  const f = await fixture(true), controller = new AbortController()
+  let yieldOriginal!: () => void, entered = false
+  const releaseOriginal = await f.session.acquireTurn(yieldSlot => { yieldOriginal = yieldSlot }, f.workspaces[0])
+  bindNativeChildWorkspace(f.workspaces[0]!)
+  bindNativeChildWorkspace(f.workspaces[1]!)
+  yieldOriginal(); releaseOriginal()
+  const waiting = f.session.acquireContinuationTurn(f.workspaces[1]!, controller.signal).then(release => {
+    entered = true; release(); return 'entered'
+  }, () => 'cancelled')
+  controller.abort()
+  try {
+    expect(await Promise.race([waiting, Bun.sleep(1000).then(() => 'still queued')])).toBe('cancelled')
+    expect(entered).toBe(false)
+    expect(f.session.turnSlotHeld).toBe(1)
+    expect(nativeChildCensusKnown(f.workspaces[0]!)).toBe(true)
+  } finally { f.complete(0); f.complete(1); await waiting }
+  expect(entered).toBe(false)
+  expect(f.session.turnSlotHeld).toBe(0)
+})
+
+test.each(['before-grant', 'after-grant'] as const)('continuation cancellation %s preserves parent slot serialization', async mode => {
+  const f = await fixture(), cancelled = new AbortController()
+  const releaseActive = await f.session.acquireTurn()
+  let entered = false
+  const waiting = f.session.acquireContinuationTurn(f.workspaces[0]!, cancelled.signal).then(release => {
+    entered = true; release(); return 'entered'
+  }, () => 'cancelled')
+  if (mode === 'after-grant') releaseActive()
+  cancelled.abort()
+  expect(await waiting).toBe('cancelled')
+  expect(entered).toBe(false)
+  expect(f.session.turnSlotHeld).toBe(mode === 'before-grant' ? 1 : 0)
+  let nextEntered = false
+  const next = f.session.acquireTurn().then(release => { nextEntered = true; release() })
+  if (mode === 'before-grant') {
+    for (let count = 0; count < 8; count++) await Promise.resolve()
+    expect(nextEntered).toBe(false)
+    releaseActive()
+  }
+  await next
+  expect(nextEntered).toBe(true)
+  expect(f.session.turnSlotHeld).toBe(0)
+})
+
 test('forged workspace authority and changed request cannot authorize a writer', async () => {
   const f = await fixture()
   let writes = 0

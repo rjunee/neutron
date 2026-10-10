@@ -14,7 +14,7 @@ import { SUBAGENT_CONTINUATION_TOOL_NAME } from './claude-tool-contract.ts'
 import { verifyNativeDispatchChildBound, type NativeDispatchLease, type SignedNativeDispatchRecord } from './claude-native-dispatch-receipt.ts'
 import { readArmedTrailerReservation } from './trailer-slot.ts'
 import type { ProjectTrailerOutcome } from './project-runners.ts'
-import { nativeChildContinuationCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
+import { bindNativeChildWorkspace, nativeChildContinuationCensusKnown, ownsNativeChildWorkspace, type NativeChildWorkspace } from './native-child-workspace.ts'
 import { acquireClaudeCapacity, controlClaudeContinuation, nativeQuotaEpisodeId, nativeRelayScopeCurrent,
   type AcquireClaudeCapacity, type ClaudeCapacityInput, type ClaudeCapacityReceipt, type ClaudeContinuationIntent, type ControlClaudeContinuation } from './claude-capacity-client.ts'
 
@@ -266,9 +266,18 @@ async function continuationAttempt(options: ClaudeContinuationOptions, workSigna
     }
     if (!currentParentKnown()) return unknown('launch-unknown')
     if (!session.child.submitLine || expired()) return unknown('budget-expired')
+    // Original authority must still be live before it can bind reconstructed
+    // workspace ownership or enter the parent queue.
+    const relay = parent.launch?.relay
+    const auth = { current: () => authority.current() && exactSurvivor() && !!relay && nativeRelayScopeCurrent(relay)
+      && relay.registration.body.parentSessionId === session.sessionId && relay.registration.body.parentPid === session.child.pid }
+    if (!relay || !auth.current()) return unknown('capacity-unavailable')
+    // The verified original dispatch above also binds a reconstructed local
+    // workspace. This authorizes compatible-peer queue admission, not new work.
+    bindNativeChildWorkspace(options.workspace)
     // Native workspace authorization passes only this admitted child through the
     // session's serialization. Recheck after queue acquisition and before input.
-    const release = await session.acquireContinuationTurn(options.workspace)
+    const release = await session.acquireContinuationTurn(options.workspace, signal)
     try {
       if (expired()) return unknown('budget-expired')
       const completed = await result()
@@ -277,10 +286,7 @@ async function continuationAttempt(options: ClaudeContinuationOptions, workSigna
       if (!currentParentKnown()) return unknown('launch-unknown')
       // The original signed scope survives a gateway restart, never a parent
       // replacement. Account and model facts come only from native HTTP at the host.
-      const relay = parent.launch?.relay
-      const auth = { current: () => authority.current() && exactSurvivor() && !!relay && nativeRelayScopeCurrent(relay)
-        && relay.registration.body.parentSessionId === session.sessionId && relay.registration.body.parentPid === session.child.pid }
-      if (!relay || !auth.current()) return unknown('capacity-unavailable')
+      if (!auth.current()) return unknown('capacity-unavailable')
       const common = { request, leaseId: authority.lease.token, relay, childId: agentId,
         eventDigest: createHash('sha256').update(receipt.signature).digest('hex'), signal, deadline: options.deadline,
         deadlineMs: receipt.body.deadlineMs!, budgetDigest: createHash('sha256').update(JSON.stringify(request.budget)).digest('hex'),

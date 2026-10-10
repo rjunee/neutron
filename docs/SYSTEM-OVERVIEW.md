@@ -47,6 +47,10 @@ authentication. A registered route failure refuses locally.
 scope and verifies signed host observations of actual native requests plus a
 separate fresh capacity result. `claude-native-continuation.ts` preserves the
 original lease, launch checks, result harvest and permanent pre-input claim.
+An original child with verified current authority may take the serialized parent
+input slot while compatible, independently admitted peers remain live; measured
+workspace and result-path independence still governs overlap. Cancellation removes
+only its queued continuation turn, retaining the native children's busy leases.
 Launch-time file-auth reconstruction and alias pinning are removed. The host
 owns actual request authentication and quota rotation; Open never builds native
 provider prompts. The decision and deployment alternatives are recorded in

@@ -92,6 +92,18 @@ parent without the original scope remains unavailable even if its executable and
 argv are independently measured. Current admission authorization, workspace and
 parent identity are checked before capacity and again before input.
 
+Original-child continuation must also make progress while independently admitted
+peer children remain live. A host-bound child may acquire the serialized parent
+input slot without awaiting compatible peers' completion. Independence uses the
+same measured workspace and result-path contract as
+`trident-build-efficiency.md`; it is not inferred from a role name or a quota
+message. Unbound, foreign, unknown and conflicting ownership retain their fences.
+Reconstructed ownership must derive its child binding from the original verified
+dispatch receipt before using this admission. Ordinary parent turns still wait,
+and neither original budgets nor durable child leases change.
+Cancellation or expiry removes a still-queued continuation's parent turn and
+busy count without releasing another active turn or its native child lease.
+
 The durable continuation claim is committed before the host registers its pending
 intent, and both complete before Enter. A timeout, lost acknowledgement or restart
 never refunds the claim. Exact invocation reconciliation
@@ -196,6 +208,15 @@ checkpoint happens to be current at recovery time.
       Reconstructed workspace authorization never self-waits or bypasses another
       child's ownership. Missing-parent recovery still harvests an arriving
       original result. Verify: the same consuming and runtime suites.
+- [ ] Two compatible, host-bound children can each enter original-child
+      continuation while both retain their busy leases. Parent submissions stay
+      serialized, including when an ordinary turn is queued first. An unbound
+      candidate and a conflicting peer still block; stale or forged recovery
+      evidence cannot mark a child bound. Cancellation leaves no orphaned queued
+      submission and preserves the conflicting peer's busy lease. Verify through the real ReplSession
+      queue in `runtime/workers/native-child-workspace.test.ts` and the signed
+      continuation consumer in `runtime/workers/claude-native-continuation.test.ts`,
+      with opposite source mutations and the project-build consuming suite.
 - [ ] All-full remains durably and visibly waiting under the original lease.
       After quota clears, harvest first and continue the same ID once for that
       authenticated episode. Repeated genuine episodes continue after verified
