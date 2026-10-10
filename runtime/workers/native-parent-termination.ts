@@ -31,6 +31,7 @@ export interface NativeParentTerminationCompletion {
     kind: 'retained-pidfd-exit'
     openedWhileAlive: true
     preparedBeforeSignal: true
+    executionTreeTerminated: true
     observedAt: number
     evidenceDigest: string
   }
@@ -98,7 +99,7 @@ export function verifyNativeParentTerminationCompletion(value: unknown, preparat
     return b.kind === 'native-parent-terminated' && b.operationId === preparation.body.operationId
       && b.bootId === preparation.body.bootId && b.preparationDigest === nativeParentTerminationDigest(preparation)
       && isDeepStrictEqual(b.parent, preparation.body.parent) && !!o && o.kind === 'retained-pidfd-exit'
-      && o.openedWhileAlive === true && o.preparedBeforeSignal === true
+      && o.openedWhileAlive === true && o.preparedBeforeSignal === true && o.executionTreeTerminated === true
       && Number.isSafeInteger(o.observedAt) && o.observedAt > 0 && o.observedAt <= Date.now() && digest(o.evidenceDigest)
       && preparation.body.children.every(child => child.dispatch.body.deadlineMs! <= o.observedAt)
   } catch { return false }

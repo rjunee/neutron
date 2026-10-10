@@ -15,7 +15,8 @@ and consume routes are mounted in `open/composer.ts`.
 
 `gateway/project-admission-store.ts` prepares one maintenance hold and permanent
 work/conversation fences atomically. Completion requires the exact prepared
-lease multiset and independently observed original process exit; all child
+lease multiset and independently observed termination of the complete attributed
+execution tree; all child
 leases and the maintenance hold are consumed together. Existing retirement
 tables supply these mechanics without a schema migration. Failed workflow and
 attempt history, original receipts and deadlines remain unchanged.
@@ -28,10 +29,10 @@ gone. Prepared quarantine alone cannot release that terminal slot. The existing
 living-parent planner protocol and different-boot whole-host protocol retain
 their previous requirements.
 
-Focused verification passed 65 tests with 393 assertions across the admission
+Focused verification passed 138 tests with 897 assertions across the admission
 store, consuming boundary, HTTP surface and persistent quarantine/handoff paths.
 Controls cover altered signatures, original receipt/lease mismatches, incomplete
-ownership, unexpired deadlines, live runs, live parents, interrupted writes and
+ownership, unexpired deadlines, live runs, live parents, incomplete execution-tree termination, interrupted writes and
 other-project preservation. Three mutations removing operator authentication,
 the live-parent refusal or complete-lease checks each failed the opposing tests.
 An ephemeral real turn through `createClaudeCodeSubstrateAuto`, the retained Bun

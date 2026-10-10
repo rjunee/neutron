@@ -79,7 +79,9 @@ The owner-authenticated `/admin/prepare-native-parent-termination` and
 signatures and the original signed review dispatches. Preparation atomically
 holds the complete project scope and permanently quarantines its old work and
 conversation. An independent operator must retain the original live process
-handle through preparation and observe its targeted exit. Consumption verifies
+handles for the complete attributed execution tree through preparation and
+observe their targeted exits. Unknown descendants and foreign conversations
+refuse. Consumption verifies
 that evidence before releasing all prepared leases and the maintenance hold in
 one transaction. Failed work and history remain unchanged; subsequent admission
 uses a fresh conversation. Policy and opposing controls live in

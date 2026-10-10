@@ -827,8 +827,15 @@ Preparation grants no completion and releases no lease.
 
 The operator retains a pidfd opened while that exact original parent is alive,
 rechecks its kernel identity and the committed application preparation, then
-terminates only that process. The independent authority records the observed
-pidfd exit, unchanged boot, preparation digest and original process identity.
+terminates that original execution and its positively attributed conversation
+forks and support processes. Before signalling, a root-reviewed process census
+must cover the entire descendant tree; unknown descendants and foreign
+conversations refuse. Every process is identified and retained independently,
+then frozen and rechecked before targeted termination. Process groups and
+unrelated native parents are never termination targets. The independent authority
+records exit through every retained descriptor, the unchanged boot, preparation
+digest and original process identity. Parent exit without complete execution-tree
+termination cannot release ownership.
 The termination receipt cannot be manufactured from a later absent PID, a reused
 PID, an application restart or a copied claim that a pidfd was checked. A failed
 signal, observation timeout or interrupted operator leaves ownership held.

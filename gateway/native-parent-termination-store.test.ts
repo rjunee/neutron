@@ -33,9 +33,9 @@ async function fixture() {
   const leases = [await admit(scope, 'review-a'), await admit(scope, 'review-b')];
   const sibling = await admit(other, 'review-c');
   expect(leases.every(row => store.nativeContinuationCurrent(row))).toBe(true);
-  const prepare = (rows = leases, eligible = () => true) =>
+  const prepare = (rows: readonly AdmissionLeaseRow[] = leases, eligible = () => true) =>
     store.prepareNativeParentTermination(operation, rows, 'signed-preparation', 'old-session', eligible);
-  const consume = (rows = leases, eligible = () => true, completion = 'signed-completion') =>
+  const consume = (rows: readonly AdmissionLeaseRow[] = leases, eligible = () => true, completion = 'signed-completion') =>
     store.consumeNativeParentTermination(operation, rows, 'signed-preparation', 'old-session', completion, eligible);
   return { db, store, leases, sibling, prepare, consume };
 }

@@ -229,8 +229,8 @@ without replay (Decisions Log 2026-10-08, conversation quarantine).
 
 An owner-authorized reset may also retire expired native reviews whose original
 signed dispatches identify one exact parent, after an independent operator
-prepares the complete scope and observes that parent's termination through a
-retained process descriptor. This preserves failed-work history and starts any
+prepares the complete scope and observes that parent's entire attributed execution
+tree terminate through retained process descriptors. This preserves failed-work history and starts any
 successor conversation fresh (Decisions Log 2026-10-10, authenticated parent
 termination). Unsigned historical work retains its existing recovery rules.
 
@@ -367,7 +367,8 @@ signatures may establish the exact common native parent for expired reviews of
 terminal runs. A distinct prepared operator transaction fences the complete
 project scope and permanently retires its old work and conversation identities
 before targeted termination. Only independent observation of exit through a
-descriptor retained from the live original process may authorize atomic lease
+descriptor retained from each live original process, including attributed forks
+and support processes, may authorize atomic lease
 consumption and a fresh conversation. No old review becomes successful and no
 deadline is extended. This deliberately adds a signed-parent recovery protocol;
 the existing whole-host protocol remains necessary for unsigned legacy placement

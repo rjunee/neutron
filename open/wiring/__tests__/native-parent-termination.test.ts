@@ -77,7 +77,7 @@ async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequ
   const completion = (prep = preparation) => signed<NativeParentTerminationCompletion>({ version: 1, kind: 'native-parent-terminated',
     operationId: prep.body.operationId, hostId: 'host', instanceId: 'instance', bootId: 'kernel', parent,
     preparationDigest: nativeParentTerminationDigest(prep), observation: { kind: 'retained-pidfd-exit', openedWhileAlive: true,
-      preparedBeforeSignal: true, observedAt: Date.now(), evidenceDigest: 'c'.repeat(64) } })
+      preparedBeforeSignal: true, executionTreeTerminated: true, observedAt: Date.now(), evidenceDigest: 'c'.repeat(64) } })
   return { dir, db, state, run, runs, attempts, body, signed, preparation, completion, options,
     exit: () => { alive = false }, activity: () => ({ inspected, detached }) }
 }
@@ -158,7 +158,7 @@ test('incomplete detachment retains every lease and fence; exact preparation can
   expect(await prepareNativeParentTermination(f.options, f.preparation)).toEqual({ status: 'prepared' })
 })
 
-test.each(['signature', 'operation', 'preparation', 'parent', 'opened', 'prepared', 'future', 'kernel'] as const)(
+test.each(['signature', 'operation', 'preparation', 'parent', 'opened', 'prepared', 'execution-tree', 'future', 'kernel'] as const)(
   'prepared ownership remains held on invalid %s completion', async change => {
     const f = await fixture(), c = structuredClone(f.completion().body)
     expect(await prepareNativeParentTermination(f.options, f.preparation)).toEqual({ status: 'prepared' })
@@ -168,6 +168,7 @@ test.each(['signature', 'operation', 'preparation', 'parent', 'opened', 'prepare
     if (change === 'parent') c.parent.pid++
     if (change === 'opened') (c.observation as { openedWhileAlive: boolean }).openedWhileAlive = false
     if (change === 'prepared') (c.observation as { preparedBeforeSignal: boolean }).preparedBeforeSignal = false
+    if (change === 'execution-tree') (c.observation as { executionTreeTerminated: boolean }).executionTreeTerminated = false
     if (change === 'future') c.observation.observedAt = Date.now() + 60_000
     const completion = f.signed(c); if (change === 'signature') completion.signature = 'forged'
     if (change === 'kernel') f.options.kernelBootId = () => 'changed'
