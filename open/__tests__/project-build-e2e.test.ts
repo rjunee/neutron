@@ -6874,19 +6874,23 @@ for (const [variant, holder] of PREPARATION_REFUSALS) {
   }, 120_000)
 }
 
-test('owned published retry: a discovered-but-unowned PR sibling keeps the wrong-base refusal and is untouched', async () => {
+test('owned published retry: a discovered-but-unowned PR sibling refuses at dispatch and is untouched', async () => {
   const w = await ownedPublishedRetry('completed-build', { owned: false })
   const { f } = w
-  const before = { rows: await w.observe(), git: await w.git() }
-  const retry = await w.dispatch()
-  expect(retry.published_pr).toBeNull()
-  const { stepped, outcome } = await w.launch(retry.id)
-  expect(outcome).toBeNull()
-  expect(stepped.phase).toBe('failed')
-  expect(stepped.failure_reason).toContain(WRONG_BASE_REFUSAL)
-  expect(f.world.dispatches).toEqual([])
-  expect(f.github.prs).toMatchObject([{ number: 1, state: 'OPEN' }])
-  expect({ rows: await w.observe(), git: await w.git() }).toEqual(before)
+  const before = { rows: await w.observe(), git: await w.git(), card: w.board.get('project', w.card.id) }
+  f.world.dispatches.length = 0
+  const create = spyOn(f.store, 'create')
+  try {
+    const retry = await dispatchBoardBoundBuild({ task: w.task, board_item_id: w.card.id }, {
+      store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+      board: w.board, resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', max_task_iterations: 4,
+    })
+    expect(retry).toMatchObject({ ok: false, code: 'card_blocked', message: expect.stringContaining('unresolved build') })
+    expect(create).not.toHaveBeenCalled()
+    expect(f.world.dispatches).toEqual([])
+    expect(f.github.prs).toMatchObject([{ number: 1, state: 'OPEN' }])
+    expect({ rows: await w.observe(), git: await w.git(), card: w.board.get('project', w.card.id) }).toEqual(before)
+  } finally { create.mockRestore() }
 }, 120_000)
 
 const OWNED_RETRY_CONTROLS: Record<string, { apply: (w: OwnedRetryWorld) => Promise<unknown>; refusal: string[] }> = {
@@ -9977,6 +9981,40 @@ test('a driver resumed after the branch head moved rebuilds instead of adopting 
   expect(mergedMove.stdout).toBe('advanced while driver was down')
   const mergedNotes = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
   expect(mergedNotes.stdout).toBe(`seed\n${f.row.id}:build:0\n${f.row.id}:build:1`)
+}, 300_000)
+
+test('an ordinary retry cannot turn a blocked prepared review into fresh planning', async () => {
+  const task = 'Preserve the implementation while a required review remains unresolved'
+  const f = await fixture({ blockRoles: ['review'], dispatchTask: task })
+  const outcome = await drive(f)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review' })
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint.pending).toMatchObject({ phase: 'review' })
+  const prior = f.store.get(f.row.id)!
+  await f.store.update(prior.id, { phase: 'failed', worktree: null })
+  const events = f.store.stageEvents(prior.id)
+  const attempts = f.context.attempts.list(prior.id)
+  expect(attempts.some(row => row.role === 'review' && row.outcome === 'blocked')).toBe(true)
+  f.world.dispatches.length = 0
+  let attached = false
+  const create = spyOn(f.store, 'create')
+  try {
+    const retry = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+      store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+      board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }),
+        attachRun: async () => { attached = true } },
+      resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
+    })
+    expect(retry).toMatchObject({ ok: false, code: 'card_blocked', message: expect.stringContaining('unresolved review') })
+    expect(create).not.toHaveBeenCalled()
+    expect(attached).toBe(false)
+    expect(f.world.dispatches).toEqual([])
+    expect(f.store.stageEvents(prior.id)).toEqual(events)
+    expect(f.context.attempts.list(prior.id)).toEqual(attempts)
+    expect(lastCheckpoint(f)).toEqual(checkpoint)
+    expect(f.github.prs).toHaveLength(1)
+    expect(f.github.prs[0]!.state).toBe('OPEN')
+  } finally { create.mockRestore() }
 }, 300_000)
 
 test('a driver restarted during a worker turn refuses to re-fire it', async () => {

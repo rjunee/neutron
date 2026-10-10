@@ -359,6 +359,20 @@ references decisions by date; none is a second home for a decision.
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
 
+### 2026-10-10 — An unresolved retry cannot silently restart planning.
+
+The owner's no-waste requirement applies when recovery cannot reuse a checkpoint.
+A same-card, unchanged-task retry with matching execution identity and a pending
+worker must first satisfy the existing settlement rules. If those rules cannot
+establish a reusable source, dispatch refuses before creating another run or
+moving the card's link, except for the existing owned-publication build/fix
+handoff whose outer launch and preparation must prove settlement before any
+planner starts. A publication receipt cannot authorize a review or planner
+replay. The pending reservation cannot silently become a fresh planner.
+Original evidence and spend remain intact. This does not turn physical recovery
+or a stopped run row into a completed worker result. The contract is in
+`docs/spec-items/a-retry-must-resume-from-the-checkpoint.md`.
+
 ### 2026-10-10 — Terminate an authenticated expired-review parent without a host reboot.
 
 The owner requires recovery without rebooting a shared host and has authorized
