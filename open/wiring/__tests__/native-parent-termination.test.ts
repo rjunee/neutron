@@ -185,7 +185,7 @@ test('completed physical termination crosses lifecycle and real workspace placem
   const makeTerminal = () => createConversationTerminal({
     host: createWorkerTerminalHost(f.dir, { selected: herdrHost, connect: async () => server }), instanceId: 'owner', selected: herdrHost })!
   const terminal = makeTerminal()
-  const placed = await terminal.host!.spawn(f.body.parent.launch!.argv, {
+  const placed = await terminal.host!.spawn([...f.body.parent.launch!.argv], {
     cwd: f.dir, env: {}, projectPlacement: terminal.placementFor('project'),
   })
   placed.detach?.(); oldPane = placed.paneHandle!
@@ -226,7 +226,7 @@ test('completed physical termination crosses lifecycle and real workspace placem
   const row = Object.values(JSON.parse(readFileSync(journal, 'utf8')))[0] as {
     chat: { pane: string }; quarantinedChats: Array<{ pane: string; quarantine: { nativeLoop: string } }>
   }
-  expect(row.chat.pane).toBe(fresh.paneHandle)
+  expect(row.chat.pane).toBe(fresh.paneHandle!)
   expect(row.quarantinedChats).toMatchObject([{ pane: oldPane, quarantine: { nativeLoop: 'terminated' } }])
   expect((await makeTerminal().inspectChat!('project')).status).toBe('live')
 })
