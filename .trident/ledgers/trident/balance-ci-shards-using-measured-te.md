@@ -1,0 +1,2 @@
+- [x] T1: Measured test-cost profile contract: strict validator, CI-log collector, committed run-38001520250 profile with provenance, real-log-shape fixtures, spec extension and as-built start (no runner change)
+- [ ] T2: Consume the profile in scripts/run-tests.sh with one deterministic all-lane shard partition, extend the measured portable runner closure, update guards and living docs, and complete the as-built
