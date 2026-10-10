@@ -7433,7 +7433,8 @@ test.each(['readiness', 'suite', 'ci', 'artifact'] as const)('unavailable admiss
  * baseline reconstructs the serial paid-review constraint measured in #1196;
  * removing the setup receipt recreates pre-receipt preparation. No live timing,
  * pricing or historical recovery count is synthesized by this fixture. */
-async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: EfficiencyReport['scheduling']): Promise<EfficiencyReport> {
+async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: EfficiencyReport['scheduling'],
+  options: { mergeMode?: 'pr' | 'local' } = {}): Promise<EfficiencyReport> {
   const trace = new EfficiencyTrace()
   let serial = Promise.resolve()
   let pending: Array<() => void> = []
@@ -7441,6 +7442,7 @@ async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: Eff
   const timers = new Set<ReturnType<typeof setTimeout>>()
   cleanups.push(() => { for (const timer of timers) clearTimeout(timer); for (const release of pending) release() })
   const f = await fixture({ bunWorkspace: true, efficiencyTrace: trace,
+    ...(options.mergeMode === undefined ? {} : { mergeMode: options.mergeMode }),
     blockersByRound: scenario === 'code-fix' ? [0, 1] : [],
     reviewChild: async (_request, seat) => {
       if (scheduling === 'serial-baseline') {
@@ -7504,8 +7506,9 @@ async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: Eff
         return value
       } })
     }
+    // The same configured mode the host passes (project-build-host.ts: run.merge_mode).
     const outcome = die ? await buildRun({ mode: 'implementation', start, run_id: f.row.id, workers: host.workers,
-      repl_provider: 'anthropic', merge_mode: 'pr' }, host.deps, new AbortController().signal)
+      repl_provider: 'anthropic', merge_mode: f.store.get(f.row.id)!.merge_mode }, host.deps, new AbortController().signal)
       : await host.run({ mode: 'implementation', start }, new AbortController().signal)
     outcomes.push(outcome.kind)
     return outcome
@@ -7553,7 +7556,9 @@ async function efficiencyBenchmark(scenario: EfficiencyScenario, scheduling: Eff
   return { scope: { fixture: 'project-build-e2e-scripted-v1', task: f.row.task,
     gates: { observed: [...new Set(trace.decisions.map(decision => decision.split(':')[0]!))].sort(),
       suite_strategy: f.input.test_strategy ?? '', intermediate_strategy: f.input.test_strategy_intermediate ?? null,
-      max_rounds: f.input.max_rounds, merge_mode: 'pr' },
+      // The run's configured merge mode, never a literal: a different mode is a
+      // different workload and must read as unmatched.
+      max_rounds: f.input.max_rounds, merge_mode: f.store.get(f.row.id)!.merge_mode },
     models: [...new Set(models.map(model => JSON.stringify(model)))].sort().map(model => JSON.parse(model)) },
     timing_unit: 'scripted-workload-unit', barrier_complete: !barrierExpired, scenario, scheduling, counts, decisions: trace.decisions, intervals: trace.intervals, outcomes,
     usage: { tokens: null, cost: null, source: 'scripted-provider-no-usage' } }
@@ -7575,6 +7580,31 @@ test.each([...EFFICIENCY_SCENARIOS])('deterministic efficiency benchmark: %s', a
   // The machine-readable record is emitted on demand; no private run paths or
   // generated timestamps enter the fixed scenario comparison.
 }, 120_000)
+
+test('deterministic efficiency benchmark scope fidelity: repeated gate observations match, a configured local merge mode does not', async () => {
+  const pr = await efficiencyBenchmark('fresh', 'concurrent')
+  const local = await efficiencyBenchmark('fresh', 'concurrent', { mergeMode: 'local' })
+  // The scope reports each run's configured mode, so a reintroduced literal is
+  // caught even if the observed gate sets of the two modes happen to differ.
+  expect(pr.scope!.gates.merge_mode).toBe('pr')
+  expect(local.scope!.gates.merge_mode).toBe('local')
+  // Positive: the same real workload, with every gate observed twice and in a
+  // different order, is the same workload in both comparison directions.
+  expect(pr.scope!.gates.observed.length).toBeGreaterThan(0)
+  const repeated = structuredClone(pr)
+  repeated.scope!.gates.observed = [...pr.scope!.gates.observed, ...pr.scope!.gates.observed].reverse()
+  expect(compareEfficiency(pr, repeated)).toEqual({ kind: 'matched' })
+  expect(compareEfficiency(repeated, pr)).toEqual({ kind: 'matched' })
+  // Negative: a genuinely different configured workload is unmatched, never a saving.
+  expect(compareEfficiency(pr, local)).toEqual({ kind: 'unmatched', reasons: ['gates'] })
+  expect(compareEfficiency(local, pr)).toEqual({ kind: 'unmatched', reasons: ['gates'] })
+  // Exact work is preserved in both modes; scripted usage stays unknown.
+  assertEfficient(pr)
+  assertEfficient(local)
+  expect(local.outcomes).toEqual(['merged'])
+  expect(local.counts).toEqual(pr.counts)
+  expect(local.usage).toEqual({ tokens: null, cost: null, source: 'scripted-provider-no-usage' })
+}, 240_000)
 
 test('pr mode drives plan, build, review, publish and merge to a terminal merged outcome', async () => {
   const f = await fixture()

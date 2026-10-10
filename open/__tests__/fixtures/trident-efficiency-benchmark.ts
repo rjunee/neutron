@@ -8,7 +8,10 @@ export const EFFICIENCY_SCENARIOS = ['fresh', 'code-fix', 'unchanged-head', 'mov
 export type EfficiencyScenario = typeof EFFICIENCY_SCENARIOS[number]
 export type BenchmarkInterval = { stage: string; start: number; end: number }
 /** Compare the scripted workload, not run IDs, temporary paths or generated SHAs.
- * Models come from admitted attempts, including the distinct review seats. */
+ * Models come from admitted attempts, including the distinct review seats.
+ * Observed gates are a set: the producer records each gate name once, so a
+ * repeated observation is the same workload while a missing or substituted gate
+ * is not. `merge_mode` is the run's configured mode, never a literal. */
 export interface EfficiencyScope {
   fixture: string
   task: string
@@ -64,8 +67,10 @@ export function compareEfficiency(before: EfficiencyReport, after: EfficiencyRep
   else {
     if (before.scope.fixture !== after.scope.fixture || !before.scope.fixture || !after.scope.fixture) reasons.push('scripted fixture')
     if (before.scope.task !== after.scope.task || !before.scope.task || !after.scope.task) reasons.push('task')
+    // Same set semantics as the producer: observation order and repetition never
+    // change the gate scope; merge mode and every other gate input still do.
     const gates = ({ gates }: EfficiencyScope) => JSON.stringify([
-      [...gates.observed].sort(), gates.suite_strategy, gates.intermediate_strategy, gates.max_rounds, gates.merge_mode,
+      [...new Set(gates.observed)].sort(), gates.suite_strategy, gates.intermediate_strategy, gates.max_rounds, gates.merge_mode,
     ])
     if (!before.scope.gates.observed.length || !after.scope.gates.observed.length || gates(before.scope) !== gates(after.scope)) reasons.push('gates')
     // Scheduling and repeated calls may alter order/count, never the set of

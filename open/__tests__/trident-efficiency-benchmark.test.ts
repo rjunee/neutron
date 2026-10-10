@@ -60,18 +60,24 @@ test('benchmark compares equivalent scopes independent of scheduling, call order
   before.scheduling = 'serial-baseline'
   after.scope!.gates.observed.reverse()
   after.scope!.models.push(structuredClone(after.scope!.models[0]!))
+  // The producer records gates as a set; observing the same gate twice is the
+  // same workload, exactly like a repeated model assignment.
+  after.scope!.gates.observed.push(after.scope!.gates.observed[0]!)
   expect(compareEfficiency(before, after)).toEqual({ kind: 'matched' })
+  expect(compareEfficiency(after, before)).toEqual({ kind: 'matched' })
   // Unknown scripted usage remains unknown even when the workloads match.
   expect(after.usage).toEqual({ tokens: null, cost: null, source: 'scripted-provider-no-usage' })
 })
 
-test.each(['fixture', 'task', 'gates', 'suite', 'intermediate', 'rounds', 'merge', 'role', 'seat', 'provider', 'requested', 'resolved', 'placement', 'scenario', 'missing', 'empty-gates', 'empty-models'] as const)(
+test.each(['fixture', 'task', 'gates', 'duplicate-gate', 'suite', 'intermediate', 'rounds', 'merge', 'role', 'seat', 'provider', 'requested', 'resolved', 'placement', 'scenario', 'missing', 'empty-gates', 'empty-models'] as const)(
   'benchmark reports unmatched scope without claiming a saving: %s', change => {
     const before = report('fresh'), after = structuredClone(before)
     const scope = after.scope!
     if (change === 'fixture') scope.fixture = 'direct-orchestration-other-contract'
     else if (change === 'task') scope.task += ' and another task'
     else if (change === 'gates') scope.gates.observed.pop()
+    // Same observation count, but a repeated gate stands in for a missing one.
+    else if (change === 'duplicate-gate') scope.gates.observed[1] = scope.gates.observed[0]!
     else if (change === 'suite') scope.gates.suite_strategy = 'subset'
     else if (change === 'intermediate') scope.gates.intermediate_strategy = 'subset'
     else if (change === 'rounds') scope.gates.max_rounds++
@@ -82,7 +88,7 @@ test.each(['fixture', 'task', 'gates', 'suite', 'intermediate', 'rounds', 'merge
     else if (change === 'empty-models') scope.models = []
     else scope.models[0]![change] = 'changed'
     const reason = change === 'fixture' ? 'scripted fixture' : change === 'task' || change === 'scenario' ? change
-      : change === 'missing' ? 'missing scope' : ['gates', 'suite', 'intermediate', 'rounds', 'merge', 'empty-gates'].includes(change) ? 'gates' : 'models'
+      : change === 'missing' ? 'missing scope' : ['gates', 'duplicate-gate', 'suite', 'intermediate', 'rounds', 'merge', 'empty-gates'].includes(change) ? 'gates' : 'models'
     expect(compareEfficiency(before, after)).toEqual({ kind: 'unmatched', reasons: [reason] })
     expect(compareEfficiency(after, before)).toEqual({ kind: 'unmatched', reasons: [reason] })
     expect(compareEfficiency(before, structuredClone(before))).toEqual({ kind: 'matched' })
