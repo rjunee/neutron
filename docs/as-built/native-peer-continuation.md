@@ -35,7 +35,19 @@ bypass, conflicting-peer bypass, orphaned cancelled queue entry, absent recovery
 binding, and stale-authority binding. The signed consumer submits once to the
 same child and reconciles its exact native invocation without another input.
 
-The complete shared-host gate, exact publication-head CI and live adapter proof
-are pending. Focused fixtures do not establish deployed quota recovery or the
-remaining unattended task-sequence acceptance. No Trident-owned candidate was
-edited or manually merged for this correction.
+A live ephemeral turn through `createClaudeCodeSubstrateAuto` on the retained Bun
+host and registered native relay returned its exact requested marker at 04:54 UTC
+using the candidate runtime from `ffa3ee76dc08f5c4ed9da5cf126c3e3383548c6a`.
+The native aggregate reported 97 output tokens and 5,167 cache-creation input
+tokens; provider-message deduplication was unavailable for that proof. This proves
+the adapter turn, not same-child quota continuation in production. An initial
+probe was refused locally before spawn because its sink port requested an
+unsupported ephemeral port; the successful probe used a separate fixed port.
+
+The first canonical shared-host gate passed lint but found the peer test helper's
+inferred session type lacked `acquireTurn`; it stopped before the full suite.
+The helper now accepts the actual `ReplSession` fixture, and the runtime typecheck
+passes. Production code is unchanged by that correction. The complete shared-host
+gate and exact publication-head CI remain pending. Focused fixtures do not
+establish deployed quota recovery or the remaining unattended task-sequence
+acceptance. No Trident-owned candidate was edited or manually merged.

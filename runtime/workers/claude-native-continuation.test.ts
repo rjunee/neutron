@@ -110,7 +110,7 @@ async function fixture(profile: 'valid' | 'missing' | 'unavailable' | 'foreign' 
     cleanup.push(async () => completeNativeChildWorkspace(workspace))
     return { ...options, session: restored, workspace }
   }
-  const addPeer = async (input = options, conflict = false) => {
+  const addPeer = async (input: { session: ReplSession } = { session }, conflict = false) => {
     const peerCwd = conflict ? cwd : join(dir, 'peer'), peerGit = conflict ? gitDir : join(common, 'peer')
     await Promise.all([peerCwd, peerGit].map(path => mkdir(path, { recursive: true })))
     const peerRequest = { ...request, run_id: 'peer', step_id: 'build:peer', cwd: peerCwd,
