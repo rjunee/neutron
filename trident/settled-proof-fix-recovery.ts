@@ -108,7 +108,10 @@ export function settledProofFixRecovery(store: TridentRunStore, run: TridentRun,
     const worker = (role: 'plan' | 'build' | 'review' | 'fix', recovery: Recovery) => {
       const request = recovery.request
       const closedPlanner = role === 'plan' && request.tools === 'edit'
-      const version = role === 'plan' ? closedPlanner ? 'v5' : 'v4' : 'v3'
+      const version = closedPlanner
+        ? ['v5', 'v6'].find(value => request.brief.path === join(root, `plan.strategy-${value}.brief.plan.host`))
+        : role === 'plan' ? 'v4' : 'v3'
+      if (version === undefined) return null
       if (closedPlanner && (request.network !== false || fix.inputs.workers[role]?.provider !== 'anthropic')) return null
       const row = attempt(request, recovery.snapshot.head)
       const prefix = new Map([['anthropic', 'claude'], ['openai-codex', 'codex'], ['pi', 'pi']]).get(row?.provider ?? '')

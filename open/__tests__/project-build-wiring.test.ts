@@ -704,6 +704,10 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
     const contract = [f.input.run.task, builder
       ? 'Follow the TEST EXECUTION instructions in the host context `testStrategy`. The host selects `suiteScope`: `full-suite` requires the worker full suite for a wave member; `subset` defers it for an intermediate task; `host-suite` leaves the full suite to host review after worker stage 1. Never infer scope from the task number or an earlier task.' : '',
       `Perform the ${role} role.`,
+      ...(role === 'plan' ? [
+      'CLOSED PLANNER RESULT. Use planner_work with operation "publish". Pass only the plan object as payload, satisfying the plan contract below. The host measures head, diff and pr, supplies schema/run_id/step_id/kind, and writes the result atomically. Do not wrap payload in an envelope or snapshot, and do not write the result file yourself.',
+      'When blocked, publish a non-empty blocked reason instead of payload. Report what stopped you rather than inventing a result.',
+      ] : [
       'Write your result file as a JSON object with EXACTLY these five fields:',
       '  "schema", "run_id", "step_id"  — copy each verbatim from the host context: `request.result.schema`, `request.run_id`, `request.step_id`. Do not invent or reformat them.',
       '  "kind"   — "completed" when you finished the role, or "blocked" when you could not.',
@@ -711,13 +715,14 @@ for (const role of ['plan', 'build', 'review', 'fix'] as const) {
       'When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a result; a fabricated result is worse than a stopped run.',
       'The completed result must satisfy this outer snapshot contract. Copy `snapshot.pr` from the host context unchanged: null or { "number": positive integer, "head": string, "state": "OPEN" | "CLOSED" | "MERGED" }. Never replace it with a number or URL. The forge payload field `result.payload.prNumber` is separately a number or null; it does not replace `result.pr`. Measure head and diff for the resulting revision; the host independently checks the claim.',
       JSON.stringify(PROJECT_SNAPSHOT_SCHEMA),
-      `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
+      `\`result.payload\` must satisfy the ${role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
+      ]),
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
       ...(role === 'plan' ? ['PLANNING WORK. Produce evidence-backed executable instructions. Before a probe, name the specific planning uncertainty it resolves and use the smallest relevant check. Leave candidate implementation, acceptance validation, mutation trials and gate diagnosis to the builder unless a targeted probe is necessary to resolve that uncertainty. Do not build and validate a complete trial candidate, then discard or reset it solely for the builder to repeat. Planning remains writable: preserve useful preparatory changes, measure and report their resulting head and diff honestly, and describe the work remaining for the builder. A changed input still requires the affected builder validation and host proof; a planning probe does not replace either. Capture complete probe output to a log once and inspect that log; do not rerun an unchanged check merely because earlier output was filtered or truncated.'] : []),
       ...(builder ? ['EXECUTION SCOPE. Read the host context `executionStrategy` and validated plan in `previous`. For `single`, implement the WHOLE accepted plan and executionSpec. For `task_sequence`, implement only the host-selected `topTask` and its executionSpec; leave later tasks to later calls. Never select a strategy or task yourself. A fix addresses the host-provided findings without changing strategy. A wave member implements only its host-pinned task.'] : []),
       ...(builder ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), options.production.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
-      'Never publish or merge; the host owns those actions.',
+      role === 'plan' ? 'Never publish a branch or merge; the host owns repository publication.' : 'Never publish or merge; the host owns those actions.',
     ].join('\n\n')
     const guidance = `\n\n<owner_reflection>\n${REFLECTION_GUIDANCE_FRAMING}\n${correction}\n</owner_reflection>`
     // Exact equality preserves the result contract and builder-only context reference.
@@ -780,10 +785,9 @@ test('the plan brief states the task ledger shape and the planner "next" duty', 
 // stopped the third acceptance dispatch, after it had already got past admission,
 // spawned its REPL and dispatched the plan turn.
 //
-// The ids cannot be baked into the brief: `step_id` is per role AND round
-// (`trident/build-run.ts:278`) while the brief is written once at prepare time. So the
-// brief must point at the per-dispatch host context, and this test pins that it does.
-test('every role brief names the envelope fields the decoder actually requires', async () => {
+// File writers copy per-dispatch IDs; the closed planner's host tool supplies
+// them. Neither worker instruction may omit its supported blocked outcome.
+test('every role brief identifies the owner of its result envelope', async () => {
   const f = await fixture()
   const options = await f.prepare()
   for (const role of ['plan', 'build', 'review', 'fix'] as const) {
@@ -792,8 +796,13 @@ test('every role brief names the envelope fields the decoder actually requires',
     for (const field of ['schema', 'run_id', 'step_id']) {
       expect(brief, `${role} brief must name ${field}`).toContain(field)
     }
-    // ...and where to get values that are correct for THIS dispatch.
-    expect(brief, `${role} brief must point at the host context`).toContain('request.step_id')
+    if (role === 'plan') {
+      expect(brief).toContain('The host measures head, diff and pr, supplies schema/run_id/step_id/kind')
+      expect(brief).toContain('Pass only the plan object as payload')
+      expect(brief).not.toContain('Write your result file')
+    } else {
+      expect(brief, `${role} brief must point at the host context`).toContain('request.step_id')
+    }
     // The blocked path must be reachable, or a stuck worker invents a result.
     expect(brief, `${role} brief must offer blocked`).toContain('blocked')
   }

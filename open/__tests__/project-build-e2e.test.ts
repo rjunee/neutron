@@ -124,7 +124,7 @@ import { spawnCapture as captureProcess, type HostCommandResult } from '@neutron
 import { runHostSuite } from '@neutronai/trident/host-suite.ts'
 import { buildTestStrategyDetail } from '@neutronai/trident/test-strategy.ts'
 import { gitRangeArgv } from '@neutronai/trident/git-range.ts'
-import { VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
+import { PLAN_SCHEMA, VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { taskLedgerPath, workContextPath } from '@neutronai/trident/production-host-effects.ts'
 import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
 import { buildReflectionGuidance } from '@neutronai/trident/reflection-guidance.ts'
@@ -605,9 +605,13 @@ function literalWorker(world: WorkerWorld) {
     // Write ONLY what the brief asked for. See `envelopeFieldsNamedBy`. A blocked
     // answer OMITS `result` and ADDS `on`, exactly as the brief words it.
     const named = envelopeFieldsNamedBy(brief)
+    const closedPublication = requiresPlannerWork(request) && brief.includes('CLOSED PLANNER RESULT.')
     const envelope: Record<string, unknown> = { schema: request.result.schema, run_id: request.run_id,
-      step_id: request.step_id, kind: stopped ? 'blocked' : 'completed', result: inner }
-    const body = named.size === 0 ? inner : {
+      step_id: request.step_id, kind: stopped ? 'blocked' : 'completed', result: inner,
+      ...(stopped ? { on: `harness: the ${request.role} worker was stopped mid-turn` } : {}) }
+    // Model the host-owned envelope only when the closed planner brief names
+    // that boundary. The real tool path below still validates and measures it.
+    const body = closedPublication ? envelope : named.size === 0 ? inner : {
       ...Object.fromEntries([...named].filter(field => !(stopped && field === 'result'))
         .map(field => [field, envelope[field]])),
       ...(stopped ? { on: `harness: the ${request.role} worker was stopped mid-turn` } : {}),
@@ -620,7 +624,7 @@ function literalWorker(world: WorkerWorld) {
       expect(args.subagent_type).toBe(PLANNER_ROLE)
       const tokenLine = String(args.prompt).split('\n').find(row => row.startsWith('Planner capability (secret; pass only to planner_work): '))
       expect(tokenLine).toBeDefined()
-      await world.plannerOperation(request, tokenLine!.split(': ').at(-1)!, (inner as { payload: unknown }).payload)
+      await world.plannerOperation(request, tokenLine!.split(': ').at(-1)!, closedPublication ? (inner as { payload: unknown }).payload : body)
       return
     }
     await writeFile(`${request.result.path}.tmp`, JSON.stringify(body), { mode: 0o600 })
@@ -1828,12 +1832,19 @@ test('native planner consumes its closed host capability while builder retains c
     const briefPage = await call('read', { resource: 'brief' }) as { content: string }
     expect(briefPage.content.length).toBeGreaterThan(0)
     expect(briefPage.content).toBe((await readFile(request.brief.path, 'utf8')).slice(0, briefPage.content.length))
+    expect(briefPage.content).toContain('Pass only the plan object as payload')
+    expect(briefPage.content).not.toContain('Write your result file as a JSON object')
     await expect(call('exec', { command: 'bun test open/__tests__/project-build-e2e.test.ts' })).rejects.toThrow('Unsupported')
     await expect(call('probe', { path: 'preparation.ts', kind: 'syntax', uncertainty: 'syntax', command: 'tsc -p tsconfig.json' })).rejects.toThrow('Unsupported')
     await expect(call('read', { path: '../state/another-plan' })).rejects.toThrow('scope')
     await call('write', { path: 'preparation.ts', content: 'export const prepared: number = 42\n' })
     expect(await call('probe', { path: 'preparation.ts', kind: 'syntax', uncertainty: 'Does this proposed declaration parse?' })).toMatchObject({ ok: true })
     expect(await call('state')).toMatchObject({ head: f.baseSha, preparation: { count: 1 } })
+    const wrapped = { head: f.baseSha, diff: '', pr: null, payload }
+    await expect(call('publish', { payload: wrapped })).rejects.toThrow('contract')
+    await expect(call('publish', { payload: { schema: request.result.schema, run_id: request.run_id,
+      step_id: request.step_id, kind: 'completed', result: wrapped } })).rejects.toThrow('contract')
+    await expect(readFile(request.result.path, 'utf8')).rejects.toThrow('ENOENT')
     expect(await call('publish', { payload })).toMatchObject({ published: true })
     inspected = true
   }
@@ -1851,10 +1862,10 @@ test('native planner consumes its closed host capability while builder retains c
   expect(f.world.builderObservations[0]?.previous).toMatchObject({ executionSpec: expect.stringContaining('Host-observed uncommitted preparation') })
 })
 
-test.each([2, 3, 4])('a bare legacy v%s planner brief cannot authorize a fresh unrestricted planner', async version => {
+test.each([2, 3, 4, 5])('a bare legacy v%s planner brief cannot authorize a fresh unrestricted planner', async version => {
   const f = await fixture()
   const current = (await f.prepare()).workers.plan.request
-  const legacy = current.brief.path.replace('strategy-v5', `strategy-v${version}`)
+  const legacy = current.brief.path.replace('strategy-v6', `strategy-v${version}`)
   const bytes = await readFile(current.brief.path, 'utf8')
   await writeFile(legacy, bytes)
   const prepared = await f.prepare()
@@ -2965,10 +2976,31 @@ function historicalPlannerTransport(f: Awaited<ReturnType<typeof fixture>>, opti
   else options.substrate.headless.anthropic = wrapper
 }
 
+/** Reconstruct the admitted pre-v6 file-publication instructions, independent
+ * of the current producer. These historical bytes must remain recoverable. */
+function historicalPlannerBrief(current: string): string {
+  const start = current.indexOf('\n\nCLOSED PLANNER RESULT.')
+  const end = current.indexOf('\n\n' + JSON.stringify(PLAN_SCHEMA), start)
+  expect(start).toBeGreaterThan(0)
+  expect(end).toBeGreaterThan(start)
+  const publication = [
+    'Write your result file as a JSON object with EXACTLY these five fields:',
+    '  "schema", "run_id", "step_id"  — copy each verbatim from the host context: `request.result.schema`, `request.run_id`, `request.step_id`. Do not invent or reformat them.',
+    '  "kind"   — "completed" when you finished the role, or "blocked" when you could not.',
+    '  "result" — when completed: { head, diff, pr, payload }. Omit when blocked.',
+    'When blocked, add "on": a non-empty sentence saying what stopped you. Report blocked rather than inventing a result; a fabricated result is worse than a stopped run.',
+    'The completed result must satisfy this outer snapshot contract. Copy `snapshot.pr` from the host context unchanged: null or { "number": positive integer, "head": string, "state": "OPEN" | "CLOSED" | "MERGED" }. Never replace it with a number or URL. The forge payload field `result.payload.prNumber` is separately a number or null; it does not replace `result.pr`. Measure head and diff for the resulting revision; the host independently checks the claim.',
+    JSON.stringify(PROJECT_SNAPSHOT_SCHEMA),
+    '`result.payload` must satisfy the plan trailer contract below. Read the host context for the measured snapshot.',
+  ].join('\n\n')
+  return (current.slice(0, start) + '\n\n' + publication + current.slice(end))
+    .replace('Never publish a branch or merge; the host owns repository publication.', 'Never publish or merge; the host owns those actions.')
+}
+
 async function historicalV4Planner(f: Awaited<ReturnType<typeof fixture>>, options: Awaited<ReturnType<typeof f.prepare>>, onDispatch = () => {}) {
   const worker = options.workers.plan
-  const path = worker.request.brief.path.replace('strategy-v5', 'strategy-v4')
-  const brief = await readFile(worker.request.brief.path, 'utf8')
+  const path = worker.request.brief.path.replace('strategy-v6', 'strategy-v4')
+  const brief = historicalPlannerBrief(await readFile(worker.request.brief.path, 'utf8'))
   await writeFile(path, brief)
   worker.request = { ...worker.request, tools: 'edit-and-run', network: true, brief: { path, integrity: briefIntegrity(brief) } }
   historicalPlannerTransport(f, options, onDispatch)
@@ -3488,7 +3520,8 @@ test('v2 pending builder reconstruction preserves every brief and its later fix 
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.strategy-v2.brief`)
-    const brief = (await readFile(worker.request.brief.path, 'utf8')).replace(/\n\nPLANNING WORK\.[^\n]*/, '').replace(
+    const current = await readFile(worker.request.brief.path, 'utf8')
+    const brief = (role === 'plan' ? historicalPlannerBrief(current) : current).replace(/\n\nPLANNING WORK\.[^\n]*/, '').replace(
       'The host selects `suiteScope`: `full-suite` requires the worker full suite for a wave member; `subset` defers it for an intermediate task; `host-suite` leaves the full suite to host review after worker stage 1.',
       'The host selects `suiteScope` after validating this task: `full-suite` requires the full suite; only `subset` defers it for an intermediate task.')
     await writeFile(path, brief)
@@ -3532,7 +3565,7 @@ async function legacyV2LostBuildAck(f: Awaited<ReturnType<typeof fixture>>, comm
   const prepared = await f.prepare()
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const current = await readFile(worker.request.brief.path, 'utf8')
-    let brief = current.replace(/\n\nPLANNING WORK\.[^\n]*/, '').replace(CURRENT_SUITE_SCOPE, LEGACY_SUITE_SCOPE)
+    let brief = (role === 'plan' ? historicalPlannerBrief(current) : current).replace(/\n\nPLANNING WORK\.[^\n]*/, '').replace(CURRENT_SUITE_SCOPE, LEGACY_SUITE_SCOPE)
     // Before #1238 the v2 builder brief carried no commit-wrapper paragraph.
     if (!commitWrapper) brief = brief.replace(/\n\nCommit only through the host wrapper[^\n]*/, '')
     expect(brief !== current).toBe(role !== 'review')
@@ -4699,11 +4732,11 @@ test(`base drift refresh retains terminal task work and renews release evidence:
   expect(changed).not.toContain('upstream.ts')
 }, 120_000)
 
-for (const retryCase of ['healthy', 'legacy-v4', 'still-red', 'ceiling', 'model', 'policy', 'brief'] as const)
+for (const retryCase of ['healthy', 'legacy-v4', 'legacy-v5', 'unknown-plan-version', 'still-red', 'ceiling', 'model', 'policy', 'brief'] as const)
 test(`settled proof-only fix retry retains the candidate but buys fresh proof and review: ${retryCase}`, async () => {
   const task = 'Record a note and verify the completed candidate with the required regression suite'
   const f = await fixture({ dispatchTask: task, suiteExit: 1, maxRounds: 3 })
-  const healthy = retryCase === 'healthy' || retryCase === 'legacy-v4'
+  const healthy = retryCase === 'healthy' || retryCase === 'legacy-v4' || retryCase === 'legacy-v5'
   if (healthy) f.world.mutationArgv = 'valid'
   if (retryCase === 'legacy-v4') {
     const prepare = f.prepare
@@ -4711,6 +4744,23 @@ test(`settled proof-only fix retry retains the candidate but buys fresh proof an
     f.prepare = async () => {
       const prepared = await prepare()
       return dispatched ? prepared : historicalV4Planner(f, prepared, () => { dispatched = true })
+    }
+  }
+  if (retryCase === 'legacy-v5' || retryCase === 'unknown-plan-version') {
+    const prepare = f.prepare
+    let first = true
+    f.prepare = async () => {
+      const prepared = await prepare()
+      if (!first) return prepared
+      first = false
+      const worker = prepared.workers.plan
+      const path = worker.request.brief.path.replace('strategy-v6', retryCase === 'legacy-v5' ? 'strategy-v5' : 'strategy-v7')
+      const current = await readFile(worker.request.brief.path, 'utf8')
+      const brief = retryCase === 'legacy-v5' ? historicalPlannerBrief(current) : current
+      await writeFile(path, brief)
+      worker.request = { ...worker.request, brief: { path, integrity: briefIntegrity(brief) } }
+      expect(worker.request).toMatchObject({ tools: 'edit', network: false })
+      return prepared
     }
   }
   f.world.unchangedFix = true
@@ -4735,6 +4785,11 @@ test(`settled proof-only fix retry retains the candidate but buys fresh proof an
     failure_reason: first.kind === 'failed' ? first.detail : 'Unexpected fixture outcome' })
   const prior = f.store.get(f.row.id)!
   const source = retryModeSource(f.store, prior)
+  if (retryCase === 'unknown-plan-version') {
+    expect(source).toBeNull()
+    expect(f.store.stageEvents(prior.id)).toEqual(originalEvents)
+    return
+  }
   expect(source?.state.checkpoint).toMatchObject({ stage: 'built', head: original.head, round: 2,
     previousReview: original.previousReview, findings: original.findings })
   expect(source?.state.checkpoint.pending).toBeUndefined()
@@ -7219,17 +7274,18 @@ test('legacy v4 planner retains its original writable grant and useful committed
   expect(await gitOut(f.world.run, f.origin, ['show', 'refs/heads/main:NOTES.md'])).toContain(`${f.row.id}:build:0`)
 }, 60_000)
 
-for (const version of [3, 4]) test.each(['unchanged', 'changed task', 'changed planner contract', 'missing reservation', 'foreign reservation'] as const)(`planner work boundary preserves immutable v${version} planner inputs: %s`, async scenario => {
+for (const version of [3, 4, 5]) test.each(['unchanged', 'changed task', 'changed planner contract', 'missing reservation', 'foreign reservation'] as const)(`planner work boundary preserves immutable v${version} planner inputs: %s`, async scenario => {
   const f = await fixture()
   const prepared = await f.prepare()
   const worker = prepared.workers.plan
-  expect(worker.request.brief.path).toEndWith('plan.strategy-v5.brief')
+  expect(worker.request.brief.path).toEndWith('plan.strategy-v6.brief')
   const current = await readFile(worker.request.brief.path, 'utf8')
-  const old = version === 3 ? current.replace(/\n\nPLANNING WORK\.[^\n]*/, '') : current
-  if (version === 3) expect(old).not.toBe(current)
+  const historical = historicalPlannerBrief(current)
+  const old = version === 3 ? historical.replace(/\n\nPLANNING WORK\.[^\n]*/, '') : historical
+  expect(old).not.toBe(current)
   const priorPath = join(f.context.stateRoot, f.row.id, `plan.strategy-v${version}.brief`)
   await writeFile(priorPath, old)
-  worker.request = { ...worker.request, tools: 'edit-and-run', network: true, brief: { path: priorPath, integrity: briefIntegrity(old) } }
+  worker.request = { ...worker.request, tools: version === 5 ? 'edit' : 'edit-and-run', network: version !== 5, brief: { path: priorPath, integrity: briefIntegrity(old) } }
   historicalPlannerTransport(f, prepared)
   const first = await createProjectBuildHost(prepared)
   const runner = first.workers.plan.runner
@@ -7244,7 +7300,8 @@ for (const version of [3, 4]) test.each(['unchanged', 'changed task', 'changed p
     const reservation = join(f.context.stateRoot, f.row.id, `claude-step-${hash}.json`)
     const original = await readFile(reservation, 'utf8')
     if (scenario === 'missing reservation') await rm(reservation)
-    else await writeFile(reservation, original.replace('"tools":"edit-and-run"', '"tools":"edit"'))
+    else await writeFile(reservation, version === 5 ? original.replace('"tools":"edit"', '"tools":"edit-and-run"')
+      : original.replace('"tools":"edit-and-run"', '"tools":"edit"'))
     const unknown = await createProjectBuildHost(await f.prepare())
     expect(await unknown.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)).toMatchObject({ kind: 'unknown', phase: 'plan' })
     expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
@@ -7256,18 +7313,18 @@ for (const version of [3, 4]) test.each(['unchanged', 'changed task', 'changed p
       f.db.raw().query('UPDATE code_trident_runs SET task = ? WHERE id = ?').run('Different planning inputs', f.row.id)
       f.input.run = f.store.get(f.row.id)!
     } else await writeFile(priorPath, retained)
-    await expect(f.prepare()).rejects.toThrow(version === 3 ? 'Stored v3 planner brief does not match current inputs' : 'Stored v4 planner inputs changed')
+    await expect(f.prepare()).rejects.toThrow(version === 3 ? 'Stored v3 planner brief does not match current inputs' : `Stored v${version} planner inputs changed`)
   } else {
     const recovered = await createProjectBuildHost(await f.prepare())
     expect(recovered.workers.plan.request).toEqual(first.workers.plan.request)
     expect((await recovered.run({ mode: 'implementation', start: 'resume' }, new AbortController().signal)).kind).toBe('merged')
   }
   expect(await readFile(priorPath, 'utf8')).toBe(retained)
-  expect(await readFile(worker.request.brief.path.replace(`strategy-v${version}`, 'strategy-v5'), 'utf8')).toBe(current)
+  expect(await readFile(worker.request.brief.path.replace(`strategy-v${version}`, 'strategy-v6'), 'utf8')).toBe(current)
   expect(f.world.dispatches.filter(call => call.role === 'plan')).toHaveLength(1)
 }, 60_000)
 
-test('every dispatched brief states the envelope the decoder requires', async () => {
+test('every dispatched brief states its worker or host publication boundary', async () => {
   const f = await fixture()
   const options = await f.prepare()
   for (const role of ['plan', 'build', 'review', 'fix'] as const) {
@@ -7276,6 +7333,14 @@ test('every dispatched brief states the envelope the decoder requires', async ()
     // worker that writes exactly what the brief names must produce something the
     // decoder accepts. Reverting the brief to "Return a result object with head,
     // diff, pr and payload" empties this set and this assertion fails first.
+    if (role === 'plan') {
+      expect([...envelopeFieldsNamedBy(brief)]).toEqual([])
+      expect(brief).toContain('Pass only the plan object as payload')
+      expect(brief).not.toContain('Write your result file as a JSON object')
+      expect(brief).not.toContain(JSON.stringify(PROJECT_SNAPSHOT_SCHEMA))
+      expect(brief).toContain(JSON.stringify(PLAN_SCHEMA))
+      continue
+    }
     expect([...envelopeFieldsNamedBy(brief)].sort(), `${role} brief`).toEqual([...ENVELOPE_FIELDS].sort())
     const schemas = brief.split('\n\n').filter(part => part.startsWith('{"type":"object"')).map(part => JSON.parse(part))
     expect(schemas, `${role} outer snapshot contract`).toContainEqual(PROJECT_SNAPSHOT_SCHEMA)
@@ -9237,7 +9302,7 @@ test(`historical pending ${strategy} planner recovers its original schema and re
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
     const currentBrief = await readFile(worker.request.brief.path, 'utf8')
-    const originalBrief = currentBrief.replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    const originalBrief = (role === 'plan' ? historicalPlannerBrief(currentBrief) : currentBrief).replace(/\n\nPLANNING WORK\.[^\n]*/, '')
     if (role === 'plan') expect(originalBrief).not.toBe(currentBrief)
     await writeFile(path, originalBrief)
     worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path },
@@ -9293,7 +9358,7 @@ test(`historical pending ${strategy} builder recovers only with ${source} proven
   for (const [role, worker] of Object.entries(prepared.workers)) {
     const path = join(f.context.stateRoot, f.row.id, `${role}.brief`)
     const currentBrief = await readFile(worker.request.brief.path, 'utf8')
-    const originalBrief = currentBrief.replace(/\n\nPLANNING WORK\.[^\n]*/, '')
+    const originalBrief = (role === 'plan' ? historicalPlannerBrief(currentBrief) : currentBrief).replace(/\n\nPLANNING WORK\.[^\n]*/, '')
     if (role === 'plan') expect(originalBrief).not.toBe(currentBrief)
     await writeFile(path, originalBrief)
     worker.request = { ...worker.request, brief: { integrity: briefIntegrity(originalBrief), path },

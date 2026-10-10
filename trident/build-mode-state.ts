@@ -279,7 +279,10 @@ function completedBuildBindings(store: TridentRunStore, run: TridentRun, build: 
       const worker = bindings.workers[role]
       if (!worker) return null
       const closedPlanner = role === 'plan' && worker.request.tools === 'edit'
-      const version = role === 'plan' ? closedPlanner ? 'v5' : 'v4' : 'v3'
+      const version = closedPlanner
+        ? ['v5', 'v6'].find(value => worker.request.brief.path === join(root, `plan.strategy-${value}.brief.plan.host`))
+        : role === 'plan' ? 'v4' : 'v3'
+      if (version === undefined) return null
       if (closedPlanner && (worker.provider !== 'anthropic' || worker.request.network !== false || worker.request.writable !== true)) return null
       const brief = evidence.read(join(root, `${role}.strategy-${version}.brief`))
       const hosted = evidence.read(worker.request.brief.path)
