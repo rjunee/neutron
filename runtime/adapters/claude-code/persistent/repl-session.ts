@@ -577,14 +577,14 @@ export class ReplSession {
 
   private readonly backgroundChildren = new Map<Promise<void>, NativeChildWorkspace | undefined>()
 
-  /** Preparation may retain only the exact request's positively bound background
+  /** Preparation may retain only the exact requests' positively bound background
    * slots. Unknown readers, another request, queued input and active submission
    * remain busy. Completion still requires zero slots after authority drain. */
-  hasOnlyQuarantineRequest(request: BoundedWorkRequest): boolean {
+  hasOnlyQuarantineRequests(requests: readonly BoundedWorkRequest[]): boolean {
     return this.activeTurn === undefined && !this.parentSlotActive && this.parentQueue.length === 0
       && this.turnSlotHeld === this.backgroundChildren.size
       && [...this.backgroundChildren.values()].every(workspace =>
-        workspace !== undefined && ownsNativeChildWorkspace(workspace, this, request))
+        workspace !== undefined && requests.some(request => ownsNativeChildWorkspace(workspace, this, request)))
   }
 
   private assertConversationAvailable(): void {

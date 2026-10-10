@@ -1,3 +1,4 @@
+import { completedNativeParentTermination, prepareNativeParentTermination, consumeNativeParentTermination } from './wiring/native-parent-termination.ts'
 import { completedConversationQuarantine } from './wiring/never-admitted-planner-retirement.ts'
 import { publishedRetrySettlement } from './wiring/published-retry-settlement.ts'
 import { createProjectLauncher } from '@neutronai/trident/project-launcher.ts'
@@ -1299,7 +1300,8 @@ export function buildOpenGraphComposer(
     const ownerTopicRoots = [webTopicId(OWNER_USER_ID), appWsTopicId(OWNER_USER_ID)]
     const projectScopeLifecycle = createProjectScopeLifecycle({
       admission: projectAdmission,
-      completedConversationQuarantine: (scope, sessionId) => completedConversationQuarantine(
+      completedConversationQuarantine: (scope, sessionId) => completedNativeParentTermination(
+        { authority: options.nativeHostRecoveryAuthority, admission: projectAdmission }, scope, sessionId) ?? completedConversationQuarantine(
         { authority: options.nativeHostRecoveryAuthority, admission: projectAdmission }, scope, sessionId),
       isConversationQuarantined: sessionId => projectAdmission.maintenance.isConversationQuarantined(sessionId),
       liveness: () => livenessHolder.surface,
@@ -4441,7 +4443,15 @@ export function buildOpenGraphComposer(
     // path comes from the same derivation the supervised substrate uses, while
     // the per-boot app token keeps this force-respawn endpoint privileged.
     const replRegistryPath = deriveReplSupervisionPaths(owner_home).replRegistryPath
+    const parentTerminationOptions = {
+      authority: options.nativeHostRecoveryAuthority, stateRoot: projectBuildStateRoot, admission: projectAdmission,
+      runs: new TridentRunStore(db), attempts: new TridentAttemptLedger(db),
+      projectIdForRun: (run: { project_slug: string }) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? null,
+      listProjectIds,
+    }
     const adminRespawnSurface = createAdminRespawnSurface({
+      prepareNativeParentTermination: raw => prepareNativeParentTermination(parentTerminationOptions, raw),
+      consumeNativeParentTermination: raw => consumeNativeParentTermination(parentTerminationOptions, raw),
       preparePlannerConversationQuarantine: async raw => {
         const { prepareNeverAdmittedPlanner } = await import('./wiring/never-admitted-planner-retirement.ts')
         return prepareNeverAdmittedPlanner({ authority: options.nativeHostRecoveryAuthority,

@@ -244,7 +244,7 @@ test('asleep history is readable but excluded from automatic wake only after dur
   expect(getRecord(f.options.replRegistryPath!, f.key)?.sessionId).toBe(f.row.sessionId)
 })
 
-test('preparation accounts for only its exact retained workspace; detach waits for authority drain', async () => {
+for (const mode of ['drain', 'terminate'] as const) test(`preparation accounts for exact retained workspaces before ${mode}`, async () => {
   const f = fixture()
   upsertRecord(f.options.replRegistryPath!, f.row)
   const session = new ReplSession(f.key, f.parent.childGeneration, f.parent.sessionId, f.row.channelName, f.dir)
@@ -262,22 +262,41 @@ test('preparation accounts for only its exact retained workspace; detach waits f
     brief: { path: join(f.dir, 'brief'), integrity: 'digest' }, result: { path: join(f.dir, 'result'), schema: 'fixture-result' },
     thread: null, budget: { wall_ms: 1000 }, needs_approval_decision: false }
   const other = { ...request, run_id: 'other-run' }
+  const requests = [request, other]
   const common = join(f.dir, 'git-common'), directory = join(common, 'linked')
   mkdirSync(directory, { recursive: true })
   const workspace = async (request: BoundedWorkRequest) => admitNativeChildWorkspace({ session, request,
     runId: request.run_id, worktree: request.cwd, branch: 'work', generation: 0,
-    pending: () => [request, other].map(r => ({ runId: r.run_id, stepId: r.step_id, generation: 0 })),
+    pending: () => requests.map(r => ({ runId: r.run_id, stepId: r.step_id, generation: 0 })),
     git: async args => args[0] === 'symbolic-ref' ? 'refs/heads/work' : args.includes('--show-toplevel') ? f.dir
       : args.includes('--absolute-git-dir') ? directory : common })
   const own = await workspace(request)
+  const foreign = mode === 'terminate' ? await workspace(other) : undefined
+  if (foreign) (await session.acquireTurn(undefined, foreign))()
   const releaseOwn = await session.acquireTurn(undefined, own)
   releaseOwn() // Original dispatch ended ambiguously; its busy slot remains held.
-  expect(session.turnSlotHeld).toBe(1)
+  expect(session.turnSlotHeld).toBe(mode === 'terminate' ? 2 : 1)
+  if (mode === 'terminate') {
+    expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, { ...f.identity, requests: [request] })).toBe(false)
+    expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, { ...f.identity, requests: [request, other] })).toBe(true)
+    const ordinary = await session.acquireTurn()
+    expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, { ...f.identity, requests: [request, other] })).toBe(false)
+    ordinary()
+    expect(quarantinePersistentConversation(f.parent, f.options.isConversationQuarantined!, { ...f.identity, requests: [request, other] })).toBe(false)
+    f.denied.add(f.parent.sessionId)
+    expect(quarantinePersistentConversation(f.parent, f.options.isConversationQuarantined!, { ...f.identity, requests: [request] })).toBe(false)
+    expect(quarantinePersistentConversation(f.parent, f.options.isConversationQuarantined!, { ...f.identity, requests: [request, other] })).toBe(true)
+    expect(pool.has(f.key)).toBe(false)
+    expect(session.turnSlotHeld).toBe(2)
+    expect(kills).toBe(0)
+    retireNativeChildWorkspaceRequest(session, request); retireNativeChildWorkspaceRequest(session, other)
+    return
+  }
   expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, f.identity)).toBe(false)
-  expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, { ...f.identity, request })).toBe(true)
-  expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, { ...f.identity, request: other })).toBe(false)
+  expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, { ...f.identity, requests: [request] })).toBe(true)
+  expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, { ...f.identity, requests: [other] })).toBe(false)
   const ordinaryRelease = await session.acquireTurn()
-  expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, { ...f.identity, request })).toBe(false)
+  expect(inspectConversationQuarantine(f.parent, f.options.isConversationQuarantined!, { ...f.identity, requests: [request] })).toBe(false)
   ordinaryRelease()
   f.denied.add(f.parent.sessionId)
   await expect(session.acquireTurn()).rejects.toThrow('quarantined')

@@ -40,6 +40,19 @@ function scopeKey(scope: ProjectAdmissionScope): string {
   return JSON.stringify([scope.ownerHandle, scope.projectId]);
 }
 
+function parentTerminationLeases(operationId: string, leases: readonly AdmissionLeaseRow[]): AdmissionLeaseRow[] | undefined {
+  if (!/^[a-f0-9-]{36}$/.test(operationId) || leases.length === 0 || leases.length > 64) return;
+  const rows = [...leases].sort((a, b) => a.token.localeCompare(b.token));
+  const first = rows[0]!;
+  if (new Set(rows.map(row => row.token)).size !== rows.length || new Set(rows.map(row => row.workRef)).size !== rows.length
+    || rows.some(row => row.reason !== 'liveChild' || row.generation !== first.generation
+      || !isDeepStrictEqual(row.scope, first.scope))) return;
+  return rows;
+}
+
+const parentTerminationOperation = (operationId: string, index: number): string =>
+  index === 0 ? operationId : `${operationId}:${index}`;
+
 /** Durable admission mechanics, NOT a native-child census or permission to
  * replace a parent. Production producers must all participate before maintenance
  * can be safe. No lease expiry, crash recovery, or quiet prompt implies idle.
@@ -116,6 +129,82 @@ export class ProjectAdmissionStore {
         (operation_id, scope_key, generation, lease_token, producer, work_ref) VALUES (?, ?, ?, ?, ?, ?)`,
       [operationId, key, row.generation, row.token, row.producer, row.workRef]);
       return true;
+    });
+  }
+
+  /** Reuse the durable work-retirement ledger (its historical SQL name is
+   * planner_authority_retirements). Typed consumers authenticate the distinct
+   * evidence kind; the store atomically fences the complete original parent. */
+  async prepareNativeParentTermination(operationId: string, leases: readonly AdmissionLeaseRow[], authorization: string,
+    sessionId: string, eligible: () => boolean): Promise<boolean> {
+    const rows = parentTerminationLeases(operationId, leases);
+    if (!rows || !authorization.trim() || !sessionId.trim()) return false;
+    const scope = rows[0]!.scope, key = scopeKey(scope);
+    return this.db.transaction(async tx => {
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      if (this.hasPreparedHostTermination(scope) || !this.matchesScopeLeases(scope, rows)
+        || !rows.every(row => this.plannerLeaseEligible(tx, row, eligible))) return false;
+      const prior = tx.get<{ session_id: string; operation_id: string; scope_key: string; authorization: string }>(
+        'SELECT * FROM native_conversation_quarantines WHERE session_id = ? OR operation_id = ?', [sessionId, operationId]);
+      if (prior) return prior.session_id === sessionId && prior.operation_id === operationId && prior.scope_key === key
+        && prior.authorization === authorization && this.operatorMaintenanceFor(scope, operationId) !== null
+        && rows.every((lease, index) => {
+          const saved = tx.get<PlannerRetirementDbRow>('SELECT *, lease_token AS token FROM planner_authority_retirements WHERE operation_id = ?',
+            [parentTerminationOperation(operationId, index)]);
+          return saved !== null && saved.completion === null && this.plannerRetirementMatches(saved, lease, authorization);
+        });
+      if (rows.some(row => this.isPlannerRetired(scope, row.workRef))) return false;
+      const hold = await this.holdOperatorMaintenanceInTransaction(tx, scope, operationId);
+      if (!hold) return false;
+      for (const [index, lease] of rows.entries()) tx.runSync(`INSERT INTO planner_authority_retirements
+        (operation_id, scope_key, generation, lease_token, reason, producer, work_ref, authorization)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, [parentTerminationOperation(operationId, index), key, lease.generation,
+        lease.token, lease.reason, lease.producer, lease.workRef, authorization]);
+      tx.runSync(`INSERT INTO native_conversation_quarantines (session_id, operation_id, scope_key, authorization)
+        VALUES (?, ?, ?, ?)`, [sessionId, operationId, key, authorization]);
+      return true;
+    });
+  }
+
+  /** Every original child closes in one commit with its physical exit proof.
+   * The permanent conversation/work fences survive reopening fresh admission. */
+  async consumeNativeParentTermination(operationId: string, leases: readonly AdmissionLeaseRow[], authorization: string,
+    sessionId: string, completion: string, eligible: () => boolean): Promise<PlannerRetirementConsumption> {
+    const rows = parentTerminationLeases(operationId, leases);
+    if (!rows || !authorization.trim() || !sessionId.trim() || !completion.trim()) return 'refused';
+    const scope = rows[0]!.scope, key = scopeKey(scope);
+    return this.db.transaction(async tx => {
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      const quarantine = tx.get('SELECT 1 FROM native_conversation_quarantines WHERE session_id = ? AND operation_id = ? AND scope_key = ? AND authorization = ?',
+        [sessionId, operationId, key, authorization]);
+      const saved = tx.all<PlannerRetirementDbRow>(`SELECT *, lease_token AS token FROM planner_authority_retirements
+        WHERE operation_id = ? OR operation_id LIKE ?`, [operationId, `${operationId}:%`]);
+      if (!quarantine || this.hasPreparedHostTermination(scope) || saved.length !== rows.length
+        || !rows.every((lease, index) => {
+          const record = saved.find(row => row.operation_id === parentTerminationOperation(operationId, index));
+          return record !== undefined && this.plannerRetirementMatches(record, lease, authorization);
+        })) return 'refused';
+      if (saved.every(row => row.completion === completion)) {
+        return rows.every(row => !tx.get('SELECT 1 FROM project_admission_leases WHERE token = ?', [row.token]))
+          ? 'already-retired' : 'refused';
+      }
+      const hold = this.operatorMaintenanceFor(scope, operationId);
+      if (!hold || saved.some(row => row.completion !== null) || !this.matchesScopeLeases(scope, rows)
+        || !rows.every(row => this.plannerLeaseEligible(tx, row, eligible))) return 'refused';
+      for (const [index, lease] of rows.entries()) {
+        const removed = tx.runSync(`DELETE FROM project_admission_leases WHERE scope_key = ? AND generation = ? AND token = ?
+          AND reason = 'liveChild' AND producer = ? AND work_ref = ?`, [key, lease.generation, lease.token, lease.producer, lease.workRef]).changes;
+        if (removed !== 1) throw new Error('Native parent termination lease could not commit');
+        const completed = tx.runSync(`UPDATE planner_authority_retirements SET completion = ?
+          WHERE operation_id = ? AND authorization = ? AND completion IS NULL`,
+        [completion, parentTerminationOperation(operationId, index), authorization]).changes;
+        if (completed !== 1) throw new Error('Native parent termination evidence could not commit');
+      }
+      const released = tx.runSync(`DELETE FROM project_operator_maintenance_holds
+        WHERE operation_id = ? AND scope_key = ? AND generation = ? AND maintenance_token = ?`,
+      [operationId, key, hold.generation, hold.token]).changes;
+      if (released !== 1 || !this.abandonLocked(tx, hold)) throw new Error('Native parent termination hold could not commit');
+      return 'released';
     });
   }
 

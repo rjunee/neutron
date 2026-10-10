@@ -170,3 +170,21 @@ test('planner retirement requires owner authentication, bounds the receipt and n
   expect((await call({ signature: 'operator' })).status).toBe(429)
   expect(seen).toHaveLength(2)
 })
+
+for (const phase of ['prepare', 'consume'] as const) test(`parent termination ${phase} is bounded and owner authenticated`, async () => {
+  const seen: unknown[] = []
+  const surface = createAdminRespawnSurface({ gatewayToken: 'owner-secret',
+    respawn: () => { throw Error('Must not respawn') },
+    prepareNativeParentTermination: async value => { seen.push(value); return { status: 'prepared' } },
+    consumeNativeParentTermination: async value => { seen.push(value); return { status: 'released' } },
+    rateLimit: { windowMs: 60_000, maxRequests: 2 } })
+  const call = (body: unknown, token = 'owner-secret') => surface.handler(new Request(`http://fixture/admin/${phase}-native-parent-termination`, {
+    method: 'POST', headers: { 'X-Gateway-Token': token }, body: JSON.stringify(body),
+  }))
+  expect((await call({}, 'foreign'))?.status).toBe(403)
+  expect((await call({ padding: 'x'.repeat(65_536) }))?.status).toBe(409)
+  expect(seen).toEqual([])
+  expect((await call({ signed: 'request' }))?.status).toBe(200)
+  expect(seen).toEqual([{ signed: 'request' }])
+  expect((await call({ signed: 'request' }))?.status).toBe(429)
+})
