@@ -66,5 +66,9 @@ ownership, but its text no longer stated that uncertainty explicitly. Restoring
 that wording passes all three original timeout cases and their 21 assertions,
 including dispatch counts and lease ownership. No test expectation was relaxed.
 
-Full local validation receipt will be recorded after the publication candidate
-finishes the required shared-host gate.
+The complete local gate passed with Bun 1.4.2 on clean revision `8f3a31001e5ce74bd2ee5df047bc7cccdabd2746`:
+`bash scripts/check-shared-host.sh` passed lint, all 51 typecheck projects and
+all 1,814 discovered test files (28,595 passed, 24 skipped,
+zero failed). The gate confirmed an unchanged suite-input identity. Its receipt
+ran from 2026-10-10T12:39:16.644539+00:00 to 2026-10-10T13:16:06.211354+00:00.
+Only this validation receipt changed after the tested revision.
