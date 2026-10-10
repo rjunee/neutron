@@ -26,8 +26,12 @@ changes after preparation refuse.
 
 Focused validation: 47 tests, 220 assertions, zero failures. Removing the
 canonical stopped-state guard or the single-planner guard separately fails its
-opposing test; both guards were restored before the passing suite. Full local
-validation and publication evidence will be recorded before delivery. Fixtures
+opposing test; both guards were restored before the passing suite. The complete local gate passed with Bun 1.4.2 on clean revision `21c95a26708e513b39146bda185ac8564e4c06b2`:
+`bash scripts/check-shared-host.sh` passed lint, all 51 typecheck projects and
+all 1,814 discovered test files (28,608 passed, 24 skipped,
+zero failed). The gate confirmed an unchanged suite-input identity. Its receipt
+ran from 2026-10-10T13:46:54.532671+00:00 to 2026-10-10T14:23:29.658765+00:00.
+Only this validation receipt changed after the tested revision. Fixtures
 do not establish deployment, successful live recovery or unattended acceptance.
 
 Related state: #1196 and #545. Normative acceptance lives in
