@@ -60,6 +60,7 @@ test('project cold and warm turns grant native messaging with the exact prewarm 
   for (const names of await capture('project-one')) {
     expect(names).toContain('Agent')
     expect(names).toContain('SendMessage')
+    expect(names).toContain('TaskStop')
     expect(names).toEqual(PROJECT_REPL_TOOL_DEFS.map(t => t.name))
   }
 })
@@ -74,6 +75,7 @@ test('General and the shared reminder surface retain their original grant', asyn
   for (const names of await capture(undefined)) {
     expect(names).toEqual([...LIVE_AGENT_TOOL_NAMES])
     expect(names).not.toContain('SendMessage')
+    expect(names).not.toContain('TaskStop')
   }
 })
 

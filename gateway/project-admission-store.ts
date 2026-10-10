@@ -212,10 +212,62 @@ export class ProjectAdmissionStore {
     return this.db.get<{ preparation: string }>('SELECT preparation FROM claude_native_continuations WHERE lease_token = ? ORDER BY rowid DESC LIMIT 1', [lease.token])?.preparation;
   }
 
+  readNativeCancellation(lease: AdmissionLeaseRow): string | undefined {
+    return this.db.get<{ preparation: string }>(`SELECT preparation FROM claude_native_cancellations
+      WHERE lease_token = ? AND scope_key = ? AND generation = ? AND producer = ? AND work_ref = ?`,
+    [lease.token, scopeKey(lease.scope), lease.generation, lease.producer, lease.workRef])?.preparation;
+  }
+
+  isNativeCancellationRequested(scope: ProjectAdmissionScope, workRef: string): boolean {
+    return Boolean(this.db.get('SELECT 1 FROM claude_native_cancellations WHERE scope_key = ? AND work_ref = ?', [scopeKey(scope), workRef]));
+  }
+
+  /** Cancellation drains original work; it cannot admit new work through a fence. */
+  nativeCancellationCurrent(lease: AdmissionLeaseRow): boolean {
+    if (this.hasPreparedHostTermination(lease.scope) || this.isPlannerRetired(lease.scope, lease.workRef)) return false;
+    return Boolean(this.db.get(`SELECT 1 FROM project_admission_leases l
+      JOIN project_admission_fences f ON f.scope_key = l.scope_key
+      WHERE l.token = ? AND l.scope_key = ? AND l.generation = ? AND l.reason = 'liveChild'
+        AND l.producer = ? AND l.work_ref = ? AND f.phase IN ('open', 'draining') AND f.generation >= l.generation`,
+    [lease.token, scopeKey(lease.scope), lease.generation, lease.producer, lease.workRef]));
+  }
+
+  async claimNativeCancellation(lease: AdmissionLeaseRow, preparation: string): Promise<boolean> {
+    if (!preparation.trim() || preparation.length > 1024 * 1024) return false;
+    return this.db.transaction(async tx => {
+      const key = scopeKey(lease.scope);
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      if (!this.nativeCancellationCurrent(lease) || this.isNativeCancellationRequested(lease.scope, lease.workRef)) return false;
+      return tx.runSync(`INSERT OR IGNORE INTO claude_native_cancellations
+        (lease_token, scope_key, generation, producer, work_ref, preparation) VALUES (?, ?, ?, ?, ?, ?)`,
+      [lease.token, key, lease.generation, lease.producer, lease.workRef, preparation]).changes === 1;
+    });
+  }
+
+  /** The runtime validates the native acknowledgement. Commit it and release
+   * only its exact original lease atomically; keep the spent intent forever. */
+  async completeNativeCancellation(lease: AdmissionLeaseRow, preparation: string, acknowledgement: string): Promise<boolean> {
+    if (!acknowledgement.trim() || acknowledgement.length > 64 * 1024) return false;
+    return this.db.transaction(async tx => {
+      const key = scopeKey(lease.scope);
+      await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
+      if (!this.nativeCancellationCurrent(lease) || this.readNativeCancellation(lease) !== preparation) return false;
+      const recorded = tx.runSync(`UPDATE claude_native_cancellations SET acknowledgement = ?
+        WHERE lease_token = ? AND preparation = ? AND acknowledgement IS NULL`, [acknowledgement, lease.token, preparation]).changes;
+      if (recorded !== 1) return false;
+      const released = tx.runSync(`DELETE FROM project_admission_leases WHERE token = ? AND scope_key = ?
+        AND generation = ? AND reason = 'liveChild' AND producer = ? AND work_ref = ?`,
+      [lease.token, key, lease.generation, lease.producer, lease.workRef]).changes;
+      if (released !== 1) throw new Error('Native cancellation release did not commit');
+      return true;
+    });
+  }
+
   /** Recheck the original authorization epoch before capacity and parent input. */
   nativeContinuationCurrent(lease: AdmissionLeaseRow): boolean {
     const key = scopeKey(lease.scope);
-    if (this.hasPreparedHostTermination(lease.scope) || this.isPlannerRetired(lease.scope, lease.workRef)) return false;
+    if (this.hasPreparedHostTermination(lease.scope) || this.isPlannerRetired(lease.scope, lease.workRef)
+      || this.isNativeCancellationRequested(lease.scope, lease.workRef)) return false;
     return Boolean(this.db.get(`SELECT 1 FROM project_admission_leases l
       JOIN project_admission_fences f ON f.scope_key = l.scope_key
       WHERE l.token = ? AND l.scope_key = ? AND l.generation = ? AND l.reason = 'liveChild'
@@ -229,7 +281,8 @@ export class ProjectAdmissionStore {
     return this.db.transaction(async tx => {
       const key = scopeKey(lease.scope);
       await tx.run('UPDATE project_admission_fences SET generation = generation WHERE scope_key = ?', [key]);
-      if (this.hasPreparedHostTermination(lease.scope) || this.isPlannerRetired(lease.scope, lease.workRef)) return false;
+      if (this.hasPreparedHostTermination(lease.scope) || this.isPlannerRetired(lease.scope, lease.workRef)
+        || this.isNativeCancellationRequested(lease.scope, lease.workRef)) return false;
       const fence = tx.get<FenceRow>('SELECT generation, phase FROM project_admission_fences WHERE scope_key = ?', [key]);
       if (!fence || fence.phase !== 'open' || fence.generation !== lease.generation) return false;
       const exact = tx.get(`SELECT 1 FROM project_admission_leases WHERE token = ? AND scope_key = ?
@@ -259,7 +312,7 @@ export class ProjectAdmissionStore {
       const row = tx.get<FenceRow>('SELECT generation, phase, maintenance_token FROM project_admission_fences WHERE scope_key = ?', [key]);
       if (!row) return { status: 'unknown' as const };
       if (this.hasPreparedHostTermination(scope)) return { status: 'fenced' as const };
-      if (row.phase !== 'open' || (reason === 'liveChild' && this.isPlannerRetired(scope, workRef))
+      if (row.phase !== 'open' || (reason === 'liveChild' && (this.isPlannerRetired(scope, workRef) || this.isNativeCancellationRequested(scope, workRef)))
         || (reason === 'conversation' && this.isConversationRetired(scope, workRef))) return { status: 'fenced' as const };
       const token = crypto.randomUUID();
       tx.runSync(`INSERT INTO project_admission_leases (token, scope_key, generation, reason, producer, work_ref)
@@ -295,7 +348,7 @@ export class ProjectAdmissionStore {
       const row = tx.get<FenceRow>('SELECT generation, phase, maintenance_token FROM project_admission_fences WHERE scope_key = ?', [key]);
       if (!row) return { status: 'unknown' as const };
       if (this.hasPreparedHostTermination(scope)) return { status: 'unknown' as const };
-      if (reason === 'liveChild' && this.isPlannerRetired(scope, workRef)) return { status: 'fenced' as const };
+      if (reason === 'liveChild' && (this.isPlannerRetired(scope, workRef) || this.isNativeCancellationRequested(scope, workRef))) return { status: 'fenced' as const };
       if ((parent.reason === 'conversation' && this.isConversationRetired(scope, parent.workRef))
         || (reason === 'conversation' && this.isConversationRetired(scope, workRef))) return { status: 'fenced' as const };
       const owner = tx.get<{ generation: number }>(`SELECT generation FROM project_admission_leases

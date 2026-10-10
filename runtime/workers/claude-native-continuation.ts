@@ -18,7 +18,8 @@ import { bindNativeChildWorkspace, nativeChildContinuationCensusKnown, ownsNativ
 import { acquireClaudeCapacity, controlClaudeContinuation, nativeQuotaEpisodeId, nativeRelayScopeCurrent,
   type AcquireClaudeCapacity, type ClaudeCapacityInput, type ClaudeCapacityReceipt, type ClaudeContinuationIntent, type ControlClaudeContinuation } from './claude-capacity-client.ts'
 
-type Boundary = { offset: number; dev: number; ino: number; prefixDigest: string }
+export type NativeTranscriptBoundary = { offset: number; dev: number; ino: number; prefixDigest: string }
+type Boundary = NativeTranscriptBoundary
 interface Preparation {
   version: 2
   request: BoundedWorkRequest
@@ -94,7 +95,7 @@ function watchCancellation(options: ClaudeContinuationOptions, workSignal: Abort
 export const CLAUDE_CONTINUATION_PROFILE = Object.freeze({ version: '2.1.285',
   sha256: '33dad1ec615a2e08cc78b494f05c110e49916de2c79d78ec8799ebf46b233d29' })
 
-function knownLaunch(launch: NativeParentLaunchEvidence | undefined, sessionId: string, generation: string, projectId: string | null): boolean {
+export function knownLaunch(launch: NativeParentLaunchEvidence | undefined, sessionId: string, generation: string, projectId: string | null): boolean {
   if (!launch || launch.version !== 1 || launch.sessionId !== sessionId || launch.childGeneration !== generation
     || !projectId || launch.projectId !== projectId || launch.executable?.version !== CLAUDE_CONTINUATION_PROFILE.version
     || launch.executable.sha256 !== CLAUDE_CONTINUATION_PROFILE.sha256 || !launch.executable.realPath
@@ -359,7 +360,7 @@ async function continuationAttempt(options: ClaudeContinuationOptions, workSigna
   } catch { return unknown('submission-unknown') }
 }
 
-async function readBoundary(path: string): Promise<Boundary | undefined> {
+export async function readBoundary(path: string): Promise<Boundary | undefined> {
   const file = await open(path, constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW)
   try {
     const info = await file.stat()
@@ -373,7 +374,7 @@ async function readBoundary(path: string): Promise<Boundary | undefined> {
 
 /** Bounded snapshot hashing: refuse oversized histories rather than use a weak
  * inode/offset boundary that accepts same-inode truncation followed by regrowth. */
-async function digestPrefix(file: FileHandle, size: number): Promise<string | undefined> {
+export async function digestPrefix(file: FileHandle, size: number): Promise<string | undefined> {
   if (!Number.isSafeInteger(size) || size < 0 || size > 64 * 1024 * 1024) return undefined
   const digest = createHash('sha256'), bytes = Buffer.alloc(64 * 1024)
   for (let offset = 0; offset < size;) {

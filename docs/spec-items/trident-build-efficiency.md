@@ -363,3 +363,41 @@ The retry and orchestrator items retain their own criteria and completion state;
 satisfying this item never changes their status by implication. The checkpoint
 item's completion in #1195 is preserved; this item's broader efficiency criteria
 remain open.
+
+## Native cancellation
+
+A stopped row does not establish that native work stopped. A signed original
+deadline does not establish completion. New project parents grant the native
+`TaskStop` tool at launch; existing busy profiles are not rewritten. A host
+cancellation can consume one parent control turn and is not described as free.
+
+- [ ] `codegen_cancel` reaches the active driver and sends one stop request for
+  the original signed child, without stopping its parent or a sibling. The run
+  remains stopped and no worker result is fabricated.
+  verify: `open/wiring/__tests__/claude-native-cancellation.test.ts` consuming test.
+- [ ] The original signed deadline reaches the same cancellation path; an active
+  run before that deadline cannot be cancelled by this recovery mechanism.
+  verify: deadline and eligibility controls in the same consuming test file.
+- [ ] Recovery consumes a valid original result before spending a cancellation
+  turn. It matches the original armed reservation and uses the bounded regular-file
+  reader; a changed request, substituted result path, symlink or FIFO cannot
+  release the original ownership.
+  verify: consuming original-result test and recovery controls in
+  `open/__tests__/project-build-e2e.test.ts`.
+- [ ] Input is durably claimed before submission. Lost submission acknowledgement
+  and restart never resend it; a late matching native result can release its
+  original lease even after the parent exits. The spent claim also refuses new
+  admission or quota continuation of that same request.
+  verify: consuming restart test and `gateway/project-admission-store.test.ts`.
+- [ ] Stale prefix, queued text, wrong session/task, unlinked or erroneous tool
+  result, duplicate invocation, missing launch grant and unsigned child evidence
+  cannot release ownership. Each refusal family has a valid positive control.
+  verify: `runtime/workers/claude-native-cancellation.test.ts`.
+- [ ] Stop during preparation aborts that preparation, while stopping a sibling
+  does not. A cancelled driver's return cannot overwrite the terminal row or
+  emit a false persistence failure.
+  verify: `trident/project-launcher.test.ts`.
+
+These focused checks establish the wiring and evidence contract. Live unattended
+plan/build/review/publish/merge remains the separate cutover requirement; passing
+a cancellation fixture does not satisfy it.

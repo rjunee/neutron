@@ -14,3 +14,4 @@
  * Gateway depends on runtime and never the reverse, which is why this lives here. */
 export const SUBAGENT_TOOL_NAME = 'Agent'
 export const SUBAGENT_CONTINUATION_TOOL_NAME = 'SendMessage'
+export const SUBAGENT_STOP_TOOL_NAME = 'TaskStop'

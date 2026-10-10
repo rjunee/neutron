@@ -22,6 +22,7 @@ async function fixture() {
   await a.db.exec(readFileSync(new URL('../migrations/0161_native_host_terminations.sql', import.meta.url), 'utf8'));
   await a.db.exec(readFileSync(new URL('../migrations/0168_planner_authority_retirements.sql', import.meta.url), 'utf8'));
   await a.db.exec(readFileSync(new URL('../migrations/0169_native_conversation_quarantines.sql', import.meta.url), 'utf8'));
+  await a.db.exec(readFileSync(new URL('../migrations/0171_claude_native_cancellations.sql', import.meta.url), 'utf8'));
   await a.store.register(scope);
   return { a, b: open(), open };
 }
@@ -127,4 +128,48 @@ test('General, literal General project and different owner never share fences', 
   await a.store.beginMaintenance(general);
   expect((await a.store.admit(general, 'conversation', 'chat', 'turn')).status).toBe('fenced');
   for (const value of [named, other]) expect((await a.store.admit(value, 'conversation', 'chat', 'turn')).status).toBe('admitted');
+});
+
+test('native cancellation spends once across connections and restart, drains its exact child, and permanently refuses replay', async () => {
+  const { a, b, open } = await fixture();
+  const admitted = await a.store.admit(scope, 'liveChild', 'native', 'cancelled-step');
+  const sibling = await a.store.admit(scope, 'liveChild', 'native', 'sibling-step');
+  if (admitted.status !== 'admitted' || sibling.status !== 'admitted') throw Error('expected admission');
+  const lease = { ...admitted.lease, reason: 'liveChild' as const, producer: 'native', workRef: 'cancelled-step' };
+  const fence = (await b.store.beginMaintenance(scope))!;
+  expect(b.store.nativeCancellationCurrent(lease)).toBe(true);
+  const claims = await Promise.all([a.store.claimNativeCancellation(lease, 'first'), b.store.claimNativeCancellation(lease, 'second')]);
+  expect(claims.filter(Boolean)).toHaveLength(1);
+  const restarted = open().store;
+  const saved = restarted.readNativeCancellation(lease)!;
+  expect(['first', 'second']).toContain(saved);
+  expect(await restarted.claimNativeCancellation(lease, saved)).toBe(false);
+  expect(restarted.nativeContinuationCurrent(lease)).toBe(false);
+  expect(await restarted.completeNativeCancellation({ ...lease, token: sibling.lease.token }, saved, 'ack')).toBe(false);
+  expect(await restarted.completeNativeCancellation(lease, 'different', 'ack')).toBe(false);
+  expect(restarted.inspect(scope)?.leases).toBe(2);
+  expect(await restarted.completeNativeCancellation(lease, saved, 'ack')).toBe(true);
+  expect(await restarted.completeNativeCancellation(lease, saved, 'ack')).toBe(false);
+  expect(restarted.inspect(scope)?.leases).toBe(1);
+  expect(restarted.readNativeCancellation(lease)).toBe(saved);
+  expect(await restarted.abandon(fence)).toBe(true);
+  expect(await restarted.admit(scope, 'liveChild', 'native', lease.workRef)).toEqual({ status: 'fenced' });
+  expect(await restarted.admitChild(scope, { reason: 'liveChild', workRef: 'sibling-step' }, 'liveChild', 'native', lease.workRef))
+    .toEqual({ status: 'fenced' });
+  expect((await restarted.admitChild(scope, { reason: 'liveChild', workRef: 'sibling-step' }, 'liveChild', 'native', 'new-step')).status).toBe('admitted');
+  expect(await restarted.release(sibling.lease)).toBe(true);
+});
+
+test('foreign native cancellation cannot spend or consume a current original lease', async () => {
+  const { a } = await fixture();
+  const admitted = await a.store.admit(scope, 'liveChild', 'native', 'step');
+  if (admitted.status !== 'admitted') throw Error('expected admission');
+  const lease = { ...admitted.lease, reason: 'liveChild' as const, producer: 'native', workRef: 'step' };
+  for (const altered of [{ ...lease, generation: 9 }, { ...lease, producer: 'foreign' }, { ...lease, workRef: 'sibling' },
+    { ...lease, scope: { ...scope, projectId: 'other' } }]) {
+    expect(a.store.nativeCancellationCurrent(altered)).toBe(false);
+    expect(await a.store.claimNativeCancellation(altered, 'intent')).toBe(false);
+  }
+  expect(await a.store.claimNativeCancellation(lease, 'intent')).toBe(true);
+  expect(await a.store.completeNativeCancellation(lease, 'intent', 'ack')).toBe(true);
 });

@@ -3,7 +3,7 @@ import { TRIDENT_SCRIPT_DIR } from '@neutronai/trident/script-dir.ts'
 import { createPersistentReplSubstrate, shutdownAllPersistentRepls } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import { LIVE_AGENT_TOOL_NAMES, PROJECT_REPL_TOOL_DEFS } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
-import { SUBAGENT_TOOL_NAME, SUBAGENT_CONTINUATION_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
+import { SUBAGENT_TOOL_NAME, SUBAGENT_CONTINUATION_TOOL_NAME, SUBAGENT_STOP_TOOL_NAME } from '@neutronai/runtime/workers/claude-tool-contract.ts'
 import { REFLECTION_GUIDANCE_FRAMING, MAX_REFLECTION_GUIDANCE_CHARS } from '@neutronai/trident/reflection-guidance.ts'
 import { PLAN_SCHEMA, FORGE_SCHEMA, VERDICT_SCHEMA } from '@neutronai/trident/gates/result-contract.ts'
 import { briefIntegrity } from '@neutronai/trident/gates/brief-integrity.ts'
@@ -34,7 +34,7 @@ import { createProductionHostEffects } from '@neutronai/trident/production-host-
 import type { ProjectBuildHostOptions } from '@neutronai/trident/project-build-host.ts'
 
 const cleanup: (() => void | Promise<void>)[] = []
-const PROJECT_TOOL_NAMES = [...LIVE_AGENT_TOOL_NAMES, SUBAGENT_CONTINUATION_TOOL_NAME]
+const PROJECT_TOOL_NAMES = [...LIVE_AGENT_TOOL_NAMES, SUBAGENT_CONTINUATION_TOOL_NAME, SUBAGENT_STOP_TOOL_NAME]
 let pinLookup: ReturnType<typeof spyOn<typeof capacity, 'loadClaudeCapacityPin'>>
 let routeLookup: ReturnType<typeof spyOn<typeof capacity, 'nativeRelayRouteFingerprint'>>
 beforeEach(() => {
@@ -1192,5 +1192,5 @@ test('project dispatch reuses the wake REPL without a tools-less respawn', async
     tools: PROJECT_REPL_TOOL_DEFS.filter(tool => tool.name !== SUBAGENT_CONTINUATION_TOOL_NAME),
     model_preference: ['claude-sonnet-4-6'] })).toBe(`seen=0 got=${changed}`)
   expect(spawnCount()).toBe(2)
-  expect(spawnArgv[1]![spawnArgv[1]!.indexOf('--tools') + 1]).toBe(LIVE_AGENT_TOOL_NAMES.join(','))
+  expect(spawnArgv[1]![spawnArgv[1]!.indexOf('--tools') + 1]).toBe([...LIVE_AGENT_TOOL_NAMES, SUBAGENT_STOP_TOOL_NAME].join(','))
 }, 20_000)

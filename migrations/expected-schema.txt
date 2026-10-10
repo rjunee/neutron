@@ -72,6 +72,10 @@ CREATE INDEX idx_app_chat_reactions_topic_seq_msg
 CREATE INDEX idx_app_chat_receipts_topic_seq_msg
     ON app_chat_receipts (topic_id, seq, message_id)
 
+[index] idx_claude_native_cancellation_work (tbl=claude_native_cancellations)
+CREATE INDEX idx_claude_native_cancellation_work
+  ON claude_native_cancellations(scope_key, work_ref)
+
 [index] idx_code_ritual_runs_live (tbl=code_ritual_runs)
 CREATE INDEX idx_code_ritual_runs_live
     ON code_ritual_runs (status)
@@ -521,6 +525,17 @@ CREATE TABLE claude_mcp_handler_generations (
   identity TEXT NOT NULL,
   closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1)),
   covered INTEGER NOT NULL CHECK (covered IN (0, 1))
+)
+
+[table] claude_native_cancellations (tbl=claude_native_cancellations)
+CREATE TABLE claude_native_cancellations (
+  lease_token TEXT PRIMARY KEY NOT NULL,
+  scope_key TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  producer TEXT NOT NULL,
+  work_ref TEXT NOT NULL,
+  preparation TEXT NOT NULL,
+  acknowledgement TEXT
 )
 
 [table] claude_native_continuations (tbl=claude_native_continuations)

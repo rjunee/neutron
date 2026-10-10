@@ -21,6 +21,7 @@ import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { projectReviewArtifacts, projectReviewStepIdentity } from '@neutronai/trident/project-review-artifacts.ts'
 import { readReviewReceipt, readReviewJson } from '@neutronai/trident/project-review-receipt.ts'
 import { projectBuildTrailerDecoder } from './project-build.ts'
+import { cancelOriginalClaudeChild } from './claude-native-cancellation.ts'
 
 export interface ClaudeNativeDispatchReconcileOptions {
   /** Canonical host state root, never a path from a request or receipt. */
@@ -32,11 +33,12 @@ export interface ClaudeNativeDispatchReconcileOptions {
   listProjectIds(): readonly string[]
 }
 
-/** No native actor is constructed. A terminal run is eligible for inspection,
- * never evidence by itself. The signed ORIGINAL request supplies full request
+/** A terminal run is eligible for inspection, never evidence by itself. The signed ORIGINAL request supplies full request
  * authority; the canonical DB independently binds the run, scope and attempt.
  * Submitted terminal runs additionally require the exact armed reservation and
- * a host-validated late result. Missing evidence keeps ownership. */
+ * a host-validated late result, or a native TaskStop acknowledgement for the
+ * original child after an explicit stop or signed deadline. Missing evidence
+ * keeps ownership; a spent cancellation input is never replayed. */
 export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispatchReconcileOptions): Promise<{
   status: 'observed'; released: number; kept: number
 } | { status: 'unavailable' }> {
@@ -74,8 +76,8 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
         if (await options.admission.forNativeChild(lease.scope.projectId).releaseUnsubmitted?.(request, receipt)) released++
         continue
       }
-      // Failed observation does not kill the native child. Inspect terminal runs
-      // without reconstructing an actor, changing outcome, or dispatching again.
+      // Terminal state authorizes inspection. Cancellation additionally requires
+      // explicit stop or the original signed deadline, then native acknowledgement.
       if (!isTerminalPhase(run.phase)) continue
       // A bounded first-envelope read supplies only the original child binding.
       // Completion still comes exclusively from the original reserved result.
@@ -87,10 +89,16 @@ export async function reconcileClaudeNativeDispatches(options: ClaudeNativeDispa
       const key = createHash('sha256').update(JSON.stringify([runId, stepId])).digest('hex')
       const held = await readArmedTrailerReservation(join(state, `claude-step-${key}.json`), JSON.stringify(request))
       if (held.kind !== 'resume') continue
-      const bytes = await readLateResult(request.result.path)
-      if (bytes === undefined) continue
-      const outcome = decodeProjectTrailer(bytes, request, projectBuildTrailerDecoder(() => options.runs.get(runId)))
-      if (outcome.kind !== 'completed' && outcome.kind !== 'blocked') continue
+      const bytes = await readLateResult(request.result.path).catch(() => undefined)
+      const outcome = bytes === undefined ? undefined : decodeProjectTrailer(bytes, request, projectBuildTrailerDecoder(() => options.runs.get(runId)))
+      if (outcome?.kind !== 'completed' && outcome?.kind !== 'blocked') {
+        if (submitted && lease.scope.projectId !== null) {
+          const outcome = await cancelOriginalClaudeChild({ request, projectId: lease.scope.projectId, stateDir: state,
+            admission: options.admission.forNativeChild(lease.scope.projectId), run: () => options.runs.get(runId) })
+          if (outcome.kind === 'stopped') released++
+        }
+        continue
+      }
       if (binding && !await binding()) continue
       if (!await options.admission.maintenance.release(lease)) continue
       released++
