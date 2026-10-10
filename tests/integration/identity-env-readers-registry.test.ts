@@ -257,6 +257,8 @@ const KNOWN_READERS: Readonly<Record<string, string>> = {
     'Broad signed-correlation text validator matches identity-name candidates; registered conservatively. No identity env access: host identity and socket come from the protected provisioned pin and signed registration. Receipt verification is pinned in runtime/workers/claude-capacity-client.test.ts.',
   'runtime/workers/claude-native-continuation.ts':
     'Broad native-agent-id validator matches identity-name candidates; registered conservatively. No env access: continuation scope comes from the signed dispatch receipt and explicit session. Continuation admission is pinned in runtime/workers/claude-native-continuation.test.ts.',
+  'runtime/workers/claude-native-cancellation.ts':
+    'Broad native-agent-id validator matches identity-name candidates; registered conservatively. No env access: cancellation scope comes from the original dispatch receipt and explicit session. Cancellation admission is pinned in runtime/workers/claude-native-cancellation.test.ts.',
   'runtime/workers/codex-headless.ts':
     'Broad requested-thread-id validation regex matches identity-name candidates; registered conservatively. No identity-home resolution: the added CODEX_HOME read binds a receipt to its credential-home selector, not NEUTRON_HOME/OWNER_HOME/NEUTRON_DB_PATH. Thread and changed-credential-home behavior is pinned in runtime/workers/codex-headless.test.ts.',
   'agent-dispatch/command.ts':
@@ -983,10 +985,10 @@ test('Claude child observation child-id validator is a conservative regex match'
   expect(processEnvAccess.test(realReader)).toBe(true)
 })
 
-test('Claude capacity and continuation validators are conservative regex matches, not identity env reads', () => {
+test('Claude capacity, continuation and cancellation validators are conservative regex matches, not identity env reads', () => {
   const realReader = readFileSync(join(ROOT, 'migrations/db-path.ts'), 'utf8')
   const processEnvAccess = /\bprocess\s*\.\s*env\b/
-  for (const path of ['runtime/workers/claude-capacity-client.ts', 'runtime/workers/claude-native-continuation.ts']) {
+  for (const path of ['runtime/workers/claude-capacity-client.ts', 'runtime/workers/claude-native-continuation.ts', 'runtime/workers/claude-native-cancellation.ts']) {
     const source = readFileSync(join(ROOT, path), 'utf8')
     expect(namesIdentityVar(source, path)).toBe(true)
     expect(READ_PATTERNS.some(pattern => pattern.test(source))).toBe(false)

@@ -157,6 +157,24 @@ test('original deadline cancels through the production wrapper without an owner 
   expect(f.inputs).toHaveLength(1)
 })
 
+test('stopped recovery harvests only the original reserved result without spending a stop turn', async () => {
+  const f = await fixture()
+  await f.store.update(f.run.id, { phase: 'stopped' })
+  const bytes = JSON.stringify({ schema: f.request.result.schema, run_id: f.run.id,
+    step_id: f.request.step_id, kind: 'blocked', on: 'Original worker returned its result' })
+  await writeFile(f.request.result.path, bytes)
+  const alternate = join(f.state, 'alternate.result'); await writeFile(alternate, bytes)
+  for (const changed of [{ ...f.request, cwd: f.request.cwd + '/changed' },
+    { ...f.request, result: { ...f.request.result, path: alternate } }]) {
+    expect((await f.prepared.substrate.inRepl!.recover!(changed, 'in-repl', new AbortController().signal)).kind).toBe('unknown')
+    expect(f.admission.listLeases('liveChild')).toHaveLength(2)
+    expect(f.inputs).toHaveLength(0)
+  }
+  expect((await f.prepared.substrate.inRepl!.recover!(f.request, 'in-repl', new AbortController().signal)).kind).toBe('blocked')
+  expect(f.admission.listLeases('liveChild').map(lease => lease.token)).toEqual([f.sibling.lease.token])
+  expect(f.inputs).toHaveLength(0)
+})
+
 test('restart consumes a late native stop acknowledgement without a live parent or another input', async () => {
   const f = await fixture()
   expect((await f.cancellation()).kind).toBe('unknown')

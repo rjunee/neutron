@@ -905,6 +905,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       const stopped = context.store.get(run.id)?.phase === 'stopped'
       const expired = Number.isSafeInteger(receipt?.body?.deadlineMs) && Date.now() >= receipt!.body.deadlineMs!
       if (!stopped && !expired) return undefined
+      // A result may have arrived before cancellation. Match the original
+      // reservation before opening its bounded, regular result file; never let
+      // a changed recovery request select a different path or release its lease.
+      const key = createHash('sha256').update(JSON.stringify([request.run_id, request.step_id])).digest('hex')
+      const held = await readArmedTrailerReservation(join(state, `claude-step-${key}.json`), JSON.stringify(request))
+      if (held.kind === 'resume') {
+        const original = await readClaudeContinuationResult({ request, decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, trailer) })
+        if (original?.kind === 'result' && (original.outcome.kind === 'completed' || original.outcome.kind === 'blocked')
+          && await releaseValidatedChild(request)) return original.outcome
+      }
       const cancellation = await cancelOriginalClaudeChild({ request, projectId: context.projectId, stateDir: state,
         admission: context.nativeChildAdmission, run: () => context.store.get(run.id) })
       return cancellation.kind === 'stopped'
@@ -934,8 +944,8 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     }
     const releaseValidatedChild = async (request: Parameters<typeof runner.run>[0]) => {
       try {
-        const result = decodeProjectTrailer(await readFile(request.result.path, 'utf8'), request, trailer)
-        if (result.kind === 'completed' || result.kind === 'blocked') {
+        const result = await readClaudeContinuationResult({ request, decodeTrailer: (bytes, req) => decodeProjectTrailer(bytes, req, trailer) })
+        if (result?.kind === 'result' && (result.outcome.kind === 'completed' || result.outcome.kind === 'blocked')) {
           await context.nativeChildAdmission.complete(request.run_id, request.step_id)
           const workspace = nativeWorkspaces.get(request.step_id)
           if (workspace) completeNativeChildWorkspace(workspace)
@@ -958,8 +968,6 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
           return { kind: 'failed' as const, class: 'killed' as const, detail: 'Original native dispatch actor durably refused before submitting input.' }
         }
       } catch { return { kind: 'unknown' as const, detail: 'Original native dispatch lease reconciliation is unavailable.' } }
-      // A retained valid result wins over cancellation of already completed work.
-      if (await releaseValidatedChild(args[0])) return runner.recover!(...args)
       const cancelled = await cancelInterrupted(args[0])
       if (cancelled) return cancelled
       const deadline = Date.now() + args[0].budget.wall_ms

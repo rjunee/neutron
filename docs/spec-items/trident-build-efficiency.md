@@ -378,6 +378,12 @@ cancellation can consume one parent control turn and is not described as free.
 - [ ] The original signed deadline reaches the same cancellation path; an active
   run before that deadline cannot be cancelled by this recovery mechanism.
   verify: deadline and eligibility controls in the same consuming test file.
+- [ ] Recovery consumes a valid original result before spending a cancellation
+  turn. It matches the original armed reservation and uses the bounded regular-file
+  reader; a changed request, substituted result path, symlink or FIFO cannot
+  release the original ownership.
+  verify: consuming original-result test and recovery controls in
+  `open/__tests__/project-build-e2e.test.ts`.
 - [ ] Input is durably claimed before submission. Lost submission acknowledgement
   and restart never resend it; a late matching native result can release its
   original lease even after the parent exits. The spent claim also refuses new

@@ -14,7 +14,10 @@ terminal acknowledgement is lost. Only the linked native tool result for that
 child releases its exact lease. A native result observed after restart can
 complete the same transaction without a live parent. The spent claim remains
 and refuses readmission or quota continuation. Valid worker results retain their
-existing completion path.
+existing completion path. Stopped recovery first matches the original armed
+reservation and reads its bounded regular result file. An already valid original
+result releases its ownership without spending a cancellation turn; a changed
+request or result path cannot select another result or release the original lease.
 
 Missing or unsupported native evidence retains ownership. Cancellation spends a
 parent control turn and depends on that parent's provider capacity. Existing
@@ -36,7 +39,7 @@ The consuming cancellation regression also fails when durable stop observation
 is deliberately disabled: the native cancellation cannot settle. Restoring the
 observer restores that behavior.
 
-Focused validation passed four consuming cancellation cases, twelve runtime
+Focused validation passed five consuming cancellation cases, twelve runtime
 cancellation cases, database ownership controls, launcher stop controls, and
 project grant/migration regressions. The broader boot-recovery file passed; an
 earlier combined invocation had a cleanup timeout and its follow-on error,
@@ -44,6 +47,17 @@ retained in the operator evidence. The changed text must pass its privacy scan;
 the full local tree scan reports the same 452 existing findings as its base
 (including the worktree pointer and local denylist collisions). Full exact-head
 CI purity remains required before merge.
+
+The first full local gate passed lint and all 51 typecheck projects, then exposed
+seven failing assertions: two migration-ledger expectations, two identity-reader
+registry assertions and three existing recovery regressions. The remaining HTTP
+lane was stopped after those failures were identified; that run is not a full
+suite pass. Recovery now retains its original reservation binding and bounded
+regular-file reader. The registry includes the cancellation validator without
+exempting real environment reads, and the ledger expectations include migration
+171. Eight targeted recovery tests and 37 consuming, registry and ledger tests
+passed. Deliberately removing the request binding and inserting an environment
+read each made its respective regression test fail; both mutations were restored.
 
 Full local validation receipt will be recorded after the publication candidate
 finishes the required shared-host gate.
