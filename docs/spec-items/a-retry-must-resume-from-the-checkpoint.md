@@ -50,6 +50,38 @@ must not be the thing that recovers continuity — it only sets `pr`, and it sil
 
 ## Acceptance
 
+### Unresolved work cannot become a fresh retry
+
+Under the 2026-10-10 Decisions Log entry for unresolved retries, a same-card,
+unchanged-task retry with matching repository, branch, strategy and merge mode
+must not fall back to fresh planning when its latest authenticated checkpoint
+still reserves a worker. If the existing settlement rules establish a reusable
+source, retain that supported continuation. The existing owned-publication
+build/fix handoff below may still create a successor to verify its authenticated
+settlement at outer launch and preparation, before dispatching any planner. A PR
+receipt alone is not settlement; its missing or invalid worker evidence still
+refuses there. Preserve the existing changed-input legacy recovery too: a v2
+build whose original completed result, request journal, armed reservation,
+brief and completed attempt still agree may start a new step after a later host
+measurement invalidates its reflection instructions. The latest measurement
+must name that exact original brief; missing, altered, unfinished or superseded
+evidence refuses. This permits required re-execution and imports no checkpoint
+or old approval. Every other pending shape refuses before creating a successor
+or changing the card's run link. Preserve the original checkpoint,
+attempts, artifacts and spent budgets. The refusal names the unresolved phase
+and the need to reconcile it; it is not a completed build or a cancellation
+acknowledgement.
+
+Exercise failed and stopped predecessors, each pending phase, a null-head
+planner, and a pending successor of an earlier reusable source. Pair these
+refusals with an eligible settled-review retry that reaches merge without a
+plan/build replay, plus the existing changed-task and fresh-card controls.
+Preserve the owned-publication handoff's real dispatch-to-merge controls and its
+missing/invalid settlement refusals; a published review or planner remains
+ineligible for that build/fix-only handoff.
+Verify `trident/cross-run-retry-checkpoint.test.ts` and the prepared consuming
+path in `open/__tests__/project-build-e2e.test.ts`.
+
 ### Settled review infrastructure stops
 
 A required review seat's rate-limit refusal must preserve the completed build

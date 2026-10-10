@@ -91,7 +91,8 @@ import {
 } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { TASK_CONTINUATION_CHECKPOINT, builtButNeverReviewedSeed, carriedTaskBudget } from './run-disposition.ts'
-import { isTaskContinuationSource, retryModeSource } from './build-mode-state.ts'
+import { isTaskContinuationSource, parseBuildModeState, retryModeSource } from './build-mode-state.ts'
+import { invalidatedLegacyBuildSettled } from './legacy-retry-invalidation.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -1636,6 +1637,9 @@ async function dispatchUnderAdmission(
   // the single author of "usable" and every arm is observable.
   const namedPrior = cardsPriorRun === '' ? null : deps.store.get(cardsPriorRun)
   let prior: TridentRun | null = null
+  const priorPublication = () => prior === null ? null
+    : (prior.repo_path === repo_path && prior.branch === branch ? prior.published_pr : null)
+      ?? deps.store.earlierCardPublication(deps.project_slug, board_item_id, prior.id, repo_path, branch)
   //
   // THE LADDER ASKS THE STRONG QUESTION FIRST, and the order is the fix for a
   // MEASURED defect (adversarial review, P2). It used to compare the task text
@@ -1769,9 +1773,27 @@ async function dispatchUnderAdmission(
       // preparation, is validated under every predecessor's original identity.
       let source: ReturnType<typeof retryModeSource>
       try {
-        source = prior.repo_path === repo_path && prior.branch === branch
+        const sameExecution = prior.repo_path === repo_path && prior.branch === branch
           && prior.merge_mode === merge_mode && prior.execution_strategy === execution_strategy
-          ? retryModeSource(deps.store, prior) : null
+        source = sameExecution ? retryModeSource(deps.store, prior) : null
+        // Refusing to import a pending worker must also refuse the fresh-plan
+        // fallback. Otherwise an automatic retry repays completed work and loses
+        // the card's link to the evidence that still needs reconciliation.
+        if (sameExecution && source === null) {
+          const event = deps.store.stageEvents(prior.id).filter(row => row.stage === 'build-mode-state').at(-1)
+          const state = event ? parseBuildModeState(event.meta, prior, true) : undefined
+          const pending = state?.checkpoint.pending
+          // Owned published build/fix recovery has its own settlement gate at
+          // outer launch and preparation, before any planner can be dispatched.
+          // A receipt only admits that verification; it cannot settle a worker.
+          const publication = pending && (pending.phase === 'build' || pending.phase === 'fix')
+            && merge_mode === 'pr' ? priorPublication() : null
+          const verifiesPublishedHandoff = publication !== null && Number.isSafeInteger(publication) && publication > 0
+          const invalidatedLegacy = event && state && invalidatedLegacyBuildSettled(deps.store, prior, event.id, state)
+          if (pending && !verifiesPublishedHandoff && !invalidatedLegacy) return { ok: false, code: 'card_blocked', message:
+            `The previous run ${prior.id.slice(0, 8)} has unresolved ${pending.phase} work. ` +
+            'Reconcile its original attempt before retrying; a fresh planner cannot replace that checkpoint. Nothing was dispatched.' }
+        }
       } catch {
         return { ok: false, code: 'backend_error', message: 'The previous run has an invalid retry checkpoint. Nothing was dispatched.' }
       }
@@ -1938,12 +1960,7 @@ async function dispatchUnderAdmission(
       // then left the retry with no `owned_pr` and refused it against its OWN PR
       // at fresh admission. A changed branch is different: the old receipt may
       // not authorize its PR merely because this card still names the old run.
-      ...(prior !== null
-        ? { published_pr: (prior.repo_path === repo_path && prior.branch === branch
-          ? prior.published_pr : null) ?? deps.store.earlierCardPublication(
-            deps.project_slug, board_item_id, prior.id, repo_path, branch,
-          ) }
-        : {}),
+      ...(prior !== null ? { published_pr: priorPublication() } : {}),
       // The salvage-resume seed, or nothing at all. `bound_pr` is deliberately NOT
       // seeded (it means review-only-never-publish) and no verdict is seeded — the
       // resumed run is going to review, it has not been to one. `base_sha` IS

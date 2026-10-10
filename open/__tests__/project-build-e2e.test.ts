@@ -3618,7 +3618,9 @@ for (const commitWrapper of [true, false]) test(`legacy v2 reservation with unch
 }, 120_000)
 
 /** Refuse at prepare, then re-execute through the real cross-run retry. */
-async function refuseThenRetry(f: Awaited<ReturnType<typeof fixture>>, change: 'task' | 'reflection') {
+async function refuseThenRetry(f: Awaited<ReturnType<typeof fixture>>, change: 'task' | 'reflection',
+  fault?: 'missing result' | 'foreign result' | 'changed journal' | 'disarmed reservation' | 'unfinished attempt'
+    | 'stale invalidation' | 'changed original brief' | 'superseded invalidation') {
   const { state, pending, buildResult } = await legacyV2LostBuildAck(f, true)
   const task = change === 'task' ? 'Record a changed note in NOTES.md and verify the retried build records the changed note' : f.row.task
   if (change === 'task') {
@@ -3657,11 +3659,51 @@ async function refuseThenRetry(f: Awaited<ReturnType<typeof fixture>>, change: '
   await gitOut(spawnCapture, f.repo, ['tag', `trident-salvage/${prior.id}`, stale])
   await gitOut(spawnCapture, f.repo, ['branch', '-D', prior.branch!])
   await f.store.update(prior.id, { phase: 'failed', worktree: null })
+  const buildAttempt = f.store.attempts(prior.id).find(row => row.role === 'build')!
+  expect(buildAttempt.outcome).toBe('completed')
+  expect(buildAttempt.ended_at).not.toBeNull()
+  if (fault === 'missing result') await rm(join(state, 'build.result'))
+  if (fault === 'foreign result') await writeFile(join(state, 'build.result'), JSON.stringify({
+    ...JSON.parse(buildResult), step_id: 'foreign-step',
+  }))
+  if (fault === 'changed journal') {
+    const path = join(state, `attempt-request-${createHash('sha256').update(JSON.stringify([prior.id, buildAttempt.step_id, 'dispatch'])).digest('hex')}.json`)
+    const saved = JSON.parse(await readFile(path, 'utf8'))
+    saved.request.model_id = 'changed-model'
+    await writeFile(path, JSON.stringify(saved))
+  }
+  if (fault === 'disarmed reservation') {
+    const path = join(state, `claude-step-${createHash('sha256').update(JSON.stringify([prior.id, buildAttempt.step_id])).digest('hex')}.json`)
+    await writeFile(path, (await readFile(path, 'utf8')).replace('#dispatch-armed', '#not-armed'))
+  }
+  if (fault === 'unfinished attempt') f.db.raw().query(
+    'UPDATE code_trident_attempts SET outcome = NULL, ended_at = NULL WHERE run_id = ? AND step_id = ?',
+  ).run(prior.id, buildAttempt.step_id)
+  if (fault === 'stale invalidation') {
+    const checkpoint = f.store.stageEvents(prior.id).filter(row => row.stage === 'build-mode-state').at(-1)!
+    await f.store.recordStageEvent(prior.id, checkpoint.stage, checkpoint.meta)
+  }
+  if (fault === 'changed original brief') await writeFile(join(state, 'build.strategy-v2.brief'), 'changed instructions')
+  if (fault === 'superseded invalidation') await f.store.recordStageEvent(prior.id, 'build-legacy-brief-reconciled',
+    JSON.stringify({ role: 'build', decision: 'reused', stored: briefIntegrity(await readFile(join(state, 'build.strategy-v2.brief'), 'utf8')) }))
+  const originalEvents = f.store.stageEvents(prior.id)
+  const originalAttempts = f.store.attempts(prior.id)
+  const create = spyOn(f.store, 'create')
   const dispatched = await dispatchBoardBoundBuild({ task, board_item_id: 'legacy-card' }, {
     store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
     board: { get: () => ({ id: 'legacy-card', title: task, design_doc_ref: null, linked_run_id: prior.id }), attachRun: async () => {} },
     resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
-  })
+  }).then(result => {
+    if (fault) expect(create).not.toHaveBeenCalled()
+    return result
+  }).finally(() => { create.mockRestore() })
+  if (fault) {
+    expect(dispatched).toMatchObject({ ok: false, code: 'card_blocked', message: expect.stringContaining('unresolved build') })
+    expect(f.world.dispatches).toEqual([])
+    expect(f.store.stageEvents(prior.id)).toEqual(originalEvents)
+    expect(f.store.attempts(prior.id)).toEqual(originalAttempts)
+    return { brief: '', task }
+  }
   expect(dispatched.ok, JSON.stringify(dispatched)).toBe(true)
   if (!dispatched.ok) throw new Error('retry was not dispatched')
   // Launched as a dispatched run really is, so the gateway pins its base.
@@ -3693,6 +3735,13 @@ test('legacy v2 reservation refuses reuse after the reflection changed and the r
   const f = await fixture({ dispatchTask: LEGACY_TASK })
   const { brief } = await refuseThenRetry(f, 'reflection')
   expect(brief.endsWith(buildReflectionGuidance('Prefer one commit per change.'))).toBe(true)
+}, 120_000)
+
+for (const fault of ['missing result', 'foreign result', 'changed journal', 'disarmed reservation',
+  'unfinished attempt', 'stale invalidation', 'changed original brief', 'superseded invalidation'] as const)
+test(`legacy reflection invalidation cannot buy fresh work with ${fault}`, async () => {
+  const f = await fixture({ dispatchTask: LEGACY_TASK })
+  await refuseThenRetry(f, 'reflection', fault)
 }, 120_000)
 
 test('missing legacy v2 evidence stays explicit uncertainty without a dispatch', async () => {
@@ -6874,19 +6923,23 @@ for (const [variant, holder] of PREPARATION_REFUSALS) {
   }, 120_000)
 }
 
-test('owned published retry: a discovered-but-unowned PR sibling keeps the wrong-base refusal and is untouched', async () => {
+test('owned published retry: a discovered-but-unowned PR sibling refuses at dispatch and is untouched', async () => {
   const w = await ownedPublishedRetry('completed-build', { owned: false })
   const { f } = w
-  const before = { rows: await w.observe(), git: await w.git() }
-  const retry = await w.dispatch()
-  expect(retry.published_pr).toBeNull()
-  const { stepped, outcome } = await w.launch(retry.id)
-  expect(outcome).toBeNull()
-  expect(stepped.phase).toBe('failed')
-  expect(stepped.failure_reason).toContain(WRONG_BASE_REFUSAL)
-  expect(f.world.dispatches).toEqual([])
-  expect(f.github.prs).toMatchObject([{ number: 1, state: 'OPEN' }])
-  expect({ rows: await w.observe(), git: await w.git() }).toEqual(before)
+  const before = { rows: await w.observe(), git: await w.git(), card: w.board.get('project', w.card.id) }
+  f.world.dispatches.length = 0
+  const create = spyOn(f.store, 'create')
+  try {
+    const retry = await dispatchBoardBoundBuild({ task: w.task, board_item_id: w.card.id }, {
+      store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+      board: w.board, resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr', max_task_iterations: 4,
+    })
+    expect(retry).toMatchObject({ ok: false, code: 'card_blocked', message: expect.stringContaining('unresolved build') })
+    expect(create).not.toHaveBeenCalled()
+    expect(f.world.dispatches).toEqual([])
+    expect(f.github.prs).toMatchObject([{ number: 1, state: 'OPEN' }])
+    expect({ rows: await w.observe(), git: await w.git(), card: w.board.get('project', w.card.id) }).toEqual(before)
+  } finally { create.mockRestore() }
 }, 120_000)
 
 const OWNED_RETRY_CONTROLS: Record<string, { apply: (w: OwnedRetryWorld) => Promise<unknown>; refusal: string[] }> = {
@@ -9977,6 +10030,40 @@ test('a driver resumed after the branch head moved rebuilds instead of adopting 
   expect(mergedMove.stdout).toBe('advanced while driver was down')
   const mergedNotes = await spawnCapture(['git', '-C', f.origin, 'show', 'refs/heads/main:NOTES.md'], f.origin)
   expect(mergedNotes.stdout).toBe(`seed\n${f.row.id}:build:0\n${f.row.id}:build:1`)
+}, 300_000)
+
+test('an ordinary retry cannot turn a blocked prepared review into fresh planning', async () => {
+  const task = 'Preserve the implementation while a required review remains unresolved'
+  const f = await fixture({ blockRoles: ['review'], dispatchTask: task })
+  const outcome = await drive(f)
+  expect(outcome, why(f, outcome)).toMatchObject({ kind: 'blocked', phase: 'review' })
+  const checkpoint = lastCheckpoint(f)
+  expect(checkpoint.pending).toMatchObject({ phase: 'review' })
+  const prior = f.store.get(f.row.id)!
+  await f.store.update(prior.id, { phase: 'failed', worktree: null })
+  const events = f.store.stageEvents(prior.id)
+  const attempts = f.context.attempts.list(prior.id)
+  expect(attempts.some(row => row.role === 'review' && row.outcome === 'blocked')).toBe(true)
+  f.world.dispatches.length = 0
+  let attached = false
+  const create = spyOn(f.store, 'create')
+  try {
+    const retry = await dispatchBoardBoundBuild({ task, board_item_id: 'retry-card' }, {
+      store: f.store, projectAdmission: fixtureDispatchAdmission(f.db), project_slug: 'project', repo_path: f.repo,
+      board: { get: () => ({ id: 'retry-card', title: task, design_doc_ref: null, linked_run_id: prior.id }),
+        attachRun: async () => { attached = true } },
+      resolveBuildRepo: async () => f.repo, resolveMergeMode: async () => 'pr',
+    })
+    expect(retry).toMatchObject({ ok: false, code: 'card_blocked', message: expect.stringContaining('unresolved review') })
+    expect(create).not.toHaveBeenCalled()
+    expect(attached).toBe(false)
+    expect(f.world.dispatches).toEqual([])
+    expect(f.store.stageEvents(prior.id)).toEqual(events)
+    expect(f.context.attempts.list(prior.id)).toEqual(attempts)
+    expect(lastCheckpoint(f)).toEqual(checkpoint)
+    expect(f.github.prs).toHaveLength(1)
+    expect(f.github.prs[0]!.state).toBe('OPEN')
+  } finally { create.mockRestore() }
 }, 300_000)
 
 test('a driver restarted during a worker turn refuses to re-fire it', async () => {

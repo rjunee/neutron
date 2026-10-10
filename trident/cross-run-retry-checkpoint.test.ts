@@ -279,12 +279,8 @@ test('settled proof-only retry cannot revive an older build behind an unproved t
   await f.store.recordStageEvent(f.prior.id, 'build-mode-state', JSON.stringify(state))
   const before = f.store.stageEvents(f.prior.id)
   const result = await f.dispatch()
-  expect(result.ok, JSON.stringify(result)).toBe(true)
-  if (!result.ok) return
-  expect(result.run.inner_checkpoint).toBeNull()
-  expect(readBuildRetrySource(f.store, result.run)).toBeNull()
-  expect(result.run.task_iteration).toBe(4)
-  expect(result.run.max_task_iterations).toBe(8)
+  expect(result).toMatchObject({ ok: false, code: 'card_blocked', message: expect.stringContaining('unresolved fix') })
+  expect(f.store.get(f.prior.id)).toMatchObject({ task_iteration: 4, max_task_iterations: 8 })
   expect(f.store.stageEvents(f.prior.id)).toEqual(before)
 })
 
@@ -304,13 +300,50 @@ test('pending work and malformed source identity cannot become a new completed c
   state.checkpoint.pending = { phase: 'review', step_id: `${f.prior.id}:review:3` }
   await f.store.recordStageEvent(f.prior.id, 'build-mode-state', JSON.stringify(state))
   const pending = await f.dispatch()
-  expect(pending.ok && pending.run.inner_checkpoint).toBeNull()
-  if (pending.ok) await f.store.update(pending.run.id, { phase: 'failed' })
+  expect(pending).toMatchObject({ ok: false, code: 'card_blocked', message: expect.stringContaining('unresolved review') })
   delete state.checkpoint.pending
   state.runId = 'another-run'
   await f.store.recordStageEvent(f.prior.id, 'build-mode-state', JSON.stringify(state))
   const invalid = await f.dispatch()
   expect(invalid).toMatchObject({ ok: false, code: 'backend_error' })
+})
+
+for (const terminal of ['failed', 'stopped'] as const)
+for (const phase of ['plan', 'build', 'review', 'fix'] as const)
+test(`unresolved ${phase} work in a ${terminal} predecessor cannot buy a fresh planner`, async () => {
+  const f = await fixture({ phase: terminal, checkpoint: {
+    head: phase === 'plan' ? null : HEAD, remainingTasks: phase === 'plan' ? 2 : 0,
+  } })
+  const event = f.store.stageEvents(f.prior.id).filter(row => row.stage === 'build-mode-state').at(-1)!
+  const state = JSON.parse(event.meta!)
+  state.checkpoint.pending = { phase, step_id: `${f.prior.id}:task:4:${phase}:0` }
+  await f.store.recordStageEvent(f.prior.id, event.stage, JSON.stringify(state))
+  const before = f.store.stageEvents(f.prior.id)
+  const create = spyOn(f.store, 'create')
+  try {
+    expect(await f.dispatch()).toMatchObject({ ok: false, code: 'card_blocked',
+      message: expect.stringContaining(`unresolved ${phase}`) })
+    expect(create).not.toHaveBeenCalled()
+    expect(f.tipReads).toEqual([])
+    expect(f.store.stageEvents(f.prior.id)).toEqual(before)
+    expect(f.store.get(f.prior.id)).toMatchObject({ phase: terminal, task_iteration: 4, max_task_iterations: 8 })
+  } finally { create.mockRestore() }
+})
+
+for (const phase of ['plan', 'review'] as const)
+test(`a publication receipt cannot exempt unresolved ${phase} work`, async () => {
+  const f = await fixture({ mergeMode: 'pr', checkpoint: { remainingTasks: 0 } })
+  await f.store.update(f.prior.id, { published_pr: 7 })
+  const event = f.store.stageEvents(f.prior.id).filter(row => row.stage === 'build-mode-state').at(-1)!
+  const state = JSON.parse(event.meta!)
+  state.checkpoint.pending = { phase, step_id: `${f.prior.id}:${phase}:0` }
+  await f.store.recordStageEvent(f.prior.id, event.stage, JSON.stringify(state))
+  const create = spyOn(f.store, 'create')
+  try {
+    expect(await f.dispatch()).toMatchObject({ ok: false, code: 'card_blocked',
+      message: expect.stringContaining(`unresolved ${phase}`) })
+    expect(create).not.toHaveBeenCalled()
+  } finally { create.mockRestore() }
 })
 
 test('a source changed after dispatch cannot be imported', async () => {
@@ -382,6 +415,10 @@ for (const stage of ['approved', 'rejected', 'pending'] as const) test(`a later 
   await f.store.update(first.run.id, { phase: 'failed', worktree: null })
   expect(f.store.get(first.run.id)!.inner_checkpoint).toBe('fix-round-3')
   const next = await f.dispatch(HEAD, first.run.id)
+  if (stage === 'pending') {
+    expect(next).toMatchObject({ ok: false, code: 'card_blocked', message: expect.stringContaining('unresolved review') })
+    return
+  }
   expect(next.ok).toBe(true)
   if (!next.ok) return
   expect(next.run.inner_checkpoint).toBeNull()
@@ -613,7 +650,8 @@ test(`a zero terminal remainder cannot bypass ${fault} provenance`, async () => 
   }
   const result = await f.dispatch(fault === 'moved head' ? 'c'.repeat(40) : HEAD,
     fault === 'missing card link' ? null : f.prior.id, fault === 'changed task' ? `${TASK}\nResume note: changed instructions` : TASK)
-  if (fault === 'wrong branch' || fault === 'wrong project') expect(result).toMatchObject({ ok: false, code: 'backend_error' })
+  if (fault === 'pending build') expect(result).toMatchObject({ ok: false, code: 'card_blocked' })
+  else if (fault === 'wrong branch' || fault === 'wrong project') expect(result).toMatchObject({ ok: false, code: 'backend_error' })
   else {
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.run.inner_checkpoint).toBeNull()

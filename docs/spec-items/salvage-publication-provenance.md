@@ -242,8 +242,10 @@ because a PR exists.
   whose driver acknowledgement was lost and an unfinished or `unknown` attempt
   settled by its original authenticated result. Verify: `owned published retry`
   cases in `open/__tests__/project-build-e2e.test.ts`.
-- [x] The discovered-but-unowned sibling remains refused at outer launch, with
-  its PR, branch and checkout untouched and no worker dispatched.
+- [x] The discovered-but-unowned sibling remains refused, with its PR, branch
+  and checkout untouched and no worker dispatched. Under the 2026-10-10
+  unresolved-retry rule, the same-task pending sibling refuses at board dispatch
+  before creating a successor; outer launch retains its independent refusal.
 - [x] Missing or altered request, result, reservation or publication authority;
   an active native writer; another live owner; a dirty, locked or ambiguous
   retained checkout; changed repository, card or branch; unknown Git
