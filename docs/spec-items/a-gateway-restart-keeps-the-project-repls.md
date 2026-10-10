@@ -810,7 +810,14 @@ operation or unavailable authority refuses without changing ownership.
 ### Prepared termination of an authenticated native parent
 
 An owner-authorized project conversation reset may retire expired, terminal-run
-native reviews without rebooting the host. This operation requires original
+native reviews or one expired planner of a canonically stopped run without
+rebooting the host. The `expired-stopped-planner-v1` policy accepts exactly one
+original signed request with role `plan`, tools `edit`, writable `true` and result
+schema `project-plan-v2`. The existing `expired-signed-reviews-v1` policy keeps
+its read-only review restriction. Policy confusion, multiple planners, active,
+failed or completed planner runs refuse. Prior planner tool calls do not prove
+inactivity and need not be absent: complete physical execution-tree termination
+is the authority. This operation requires original
 host-signed child-bound receipts for every retained lease in the project and one
 common original native parent: session, generation, PID, kernel birth, boot and
 launch identity. Unsigned legacy work is ineligible. A missing process, task-menu
@@ -819,7 +826,10 @@ idleness, a rendered API failure or an operator assertion alone is insufficient.
 The independent operator signs a preparation naming the complete exact lease
 multiset, original dispatch receipts, parent and current boot. All runs are
 terminal and every signed original dispatch deadline has elapsed. The application
-checks its canonical run/attempt/lease state and current native census. It commits
+checks its canonical run/attempt/lease state and current native census. For a
+planner, the application checks the stopped run at preparation and consumption;
+the independent operator also reads the exact canonical stopped row and project
+from the pinned database before freezing and again before termination. It commits
 one project maintenance hold, permanent exact-work tombstones and a permanent
 conversation quarantine atomically before any signal. An ordinary conversation,
 unlisted child, pending spawn, competing preparation or ambiguous owner refuses.
@@ -843,7 +853,7 @@ signal, observation timeout or interrupted operator leaves ownership held.
 The application verifies both independently signed phases and the current boot
 before consuming the exact prepared lease multiset in one transaction. It retains
 failed runs, attempts, results, publications, transcript bytes and all original
-deadlines. This records native-parent termination, never successful review or
+deadlines. This records native-parent termination, never successful work or
 proof that historical subprocess effects succeeded. The old conversation and
 work identities cannot replay. The existing quarantined-Chat handoff permits a
 fresh conversation only after completed termination authority is verified; a
@@ -858,6 +868,14 @@ replayed or tampered completion and interrupted transactions. After valid
 consumption, fresh work is admitted while the original work and conversation
 remain denied. The legacy whole-host termination contract below retains its
 different-boot requirement.
+
+Stopped-planner controls use an authentic original signed planner request and
+the real admission store. Exact recovery preserves stopped history and unrelated
+leases, denies replay and permits a fresh conversation only after observed exit.
+Authentic wrong role, tools, writability, schema, policy, additional child and
+unexpired deadline refuse, as do non-stopped canonical runs and a changed run
+after preparation. Verify with
+`bun test open/wiring/__tests__/native-parent-termination.test.ts`.
 
 ### Prepared whole-host termination of unresolved native work
 

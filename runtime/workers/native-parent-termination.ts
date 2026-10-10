@@ -7,7 +7,7 @@ import type { HostTerminationLease, NativeHostRecoveryAuthority, SignedHostEvide
 export interface NativeParentTerminationPreparation {
   version: 1
   kind: 'native-parent-termination-preparation'
-  policy: 'expired-signed-reviews-v1'
+  policy: 'expired-signed-reviews-v1' | 'expired-stopped-planner-v1'
   operationId: string
   hostId: string
   instanceId: string
@@ -62,7 +62,8 @@ export function verifyNativeParentTerminationPreparation(value: unknown, authori
     if (!authenticated(value, authority)) return false
     const b = value.body as unknown as NativeParentTerminationPreparation
     const p = b.parent, launch = p?.launch
-    if (b.kind !== 'native-parent-termination-preparation' || b.policy !== 'expired-signed-reviews-v1'
+    if (b.kind !== 'native-parent-termination-preparation'
+      || !['expired-signed-reviews-v1', 'expired-stopped-planner-v1'].includes(b.policy)
       || !/^[a-f0-9-]{36}$/.test(b.operationId) || !nonempty(b.bootId) || b.ownerAuthorizedReset !== true
       || !digest(b.evidenceDigest) || !p || !nonempty(p.sessionId) || !nonempty(p.childGeneration)
       || !Number.isSafeInteger(p.pid) || p.pid <= 0 || !isProcessIdentity(p.processIdentity)
@@ -73,6 +74,8 @@ export function verifyNativeParentTerminationPreparation(value: unknown, authori
       || !Array.isArray(launch.argv) || !launch.argv.every(nonempty)
       || !Array.isArray(launch.tools) || !launch.tools.includes('Agent')
       || !Array.isArray(b.children) || b.children.length === 0 || b.children.length > 64) return false
+    const planner = b.policy === 'expired-stopped-planner-v1'
+    if (planner && b.children.length !== 1) return false
     // Standalone and panel reviews use different result formats. Their schema
     // does not grant or revoke authority to terminate the original execution.
     const first = b.children[0]!.lease
@@ -82,7 +85,9 @@ export function verifyNativeParentTerminationPreparation(value: unknown, authori
       if (!lease || !request || !child || !verifyNativeDispatchChildBound(dispatch, request, lease)
         || !isDeepStrictEqual(dispatch.body.parent, p) || !isDeepStrictEqual(lease.scope, first.scope)
         || lease.scope.projectId !== launch.projectId || lease.generation !== first.generation
-        || request.role !== 'review' || request.writable !== false || request.tools !== 'read-only'
+        || (planner
+          ? request.role !== 'plan' || request.writable !== true || request.tools !== 'edit' || request.result.schema !== 'project-plan-v2'
+          : request.role !== 'review' || request.writable !== false || request.tools !== 'read-only')
         || !Number.isSafeInteger(dispatch.body.deadlineMs)
         || dispatch.body.deadlineMs! <= 0 || tokens.has(lease.token) || work.has(lease.workRef) || agents.has(child)) return false
       tokens.add(lease.token); work.add(lease.workRef); agents.add(child)

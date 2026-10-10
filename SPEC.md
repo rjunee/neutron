@@ -235,12 +235,14 @@ of the original conversation and exact host-authority drain. Quarantined history
 remains readable, but canonical recovery starts any later conversation fresh,
 without replay (Decisions Log 2026-10-08, conversation quarantine).
 
-An owner-authorized reset may also retire expired native reviews whose original
-signed dispatches identify one exact parent, after an independent operator
+An owner-authorized reset may also retire expired native reviews or one expired
+planner of a canonically stopped run whose original signed dispatches identify
+one exact parent, after an independent operator
 prepares the complete scope and observes that parent's entire attributed execution
 tree terminate through retained process descriptors. This preserves failed-work history and starts any
 successor conversation fresh (Decisions Log 2026-10-10, authenticated parent
-termination). Unsigned historical work retains its existing recovery rules.
+termination and stopped-planner recovery). Unsigned historical work retains its
+existing recovery rules.
 
 A key fenced after loss of ownership evidence remains refused until a gateway
 restart performs fresh reconciliation, even if registry writes recover meanwhile
@@ -366,6 +368,22 @@ references decisions by date; none is a second home for a decision.
 | `docs/plans/*` | Per-sprint mechanics briefs (referenced from `docs/spec-items/`) |
 
 ## Decisions Log (immutable audit trail — NOT the build spec)
+
+### 2026-10-10 — Extend prepared native-parent termination to one stopped, expired planner.
+
+An owner-authorized project conversation reset may use the existing prepared
+termination transaction for one original signed writable planner whose canonical
+run is stopped and whose original deadline expired. The policy
+`expired-stopped-planner-v1` requires the exact `plan`, `edit`, writable,
+`project-plan-v2` request and the complete scope's sole native-child lease. Both
+the application and independent operator recheck stopped state before physical
+termination. Prior planner tool use does not become evidence of inactivity:
+retained process descriptors must establish complete attributed execution-tree
+exit, just as for expired reviews. All quarantine, identity, census and exact
+lease guards remain. The original stopped run, work, history and results remain
+unchanged. This extends the earlier authenticated parent-termination decision;
+review-policy receipts retain their original meaning. The contract lives in
+`docs/spec-items/a-gateway-restart-keeps-the-project-repls.md`.
 
 ### 2026-10-10 — Cancel original native work when its run is stopped or its signed deadline expires.
 

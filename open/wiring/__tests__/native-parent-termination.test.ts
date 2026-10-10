@@ -27,7 +27,7 @@ import { completedNativeParentTermination, consumeNativeParentTermination, prepa
 const cleanup: Array<() => void | Promise<void>> = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
 
-async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequest, deadline = 100, processIdentity?: { pid: number; processIdentity: ProcessIdentity }) {
+async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequest, deadline = 100, processIdentity?: { pid: number; processIdentity: ProcessIdentity }, planner = false, steps?: string[]) {
   const boot = processIdentity?.processIdentity.boot_id ?? 'kernel'
   const dir = mkdtempSync(join(tmpdir(), 'review-parent-termination-'))
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
@@ -36,7 +36,7 @@ async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequ
   seedProject(db, 'project'); seedProject(db, 'other')
   const runs = new TridentRunStore(db), attempts = new TridentAttemptLedger(db)
   const run = await runs.create({ slug: 'review', project_slug: 'project', repo_path: dir, task: 'Review specified implementation' })
-  await runs.update(run.id, { phase: 'failed' })
+  await runs.update(run.id, { phase: planner ? 'stopped' : 'failed' })
   const stateRoot = join(dir, 'builds'), state = join(stateRoot, encodeURIComponent(run.id)); mkdirSync(state, { recursive: true })
   const admission = new ProjectAdmission({ db, ownerHandle: 'owner', bootId: 'original-gateway' })
   const port = admission.forNativeChild('project')
@@ -46,10 +46,11 @@ async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequ
       executable: { realPath: '/bin/fixture-native', sha256: 'a'.repeat(64), version: '1.0.0' },
       argv: ['/bin/fixture-native', '--tools', 'Agent', '--session-id', 'original-parent', '--channels', 'server:neutron-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'], tools: ['Agent'] } }
   const children: NativeParentTerminationPreparation['children'] = []
-  for (const step of ['review-one', 'review-two']) {
+  for (const step of steps ?? (planner ? ['plan'] : ['review-one', 'review-two'])) {
     let request: BoundedWorkRequest = { run_id: run.id, step_id: step, role: 'review', model_id: 'model', effort: null,
       cwd: dir, writable: false, network: true, tools: 'read-only', brief: { path: join(state, `${step}.brief`), integrity: 'original' },
       result: { path: join(state, `${step}.result`), schema: step === 'review-one' ? 'project-review' : 'verdict' }, thread: null, budget: { wall_ms: 100 }, needs_approval_decision: false }
+    if (planner) request = { ...request, role: 'plan', writable: true, tools: 'edit', result: { ...request.result, schema: 'project-plan-v2' } }
     request = change?.(request) ?? request
     const key = { run_id: run.id, step_id: step, attempt_id: 'dispatch' }
     await attempts.admit({ ...key, phase: 'review_rubric', task_id: 'task', head_sha: 'a'.repeat(40), role: request.role, review_seat: null,
@@ -69,7 +70,7 @@ async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequ
   const signed = <T>(body: T): SignedHostEvidence<T> => ({ body, signature: sign(null, Buffer.from(JSON.stringify(body)), privateKey).toString('base64') })
   const authority: NativeHostRecoveryAuthority = { hostId: 'host', instanceId: 'instance', publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
     async attestBoot(challenge) { return signed({ version: 1, kind: 'host-boot', hostId: this.hostId, instanceId: this.instanceId, bootId: boot, challenge }) } }
-  const body: NativeParentTerminationPreparation = { version: 1, kind: 'native-parent-termination-preparation', policy: 'expired-signed-reviews-v1',
+  const body: NativeParentTerminationPreparation = { version: 1, kind: 'native-parent-termination-preparation', policy: planner ? 'expired-stopped-planner-v1' : 'expired-signed-reviews-v1',
     operationId: randomUUID(), hostId: 'host', instanceId: 'instance', bootId: boot, ownerAuthorizedReset: true,
     parent, children, evidenceDigest: 'b'.repeat(64) }
   const session = new ReplSession('key', parent.childGeneration, parent.sessionId, 'channel', dir)
@@ -113,6 +114,64 @@ test('two-phase exact review recovery survives restart, preserves failed history
   expect(f.body.children.map(c => readFileSync(nativeDispatchReceiptPath(f.state, c.dispatch.body.request), 'utf8'))).toEqual(originals)
   expect((await o.admission.forNativeChild('project').admit(f.run.id, 'review-one')).status).not.toBe('admitted')
   expect((await o.admission.forNativeChild('project').admit('fresh-run', 'review')).status).toBe('admitted')
+})
+
+
+test('stopped planner recovery preserves history and siblings across restart, without authorizing replay', async () => {
+  const f = await fixture(undefined, 100, undefined, true), o = f.options
+  expect(verifyNativeParentTerminationPreparation(f.preparation, o.authority!)).toBe(true)
+  await o.admission.forNativeChild('other').admit('other-run', 'build')
+  const history = f.runs.get(f.run.id), attempts = f.attempts.list(f.run.id)
+  const original = readFileSync(nativeDispatchReceiptPath(f.state, f.body.children[0]!.dispatch.body.request), 'utf8')
+  expect(await prepareNativeParentTermination(o, f.preparation)).toEqual({ status: 'prepared' })
+  expect(await consumeNativeParentTermination(o, { preparation: f.preparation, completion: f.completion() })).toEqual({ status: 'refused' })
+  f.exit()
+  const restarted = { ...o, admission: new ProjectAdmission({ db: f.db, ownerHandle: 'owner', bootId: 'new-gateway' }) }
+  expect(await consumeNativeParentTermination(restarted, { preparation: f.preparation, completion: f.completion() })).toEqual({ status: 'released' })
+  expect(o.admission.listLeases()).toHaveLength(1)
+  expect(o.admission.listLeases()[0]!.scope.projectId).toBe('other')
+  expect(f.runs.get(f.run.id)).toEqual(history); expect(f.attempts.list(f.run.id)).toEqual(attempts)
+  expect(readFileSync(nativeDispatchReceiptPath(f.state, f.body.children[0]!.dispatch.body.request), 'utf8')).toBe(original)
+  expect((await o.admission.forNativeChild('project').admit(f.run.id, 'plan')).status).not.toBe('admitted')
+  expect((await o.admission.forNativeChild('project').admit('fresh-run', 'plan')).status).toBe('admitted')
+  expect(completedNativeParentTermination(restarted, 'project', f.body.parent.sessionId)).toMatchObject({ nativeLoop: 'terminated' })
+})
+
+test.each(['role', 'tools', 'writable', 'schema', 'policy', 'multiple', 'deadline'] as const)(
+  'authentic planner recovery refuses wrong %s authority', async change => {
+    const f = await fixture(request => ({ ...request,
+      ...(change === 'role' ? { role: 'build' } : change === 'tools' ? { tools: 'edit-and-run' }
+        : change === 'writable' ? { writable: false } : change === 'schema' ? { result: { ...request.result, schema: 'verdict' } } : {}) }),
+      change === 'deadline' ? Date.now() + 60_000 : 100, undefined, true, change === 'multiple' ? ['plan', 'second-plan'] : undefined)
+    const body = structuredClone(f.body)
+    if (change === 'policy') body.policy = 'expired-signed-reviews-v1'
+    const original = body.children[0]!
+    expect(verifyNativeDispatchChildBound(original.dispatch, original.dispatch.body.request, original.lease)).toBe(true)
+    expect(await prepareNativeParentTermination(f.options, f.signed(body))).toEqual({ status: 'refused' })
+    expect(f.options.admission.listLeases()).toHaveLength(change === 'multiple' ? 2 : 1)
+    expect(f.options.admission.maintenance.listPlannerRetirements()).toEqual([])
+  })
+
+test.each(['forge-init', 'failed', 'done'] as const)('canonical %s planner cannot be prepared or consumed', async phase => {
+  const f = await fixture(undefined, 100, undefined, true)
+  await f.runs.update(f.run.id, { phase })
+  expect(await prepareNativeParentTermination(f.options, f.preparation)).toEqual({ status: 'refused' })
+  expect(f.options.admission.maintenance.listPlannerRetirements()).toEqual([])
+  await f.runs.update(f.run.id, { phase: 'stopped' })
+  expect(await prepareNativeParentTermination(f.options, f.preparation)).toEqual({ status: 'prepared' })
+  f.exit()
+  await f.runs.update(f.run.id, { phase })
+  expect(await consumeNativeParentTermination(f.options, { preparation: f.preparation, completion: f.completion() })).toEqual({ status: 'refused' })
+  expect(f.options.admission.listLeases()).toHaveLength(1)
+  expect(completedNativeParentTermination(f.options, 'project', f.body.parent.sessionId)).toBeUndefined()
+})
+
+test('planner recovery refuses an additional scope lease before quarantine', async () => {
+  const f = await fixture(undefined, 100, undefined, true)
+  await f.options.admission.forNativeChild('project').admit('different-run', 'plan')
+  expect(await prepareNativeParentTermination(f.options, f.preparation)).toEqual({ status: 'refused' })
+  expect(f.options.admission.listLeases()).toHaveLength(2)
+  expect(f.options.admission.maintenance.isConversationQuarantined(f.body.parent.sessionId)).toBe(false)
 })
 
 test.each(['signature', 'native-signature', 'parent', 'owner', 'boot', 'omitted-child', 'duplicate-child', 'writable', 'role', 'tools', 'scope'] as const)(
@@ -165,10 +224,10 @@ test('incomplete detachment retains every lease and fence; exact preparation can
   expect(await prepareNativeParentTermination(f.options, f.preparation)).toEqual({ status: 'prepared' })
 })
 
-test('completed physical termination crosses lifecycle and real workspace placement without resuming or deleting history', async () => {
+test.each([false, true])('completed physical termination crosses lifecycle and real workspace placement (planner=%s)', async planner => {
   const child = Bun.spawn([process.execPath, '-e', 'setInterval(() => {}, 1000)'], { stdout: 'ignore', stderr: 'ignore' })
   cleanup.push(async () => { if (child.exitCode === null) child.kill(); await child.exited })
-  const f = await fixture(undefined, 100, { pid: child.pid, processIdentity: readProcessIdentity(child.pid)! })
+  const f = await fixture(undefined, 100, { pid: child.pid, processIdentity: readProcessIdentity(child.pid)! }, planner)
   delete f.options.processVerdict // Use the actual kernel at the consuming boundary.
   const server = new RelicWorkspaceServer(), originalCall = server.call.bind(server)
   let foreground: 'original' | 'foreign' | 'empty' = 'original'
