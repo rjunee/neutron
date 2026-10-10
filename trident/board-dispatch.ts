@@ -92,6 +92,7 @@ import {
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { TASK_CONTINUATION_CHECKPOINT, builtButNeverReviewedSeed, carriedTaskBudget } from './run-disposition.ts'
 import { isTaskContinuationSource, parseBuildModeState, retryModeSource } from './build-mode-state.ts'
+import { invalidatedLegacyBuildSettled } from './legacy-retry-invalidation.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -1780,14 +1781,16 @@ async function dispatchUnderAdmission(
         // the card's link to the evidence that still needs reconciliation.
         if (sameExecution && source === null) {
           const event = deps.store.stageEvents(prior.id).filter(row => row.stage === 'build-mode-state').at(-1)
-          const pending = event ? parseBuildModeState(event.meta, prior, true).checkpoint.pending : undefined
+          const state = event ? parseBuildModeState(event.meta, prior, true) : undefined
+          const pending = state?.checkpoint.pending
           // Owned published build/fix recovery has its own settlement gate at
           // outer launch and preparation, before any planner can be dispatched.
           // A receipt only admits that verification; it cannot settle a worker.
           const publication = pending && (pending.phase === 'build' || pending.phase === 'fix')
             && merge_mode === 'pr' ? priorPublication() : null
           const verifiesPublishedHandoff = publication !== null && Number.isSafeInteger(publication) && publication > 0
-          if (pending && !verifiesPublishedHandoff) return { ok: false, code: 'card_blocked', message:
+          const invalidatedLegacy = event && state && invalidatedLegacyBuildSettled(deps.store, prior, event.id, state)
+          if (pending && !verifiesPublishedHandoff && !invalidatedLegacy) return { ok: false, code: 'card_blocked', message:
             `The previous run ${prior.id.slice(0, 8)} has unresolved ${pending.phase} work. ` +
             'Reconcile its original attempt before retrying; a fresh planner cannot replace that checkpoint. Nothing was dispatched.' }
         }

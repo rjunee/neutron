@@ -60,8 +60,14 @@ source, retain that supported continuation. The existing owned-publication
 build/fix handoff below may still create a successor to verify its authenticated
 settlement at outer launch and preparation, before dispatching any planner. A PR
 receipt alone is not settlement; its missing or invalid worker evidence still
-refuses there. Every other pending shape refuses before creating a successor or
-changing the card's run link. Preserve the original checkpoint,
+refuses there. Preserve the existing changed-input legacy recovery too: a v2
+build whose original completed result, request journal, armed reservation,
+brief and completed attempt still agree may start a new step after a later host
+measurement invalidates its reflection instructions. The latest measurement
+must name that exact original brief; missing, altered, unfinished or superseded
+evidence refuses. This permits required re-execution and imports no checkpoint
+or old approval. Every other pending shape refuses before creating a successor
+or changing the card's run link. Preserve the original checkpoint,
 attempts, artifacts and spent budgets. The refusal names the unresolved phase
 and the need to reconcile it; it is not a completed build or a cancellation
 acknowledgement.

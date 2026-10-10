@@ -18,6 +18,13 @@ publication ownership and retained-branch checks before buying any planner.
 A publication receipt cannot exempt a pending planner or review. Publication
 lineage uses the same reader for the candidate check and the created row.
 
+The existing legacy build retry also remains available when host-measured
+reflection guidance changed after an original completed build. Admission binds
+the latest invalidation event to the original brief, request journal, armed
+reservation, completed attempt and completed result. Missing or changed evidence,
+an unfinished attempt or superseded invalidation refuses before creating a run.
+This permits required fresh work; it does not import the invalidated result.
+
 Existing eligible review recovery still carries its completed implementation
 and review round into a retry. Failed and stopped predecessors, every pending
 phase, a planner with no head, an inherited pending checkpoint and published
@@ -34,6 +41,14 @@ controls cover the exception: 17 cases passed together, and the strengthened
 unowned-sibling case passed separately after moving its expected refusal to
 board dispatch. An early all-pending refusal failed its three
 owned-publication merge controls, which exposed and prevented that regression.
+
+The first complete local run found one compatibility failure in the existing
+legacy reflection-change case. The correction passes 14 selected consuming
+cases with 472 assertions, including eight damaged-evidence refusals and the
+unchanged and changed-input legacy controls. Temporarily admitting every legacy
+candidate makes all eight damaged-evidence cases fail on unwanted run creation;
+the original implementation was restored byte-for-byte. The dispatch/checkpoint
+suites still pass all 173 cases after this correction.
 
 This delivers a dispatch refusal, not native-task cancellation or a general
 recovery implementation. Live autonomous task-sequence acceptance and production

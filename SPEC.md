@@ -367,7 +367,9 @@ worker must first satisfy the existing settlement rules. If those rules cannot
 establish a reusable source, dispatch refuses before creating another run or
 moving the card's link, except for the existing owned-publication build/fix
 handoff whose outer launch and preparation must prove settlement before any
-planner starts. A publication receipt cannot authorize a review or planner
+planner starts. The existing legacy changed-input recovery also remains valid
+when the original completed worker evidence and a later measured instruction
+invalidation agree. A publication receipt cannot authorize a review or planner
 replay. The pending reservation cannot silently become a fresh planner.
 Original evidence and spend remain intact. This does not turn physical recovery
 or a stopped run row into a completed worker result. The contract is in
