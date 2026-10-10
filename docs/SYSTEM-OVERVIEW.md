@@ -7076,6 +7076,14 @@ it may dispatch a builder. Missing, malformed, contradictory, incomplete, or
 unknown selection blocks the build or leaves it explicitly unknown; it never
 defaults to `single`.
 
+Fresh closed planners submit the plan payload through `planner_work.publish`.
+The host measures the Git snapshot, constructs the result envelope and writes it
+atomically. Their version-6 brief describes that tool boundary; builders and
+file-writing reviewers still receive the complete file-envelope contract.
+Authenticated pending and retained retry work can keep its earlier brief bytes
+and grants. An old file by itself grants no recovery authority, and changed
+inputs still refuse reuse.
+
 The repository's `SPEC.md` remains authoritative governance context for the
 planner, but its presence or absence never selects execution grouping. Both
 strategies are valid for repositories with or without a `SPEC.md`:

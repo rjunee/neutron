@@ -994,13 +994,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     } catch { /* Unauthenticated legacy inputs cannot authorize a new planner. */ }
   }
   const legacyPlanner = pendingPlanner?.request.tools === 'edit-and-run' ? pendingPlanner : proofRetry?.workers.plan?.request.tools === 'edit-and-run' ? proofRetry.workers.plan : undefined
+  const retainedClosedPlanner = pendingPlanner?.request.tools === 'edit' ? pendingPlanner
+    : proofRetry?.workers.plan?.request.tools === 'edit' ? proofRetry.workers.plan : undefined
   // The pre-strategy schema migration has its own exact validator in the build
   // host. Only an authenticated pending reservation may select that binding.
   const legacyRun = context.store.get(run.id)!
   const unversionedPlanner = pendingPlanner?.request.tools === 'edit-and-run'
     && legacyRun.strategy_source === 'legacy' && legacyRun.execution_strategy !== null
     && pendingPlanner.request.brief.path === join(state, 'plan.brief.plan.host')
-  const legacyPlanVersion = legacyPlanner?.request.brief.path.match(/\.strategy-v([234])\.brief\.plan\.host$/)?.[1]
+  const legacyPlanVersion = retainedClosedPlanner?.request.brief.path.match(/\.strategy-v(5)\.brief\.plan\.host$/)?.[1]
+    ?? legacyPlanner?.request.brief.path.match(/\.strategy-v([234])\.brief\.plan\.host$/)?.[1]
     ?? (unversionedPlanner ? '3' : undefined)
   const requestedModels = {} as ProjectBuildHostOptions['requestedModels']
   const invalidated: { role: string; cause: 'task' | 'reflection' }[] = []
@@ -1025,9 +1028,12 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     // Owner guidance and test execution instructions belong only to the builders.
     const isBuilder = role === 'build' || role === 'fix'
     const reflectionSuffix = isBuilder ? buildReflectionGuidance(input.reflection_context) : ''
-    const renderBrief = ({ testExecution, commitWrapper, planWorkBoundary = false }: { testExecution: string; commitWrapper: boolean; planWorkBoundary?: boolean }) => [run.task, isBuilder
+    const renderBrief = ({ testExecution, commitWrapper, planWorkBoundary = false, closedPlanPublication = false }: { testExecution: string; commitWrapper: boolean; planWorkBoundary?: boolean; closedPlanPublication?: boolean }) => [run.task, isBuilder
       ? testExecution : '',
-      // THE BRIEF MUST STATE THE ENVELOPE, AND THE WORKER MUST COPY ITS IDS.
+      // File-writing workers need the complete envelope and exact dispatch IDs.
+      // Closed planners instead submit only the role payload; their host tool
+      // measures the snapshot and owns the envelope. Retained renderings below
+      // preserve authenticated historical input bytes, not a second fresh path.
       // `decodeProjectTrailer` (`runtime/workers/project-runners.ts:44-58`) reads
       // `{ schema, run_id, step_id, kind, result }` and refuses unless `run_id`,
       // `step_id` and `schema` each match the request EXACTLY.
@@ -1043,6 +1049,10 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       // host context (`request.run_id`, `request.step_id`, `request.result.schema`),
       // so the brief points the worker at the copy that is correct for ITS dispatch.
       `Perform the ${role} role.`,
+      ...(closedPlanPublication ? [
+      'CLOSED PLANNER RESULT. Use planner_work with operation "publish". Pass only the plan object as payload, satisfying the plan contract below. The host measures head, diff and pr, supplies schema/run_id/step_id/kind, and writes the result atomically. Do not wrap payload in an envelope or snapshot, and do not write the result file yourself.',
+      'When blocked, publish a non-empty blocked reason instead of payload. Report what stopped you rather than inventing a result.',
+      ] : [
       'Write your result file as a JSON object with EXACTLY these five fields:',
       '  "schema", "run_id", "step_id"  — copy each verbatim from the host context: `request.result.schema`, `request.run_id`, `request.step_id`. Do not invent or reformat them.',
       '  "kind"   — "completed" when you finished the role, or "blocked" when you could not.',
@@ -1051,14 +1061,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
       'The completed result must satisfy this outer snapshot contract. Copy `snapshot.pr` from the host context unchanged: null or { "number": positive integer, "head": string, "state": "OPEN" | "CLOSED" | "MERGED" }. Never replace it with a number or URL. The forge payload field `result.payload.prNumber` is separately a number or null; it does not replace `result.pr`. Measure head and diff for the resulting revision; the host independently checks the claim.',
       JSON.stringify(PROJECT_SNAPSHOT_SCHEMA),
       `\`result.payload\` must satisfy the ${role === 'plan' ? 'plan' : role === 'review' ? 'verdict' : 'forge'} trailer contract below. Read the host context for the measured snapshot.`,
+      ]),
       JSON.stringify(role === 'plan' ? PLAN_SCHEMA : role === 'review' ? VERDICT_SCHEMA : FORGE_SCHEMA),
       ...(role === 'plan' ? [PLAN_LEDGER_CONTRACT] : []),
       ...(role === 'plan' && planWorkBoundary ? [PLAN_WORK_BOUNDARY] : []),
       ...(isBuilder ? ['EXECUTION SCOPE. Read the host context `executionStrategy` and validated plan in `previous`. For `single`, implement the WHOLE accepted plan and executionSpec. For `task_sequence`, implement only the host-selected `topTask` and its executionSpec; leave later tasks to later calls. Never select a strategy or task yourself. A fix addresses the host-provided findings without changing strategy. A wave member implements only its host-pinned task.'] : []),
       ...(isBuilder && commitWrapper ? [`Commit only through the host wrapper with argv ${JSON.stringify(['bash', join(TRIDENT_SCRIPT_DIR, 'commit-with-resolved-head.sh'), run.branch])}, followed by your git commit arguments. Never invoke git commit directly. Do not add a Claude-Session: trailer; keep Co-Authored-By. After the wrapper returns, read the final OID with git rev-parse HEAD for both result.head and payload.commitSha.`] : []),
-      'Never publish or merge; the host owns those actions.',
+      closedPlanPublication ? 'Never publish a branch or merge; the host owns repository publication.' : 'Never publish or merge; the host owns those actions.',
     ].join('\n\n') + reflectionSuffix
-    let brief = renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true, planWorkBoundary: !unversionedPlanner })
+    let brief = renderBrief({ testExecution: TEST_EXECUTION_V3, commitWrapper: true, planWorkBoundary: !unversionedPlanner,
+      closedPlanPublication: role === 'plan' && legacyPlanVersion === undefined })
     // A LEGACY V2 BRIEF IS EVIDENCE, NOT AUTHORITY (#1296). A pending reservation
     // is identified by `{ brief.path, brief.integrity }` alone (`build-run.ts`
     // resume validation), and neither the task text nor the owner reflection is
@@ -1080,7 +1092,7 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     // Missing or unrecognized evidence stays explicit, bounded uncertainty: the
     // current brief identity is presented, it cannot match the v2 reservation, and
     // build-run answers its typed `unknown` with the reservation intact.
-    let path = join(state, `${role}.strategy-v${role === 'plan' ? legacyPlanVersion ?? 5 : 3}.brief`)
+    let path = join(state, `${role}.strategy-v${role === 'plan' ? legacyPlanVersion ?? 6 : 3}.brief`)
     const legacyPath = join(state, `${role}.strategy-v2.brief`)
     let stored: string | null = null
     try { if (role !== 'plan' || legacyPlanVersion === '2') stored = await readFile(legacyPath, 'utf8') }
@@ -1109,14 +1121,16 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
     } else {
       if (role === 'plan') {
         // Existing run inputs retain the exact signed request/grants. New runs
-        // receive v5 and the enforced edit-only planning capability.
-        const previousPath = join(state, 'plan.strategy-v4.brief')
-        let previous: string | null = null
-        try { if (legacyPlanVersion === '4') previous = await readFile(previousPath, 'utf8') }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
-        if (previous !== null) {
-          if (previous !== brief) throw Error('Stored v4 planner inputs changed')
-          path = previousPath
+        // receive v6 with the closed tool's payload publication instructions.
+        for (const version of ['4', '5']) {
+          const previousPath = join(state, `plan.strategy-v${version}.brief`)
+          let previous: string | null = null
+          try { if (legacyPlanVersion === version) previous = await readFile(previousPath, 'utf8') }
+          catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+          if (previous !== null) {
+            if (previous !== brief) throw Error(`Stored v${version} planner inputs changed`)
+            path = previousPath
+          }
         }
         const priorPath = join(state, 'plan.strategy-v3.brief')
         let prior: string | null = null
@@ -1137,10 +1151,11 @@ export async function prepareProjectBuild(input: InnerLoopInput, context: Projec
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || await readFile(path, 'utf8') !== brief) throw error
       }
     }
+    const closedPlanner = role === 'plan' && /plan\.strategy-v[56]\.brief$/.test(path)
     workers[role] = { provider, request: {
       model_id: descriptor.model_id, effort: selected?.effort ?? phase.default.effort,
-      cwd: run.worktree, writable: role !== 'review', network: role !== 'review' && !path.endsWith('plan.strategy-v5.brief'),
-      tools: role === 'review' ? 'read-only' : path.endsWith('plan.strategy-v5.brief') ? 'edit' : 'edit-and-run',
+      cwd: run.worktree, writable: role !== 'review', network: role !== 'review' && !closedPlanner,
+      tools: role === 'review' ? 'read-only' : closedPlanner ? 'edit' : 'edit-and-run',
       brief: { path, integrity: briefIntegrity(brief) },
       result: { schema: role === 'plan' ? 'project-plan-v2' : role === 'review' ? 'project-review' : 'project-build', path: join(state, `${role}.result`) },
       thread: null, budget: { wall_ms: PROJECT_BUILD_WALL_MS[role] },
