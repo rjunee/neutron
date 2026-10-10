@@ -198,4 +198,72 @@ echo "Ran 1 tests across $count files."
       rmSync(root, { recursive: true, force: true })
     }
   })
+
+  // Sharded, the measured planner decides WHICH shard runs a listener-opening
+  // file; it must not change HOW it runs. Each shard keeps the serial lane, and
+  // the two shards together run every file exactly once.
+  test('sharded 1/2 + 2/2: real-HTTP files stay serial and the union is complete', () => {
+    const root = mkdtempSync(join(tmpdir(), 'neutron-http-lane-shard-'))
+    try {
+      mkdirSync(join(root, 'pkg'), { recursive: true })
+      const httpFiles = ['a', 'b', 'c']
+      for (const name of httpFiles) {
+        writeFileSync(
+          join(root, 'pkg', `${name}.test.ts`),
+          "test('http', () => { const server = Bun.serve({ port: 0, fetch() {} }); server.stop() })\n",
+        )
+      }
+      writeFileSync(join(root, 'pkg', 'plain.test.ts'), "test('plain', () => {})\n")
+      const fakeBun = join(root, 'fake-bun')
+      writeFileSync(
+        fakeBun,
+        `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$FAKE_CALLS"
+count=0
+for arg in "$@"; do case "$arg" in *.test.ts|*.test.tsx) count=$((count + 1));; esac; done
+if [ "$count" -eq 0 ]; then count=4; fi
+echo "Ran 1 tests across $count files."
+`,
+      )
+      chmodSync(fakeBun, 0o755)
+      const all = ['./pkg/plain.test.ts', ...httpFiles.map((n) => `./pkg/${n}.test.ts`)]
+      const ran: string[] = []
+      for (const spec of ['1/2', '2/2']) {
+        const calls = join(root, `calls-${spec.replace('/', '-')}.txt`)
+        const result = spawnSync('bash', [RUN_TESTS], {
+          cwd: ROOT,
+          encoding: 'utf8',
+          env: {
+            // HERMETIC: see the note on the tests above.
+            ...Object.fromEntries(
+              Object.entries(process.env).filter(([k]) => !k.startsWith('NEUTRON_TEST_')),
+            ),
+            NEUTRON_TEST_ROOT: root,
+            NEUTRON_BUN_BIN: fakeBun,
+            NEUTRON_TEST_DISCOVER_OVERRIDE: all.join(' '),
+            NEUTRON_TEST_SHARD: spec,
+            FAKE_CALLS: calls,
+          },
+        })
+        const output = `${result.stdout}${result.stderr}`
+        expect(result.status).toBe(0)
+        expect(output).toContain('run-tests: PASS')
+        expect(output).toMatch(/^run-tests: shard plan simulated makespan /m)
+        const invocations = readFileSync(calls, 'utf8').trim().split('\n')
+          .filter((line) => !line.includes('__neutron_runtests_no_match__'))
+        for (const line of invocations) {
+          const files = line.split(/\s+/).filter((tok) => tok.endsWith('.test.ts'))
+          if (files.some((f) => f !== './pkg/plain.test.ts')) {
+            // A listener-opening batch: serial, and never mixed with the general file.
+            expect(line).toContain('--max-concurrency=1')
+            expect(files).not.toContain('./pkg/plain.test.ts')
+          }
+          ran.push(...files)
+        }
+      }
+      expect(ran.slice().sort()).toEqual(all.slice().sort())
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
 })

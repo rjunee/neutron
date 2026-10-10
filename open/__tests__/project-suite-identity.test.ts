@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, spyOn, test } from 'bun:test'
 import { chmod, copyFile, link, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { join, posix } from 'node:path'
 import { tmpdir } from 'node:os'
-import { PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, projectInstalledTreeIdentity, projectSuiteIdentity, projectSuiteIdentityMeasurement as measureSuiteIdentity } from '../wiring/project-build-dependencies.ts'
+import { PORTABLE_RUNNER_FILES, PROJECT_INSTALLED_IDENTITY_TIMEOUT_MS, projectInstalledTreeIdentity, projectSuiteIdentity, projectSuiteIdentityMeasurement as measureSuiteIdentity } from '../wiring/project-build-dependencies.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { isolatePackageLauncherEnvironment } from './package-launcher-fixture-env.ts'
 
@@ -220,12 +220,150 @@ test('portable proof admits only a measured command closure and refuses tracked 
   expect(linked?.portableIdentity).toBeUndefined()
 })
 
+/** Copy the host's whole measured runner closure into a fixture checkout. */
+async function copyRunnerClosure(root: string, omit: readonly string[] = []) {
+  for (const path of PORTABLE_RUNNER_FILES) {
+    if (omit.includes(path)) continue
+    await mkdir(join(root, path, '..'), { recursive: true })
+    await copyFile(new URL(`../../${path}`, import.meta.url), join(root, path))
+  }
+}
+
+/**
+ * Derive the runner closure from SOURCES, so the declared list cannot drift from
+ * what the runner actually reads. Starts at scripts/run-tests.sh; a shell file
+ * contributes every non-comment `${SCRIPT_DIR}/<rel>` reference (as
+ * scripts/<rel>); a TypeScript file contributes its static `import '…'`,
+ * `from '…'` and `import('…')` specifiers, where `node:` builtins are allowed,
+ * relative ones are followed, and anything else is refused (a package import
+ * would reach outside the measured closure); JSON files are leaves.
+ */
+function derivedRunnerClosure(read: (path: string) => string | undefined): string[] {
+  const closure = new Set<string>()
+  const queue = ['scripts/run-tests.sh']
+  while (queue.length > 0) {
+    const path = queue.shift()!
+    if (closure.has(path)) continue
+    const text = read(path)
+    if (text === undefined) throw Error(`runner dependency ${path} does not exist`)
+    closure.add(path)
+    if (path.endsWith('.sh')) {
+      for (const line of text.split('\n')) {
+        if (/^\s*#/.test(line)) continue
+        for (const match of line.matchAll(/\$\{SCRIPT_DIR\}\/([A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:sh|ts|json))/g)) {
+          queue.push(posix.normalize(`scripts/${match[1]}`))
+        }
+      }
+    } else if (path.endsWith('.ts')) {
+      // Prose in comments ("… from \"never installed\"") is not an import.
+      const code = text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+      const specifiers = [
+        ...code.matchAll(/^\s*import\s+['"]([^'"\s]+)['"]/gm),
+        ...code.matchAll(/\bfrom\s+['"]([^'"\s]+)['"]/g),
+        ...code.matchAll(/\bimport\s*\(\s*['"]([^'"\s]+)['"]\s*\)/g),
+      ].map((match) => match[1]!)
+      for (const specifier of specifiers) {
+        if (specifier.startsWith('node:')) continue
+        if (!specifier.startsWith('./') && !specifier.startsWith('../')) {
+          throw Error(`runner TS may import only node: or relative modules (${path} imports ${specifier})`)
+        }
+        queue.push(posix.normalize(posix.join(posix.dirname(path), specifier)))
+      }
+    } else if (!path.endsWith('.json')) {
+      throw Error(`runner dependency ${path} has no known kind`)
+    }
+  }
+  return [...closure].sort()
+}
+
+async function hostRunnerSources(): Promise<Map<string, string>> {
+  const sources = new Map<string, string>()
+  const read = async (path: string) => readFile(new URL(`../../${path}`, import.meta.url), 'utf8').catch(() => undefined)
+  // Seed with the declared list, then pull in anything the derivation reaches.
+  for (const path of PORTABLE_RUNNER_FILES) {
+    const text = await read(path)
+    if (text !== undefined) sources.set(path, text)
+  }
+  for (;;) {
+    let missing: string | undefined
+    try { derivedRunnerClosure(path => sources.get(path)) } catch (error) {
+      missing = /runner dependency (\S+) does not exist/.exec(String(error))?.[1]
+      if (!missing) throw error
+    }
+    if (!missing) return sources
+    const text = await read(missing)
+    if (text === undefined) throw Error(`runner dependency ${missing} does not exist on the host`)
+    sources.set(missing, text)
+  }
+}
+
+test('portable runner closure guard: the declared list is exactly what the runner sources reach', async () => {
+  const sources = await hostRunnerSources()
+  const declared = [...PORTABLE_RUNNER_FILES].sort()
+  expect(derivedRunnerClosure(path => sources.get(path))).toEqual(declared)
+  for (const required of ['scripts/lib/shard-partition.ts', 'scripts/lib/test-cost-profile.ts', 'scripts/lib/test-cost-profile.json']) {
+    expect(declared).toContain(required)
+  }
+  // Control: a declared list missing any entry no longer matches the derivation.
+  for (const dropped of declared) {
+    expect(derivedRunnerClosure(path => sources.get(path))).not.toEqual(declared.filter(path => path !== dropped))
+  }
+  // Control: a new relative import in the planner widens the closure past the list.
+  const planner = sources.get('scripts/lib/shard-partition.ts')!
+  const widened = new Map(sources)
+  widened.set('scripts/lib/shard-partition.ts', `import './unlisted.ts'\n${planner}`)
+  widened.set('scripts/lib/unlisted.ts', 'export {}\n')
+  expect(derivedRunnerClosure(path => widened.get(path))).not.toEqual(declared)
+  expect(derivedRunnerClosure(path => widened.get(path))).toContain('scripts/lib/unlisted.ts')
+  // Control: a package import reaches outside any measurable closure and is refused.
+  const external = new Map(sources)
+  external.set('scripts/lib/shard-partition.ts', `import 'some-package'\n${planner}`)
+  expect(() => derivedRunnerClosure(path => external.get(path))).toThrow('runner TS may import only node: or relative modules')
+})
+
+test('portable runner closure: an unchanged closure reuses proof; changed profile or planner bytes refuse it', async () => {
+  const { root, git } = await fixture()
+  await copyRunnerClosure(root)
+  await git('add', 'scripts')
+  await git('commit', '-qm', 'host runner closure fixture')
+  const command = 'bash scripts/run-tests.sh'
+  const before = await measureSuiteIdentity(root, undefined, command)
+  expect(before?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  // Legitimate reuse: the same closure in a distinct worktree measures the same.
+  const retry = `${root}-retry`; roots.push(retry)
+  await git('worktree', 'add', '--detach', retry, 'HEAD')
+  expect((await measureSuiteIdentity(retry, undefined, command))?.portableIdentity).toBe(before!.portableIdentity)
+  for (const path of ['scripts/lib/test-cost-profile.json', 'scripts/lib/shard-partition.ts', 'scripts/lib/test-cost-profile.ts']) {
+    const original = await readFile(join(root, path))
+    const changed = Buffer.from(original)
+    // One byte: the last one (a newline in each file) becomes a space.
+    changed[changed.length - 1] = 0x20
+    await writeFile(join(root, path), changed)
+    await git('add', path)
+    await git('commit', '-qm', `changed ${path}`)
+    const observed = await measureSuiteIdentity(root, undefined, command)
+    expect(observed?.identity).toMatch(/^[a-f0-9]{64}$/)
+    expect(observed?.portableIdentity).toBeUndefined()
+    await writeFile(join(root, path), original)
+    await git('add', path)
+    await git('commit', '-qm', `restored ${path}`)
+    expect((await measureSuiteIdentity(root, undefined, command))?.portableIdentity).toMatch(/^[a-f0-9]{64}$/)
+  }
+})
+
+test('portable runner closure: a checkout missing the shard planner refuses portable proof', async () => {
+  const { root, git } = await fixture()
+  await copyRunnerClosure(root, ['scripts/lib/shard-partition.ts'])
+  await git('add', 'scripts')
+  await git('commit', '-qm', 'runner closure without the planner')
+  const observed = await measureSuiteIdentity(root, undefined, 'bash scripts/run-tests.sh')
+  expect(observed?.identity).toMatch(/^[a-f0-9]{64}$/)
+  expect(observed?.portableIdentity).toBeUndefined()
+})
+
 test('portable first-party runner requires exact host source and measures utility tools', async () => {
   const { root, git } = await fixture()
-  const paths = ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh', 'scripts/ci/verify-workspace-deps.ts']
-  await mkdir(join(root, 'scripts', 'lib'), { recursive: true })
-  await mkdir(join(root, 'scripts', 'ci'), { recursive: true })
-  for (const path of paths) await copyFile(new URL(`../../${path}`, import.meta.url), join(root, path))
+  await copyRunnerClosure(root)
   await git('add', 'scripts')
   await git('commit', '-qm', 'host runner fixture')
   const command = 'export NEUTRON_TEST_JOBS=1\nexport NEUTRON_TEST_CONCURRENCY=2\nbash scripts/run-tests.sh'
@@ -251,7 +389,7 @@ test('portable first-party runner requires exact host source and measures utilit
     if (oldPath === undefined) delete process.env.PATH
     else process.env.PATH = oldPath
   }
-  await writeFile(join(root, paths[1]!), '# modified discovery\n')
+  await writeFile(join(root, 'scripts/lib/discover-test-files.sh'), '# modified discovery\n')
   await git('add', 'scripts')
   await git('commit', '-qm', 'changed runner fixture')
   expect((await measureSuiteIdentity(root, undefined, command))?.portableIdentity).toBeUndefined()
@@ -283,10 +421,7 @@ test('portable Bun configuration permits confined tracked first-party preloads a
 async function packageLauncherFixture() {
   const { root, git } = await fixture()
   await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'launcher-fixture', version: '1.0.0', scripts: { test: 'bash scripts/run-tests.sh' } }))
-  for (const path of ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh', 'scripts/ci/verify-workspace-deps.ts']) {
-    await mkdir(join(root, path, '..'), { recursive: true })
-    await copyFile(new URL(`../../${path}`, import.meta.url), join(root, path))
-  }
+  await copyRunnerClosure(root)
   await git('add', '.')
   await git('commit', '-qm', 'package launcher fixture')
   const command = 'export NEUTRON_TEST_JOBS=1\nexport NEUTRON_TEST_CONCURRENCY=2\nbun run test'

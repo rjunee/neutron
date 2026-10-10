@@ -256,8 +256,14 @@ export async function projectInstalledTreeIdentity(worktree: string,
 }
 
 const toolDigests = new Map<string, string>()
-const PORTABLE_RUNNER_FILES = ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh',
-  'scripts/ci/verify-workspace-deps.ts']
+/** The measured first-party runner closure: every file `scripts/run-tests.sh`
+ * reads or executes, transitively. The shard planner, its profile validator and
+ * the committed measured profile are suite inputs (#1447). Changed bytes, or a
+ * runner dependency outside this list, refuse portable reuse; the closure guard
+ * in open/__tests__/project-suite-identity.test.ts derives it from the sources. */
+export const PORTABLE_RUNNER_FILES: readonly string[] = ['scripts/run-tests.sh', 'scripts/lib/discover-test-files.sh',
+  'scripts/ci/verify-workspace-deps.ts', 'scripts/lib/shard-partition.ts', 'scripts/lib/test-cost-profile.ts',
+  'scripts/lib/test-cost-profile.json']
 const PORTABLE_RUNNER_TUNING = new Set(['NEUTRON_TEST_JOBS', 'NEUTRON_TEST_CONCURRENCY',
   'NEUTRON_TEST_CHUNK_SIZE', 'NEUTRON_TEST_TIMEOUT', 'NEUTRON_TEST_PGLITE_RETRIES',
   'NEUTRON_TEST_PGLITE_CONCURRENCY', 'NEUTRON_TEST_PGLITE_TIMEOUT'])

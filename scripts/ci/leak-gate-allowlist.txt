@@ -257,3 +257,12 @@ tests/integration/claim-redirect-once.open.test.ts:tenant-purged
 # Open owns. Retired-vocab rules only; PII / hosted-domain / secret stay ARMED.
 docs/SYSTEM-OVERVIEW.md:tenant-word
 docs/SYSTEM-OVERVIEW.md:tenant-purged
+
+# The measured test-cost profile (scripts/lib/test-cost-profile.json, #1447) is
+# derived by scripts/ci/collect-test-cost-profile.ts and records the repo-relative
+# path of every test file one CI run executed. One real, discovered test file is
+# named for the retired vocabulary (cores/free/code-gen/__tests__/ +
+# workspace-resolver.test.ts), so the profile necessarily carries that path as
+# data. Exempted ONLY from workspace-retired; every PII, hosted-domain and secret
+# rule still scans the profile.
+scripts/lib/test-cost-profile.json:workspace-retired
