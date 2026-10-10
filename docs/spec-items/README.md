@@ -19,6 +19,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`cancel-stops-host-review-suite`](cancel-stops-host-review-suite.md) — Cancellation stops the run's host review suite
 - [`claude-same-agent-continuation`](claude-same-agent-continuation.md) — Continue a quota-limited Claude child on its original native agent ID
 - [`codex-review-provider-limit`](codex-review-provider-limit.md) — Preserve explicit Codex provider usage limits at the review gate
+- [`host-test-suite-efficiency`](host-test-suite-efficiency.md) — Diagnose early and remove measured host test-suite waste
 - [`planner-selected-execution-strategy`](planner-selected-execution-strategy.md) — Let the initial planner select a persisted execution strategy
 - [`published-branch-preservation`](published-branch-preservation.md) — Preserve previously published work across fresh dispatch and replay
 - [`refreshed-ci-merge-readiness`](refreshed-ci-merge-readiness.md) — Wait for refreshed CI without rebuilding an approved revision
