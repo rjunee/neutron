@@ -99,6 +99,18 @@ After the correction:
   case. Each mutant produced zero pass and one fail; source bytes were restored,
   and all three restored controls passed.
 
-The corrected source still requires a complete shared-host gate, exact-head CI
-and deployment. The initial red receipt is retained separately from those
-requirements.
+### Corrected complete local receipt
+
+The corrected clean revision `b45c509cbc3e6f60aa7a8672f6b37ec4dfb628f7` passed
+`bash scripts/check-shared-host.sh` with Bun 1.4.2. The run started at
+2026-10-10 02:02:44 UTC and finished at 02:39:45 UTC, exit zero. Lint and all
+51 project typechecks passed. All 1,809 discovered files executed across the
+19 bounded-memory lanes: 28,487 tests passed, 24 skipped and zero failed.
+The measured suite input identity remained
+`098ef040045bc0b7c1b9aff59b309ab7a93101926b055b54594215e693efa6b7`.
+The revision and clean working-tree state were unchanged when the run finished;
+only this receipt is added afterward to the publication head.
+
+The initial red receipt remains above as the evidence that found the recovery
+regressions. Exact-head CI, deployment and a live measurement of the corrected
+instructions remain pending; the local pass does not establish them.
