@@ -47,7 +47,18 @@ unsupported ephemeral port; the successful probe used a separate fixed port.
 The first canonical shared-host gate passed lint but found the peer test helper's
 inferred session type lacked `acquireTurn`; it stopped before the full suite.
 The helper now accepts the actual `ReplSession` fixture, and the runtime typecheck
-passes. Production code is unchanged by that correction. The complete shared-host
-gate and exact publication-head CI remain pending. Focused fixtures do not
-establish deployed quota recovery or the remaining unattended task-sequence
-acceptance. No Trident-owned candidate was edited or manually merged.
+passes. Production code is unchanged by that correction.
+
+The complete `bash scripts/check-shared-host.sh` gate passed on clean revision
+`7a28c25b0acf2ed67e7ccb898a7177380fd1a878`, from 04:59:32 to 05:35:59 UTC:
+lint, all 51 typecheck projects, and 28,495 passing tests with 24 skips and zero
+failures. The coverage audit executed all 1,809 discovered test files across the
+19 bounded-memory lanes. The suite input identity remained
+`8711043bfb57b849214cdfbcdb2eea34b0fc3ec1c86763f3cc799cd6bae81ec7`.
+Only this validation record changes after that local run; exact publication-head
+CI remains the merge gate. These results do not establish deployed quota
+recovery or the remaining unattended task-sequence acceptance. The original
+sequence exhausted its signed review deadlines and failed while this correction
+was being validated; its three native leases remain held. This correction does
+not retroactively extend those deadlines. No Trident-owned candidate was edited
+or manually merged.
