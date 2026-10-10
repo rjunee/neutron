@@ -49,3 +49,11 @@ Read-only checks also matched the three actual retained dispatch receipts and
 canonical terminal-run/attempt records, including their mixed result formats.
 These checks do not establish deployment or fresh unattended sequence acceptance;
 the independent operator must still supply an actual retained-process exit proof.
+
+The required shared-host gate passed on
+`a10a71e5d822dca579b43ae6b28b9f7fd9b054fc` on 2026-10-10 (07:46–08:22 UTC):
+lint, all 51 typecheck projects and the complete partitioned suite, with 28,554
+passed, 24 skipped and zero failures across all 1,812 discovered files. The
+measured suite inputs and clean revision remained unchanged. Dependency layering
+also passed with no new violations. This final documentation update records that
+receipt; publication and deployment still require their own checks.
