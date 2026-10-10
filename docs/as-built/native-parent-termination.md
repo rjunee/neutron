@@ -27,16 +27,22 @@ The persistent adapter can quarantine the complete positively bound background
 request set while rejecting ordinary turns and foreign or unknown slots. It
 detaches without sending input or signals. A verified completed termination
 allows the existing terminal metadata handoff after the original process is
-gone. Prepared quarantine alone cannot release that terminal slot. The existing
+gone. The real workspace manager requires the original pane birth receipt and
+an empty foreground before releasing only its Chat claim. A fresh placement
+retains the quarantined pane and registry history; prepared quarantine alone
+cannot release that terminal slot. The existing
 living-parent planner protocol and different-boot whole-host protocol retain
 their previous requirements.
 
-Focused verification passed 138 tests with 897 assertions across the admission
+Focused verification passed 139 tests with 912 assertions across the admission
 store, consuming boundary, HTTP surface and persistent quarantine/handoff paths.
 Controls cover altered signatures, original receipt/lease mismatches, incomplete
 ownership, unexpired deadlines, live runs, live parents, incomplete execution-tree termination, interrupted writes and
-other-project preservation. Three mutations removing operator authentication,
-the live-parent refusal or complete-lease checks each failed the opposing tests.
+other-project preservation. Four mutations removing operator authentication, the live-parent refusal or
+complete-lease checks, or restoring the old live-process workspace requirement,
+each failed the opposing tests. The workspace test uses a real isolated child
+process and the actual lifecycle and workspace manager; foreign foreground
+processes and changed pane birth receipts both prevent handoff.
 An ephemeral real turn through `createClaudeCodeSubstrateAuto`, the retained Bun
 PTY backend and registered native relay completed in approximately four seconds.
 Read-only checks also matched the three actual retained dispatch receipts and

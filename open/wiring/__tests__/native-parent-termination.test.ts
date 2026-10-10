@@ -8,6 +8,12 @@ import { ProjectAdmission } from '@neutronai/gateway/project-admission.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { TridentAttemptLedger } from '@neutronai/trident/attempt-ledger.ts'
 import type { BoundedWorkRequest } from '@neutronai/runtime/bounded-work.ts'
+import { readProcessIdentity, type ProcessIdentity } from '@neutronai/runtime/adapters/claude-code/persistent/process-identity.ts'
+import { RelicWorkspaceServer } from '@neutronai/runtime/adapters/claude-code/persistent/__tests__/workspace-relic-fixture.ts'
+import { createWorkerTerminalHost, createConversationTerminal, projectWorkspaceJournalPath } from '../project-build-terminal.ts'
+import { createProjectScopeLifecycle } from '../project-scope-lifecycle.ts'
+import { herdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
+import { saveRegistry } from '@neutronai/runtime/adapters/claude-code/persistent/repl-registry.ts'
 import { ReplSession } from '@neutronai/runtime/adapters/claude-code/persistent/repl-session.ts'
 import { createClaudeNativeDispatchReceipt, nativeDispatchReceiptPath, readClaudeNativeDispatchReceipt, verifyNativeDispatchChildBound, type SignedNativeDispatchRecord } from '@neutronai/runtime/workers/claude-native-dispatch-receipt.ts'
 import type { NativeHostRecoveryAuthority, SignedHostEvidence } from '@neutronai/runtime/workers/native-host-termination.ts'
@@ -18,10 +24,11 @@ import { seedProject } from '@neutronai/gateway/wiring/__tests__/project-admissi
 import { completedNativeParentTermination, consumeNativeParentTermination, prepareNativeParentTermination,
   type NativeParentTerminationOptions } from '../native-parent-termination.ts'
 
-const cleanup: Array<() => void> = []
-afterEach(() => { for (const close of cleanup.splice(0).reverse()) close() })
+const cleanup: Array<() => void | Promise<void>> = []
+afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
 
-async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequest, deadline = 100) {
+async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequest, deadline = 100, processIdentity?: { pid: number; processIdentity: ProcessIdentity }) {
+  const boot = processIdentity?.processIdentity.boot_id ?? 'kernel'
   const dir = mkdtempSync(join(tmpdir(), 'review-parent-termination-'))
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
   const path = join(dir, 'project.db'); seedMigratedDb(path)
@@ -33,11 +40,11 @@ async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequ
   const stateRoot = join(dir, 'builds'), state = join(stateRoot, encodeURIComponent(run.id)); mkdirSync(state, { recursive: true })
   const admission = new ProjectAdmission({ db, ownerHandle: 'owner', bootId: 'original-gateway' })
   const port = admission.forNativeChild('project')
-  const parent = { sessionId: 'original-parent', childGeneration: 'original-generation', pid: process.pid,
-    processIdentity: { boot_id: 'kernel', start_ticks: 1 },
+  const parent = { sessionId: 'original-parent', childGeneration: 'original-generation', pid: processIdentity?.pid ?? process.pid,
+    processIdentity: processIdentity?.processIdentity ?? { boot_id: boot, start_ticks: 1 },
     launch: { version: 1 as const, sessionId: 'original-parent', childGeneration: 'original-generation', projectId: 'project',
       executable: { realPath: '/bin/fixture-native', sha256: 'a'.repeat(64), version: '1.0.0' },
-      argv: ['/bin/fixture-native', '--tools', 'Agent'], tools: ['Agent'] } }
+      argv: ['/bin/fixture-native', '--tools', 'Agent', '--session-id', 'original-parent', '--channels', 'server:neutron-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'], tools: ['Agent'] } }
   const children: NativeParentTerminationPreparation['children'] = []
   for (const step of ['review-one', 'review-two']) {
     let request: BoundedWorkRequest = { run_id: run.id, step_id: step, role: 'review', model_id: 'model', effort: null,
@@ -61,21 +68,21 @@ async function fixture(change?: (request: BoundedWorkRequest) => BoundedWorkRequ
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const signed = <T>(body: T): SignedHostEvidence<T> => ({ body, signature: sign(null, Buffer.from(JSON.stringify(body)), privateKey).toString('base64') })
   const authority: NativeHostRecoveryAuthority = { hostId: 'host', instanceId: 'instance', publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString(),
-    async attestBoot(challenge) { return signed({ version: 1, kind: 'host-boot', hostId: this.hostId, instanceId: this.instanceId, bootId: 'kernel', challenge }) } }
+    async attestBoot(challenge) { return signed({ version: 1, kind: 'host-boot', hostId: this.hostId, instanceId: this.instanceId, bootId: boot, challenge }) } }
   const body: NativeParentTerminationPreparation = { version: 1, kind: 'native-parent-termination-preparation', policy: 'expired-signed-reviews-v1',
-    operationId: randomUUID(), hostId: 'host', instanceId: 'instance', bootId: 'kernel', ownerAuthorizedReset: true,
+    operationId: randomUUID(), hostId: 'host', instanceId: 'instance', bootId: boot, ownerAuthorizedReset: true,
     parent, children, evidenceDigest: 'b'.repeat(64) }
   const session = new ReplSession('key', parent.childGeneration, parent.sessionId, 'channel', dir)
   let alive = true, inspected = 0, detached = 0
   const options: NativeParentTerminationOptions = { authority, admission, stateRoot, runs, attempts,
-    projectIdForRun: value => value.project_slug, listProjectIds: () => ['project', 'other'], kernelBootId: () => 'kernel',
+    projectIdForRun: value => value.project_slug, listProjectIds: () => ['project', 'other'], kernelBootId: () => boot,
     resolve: async () => ({ live: [{ sessionKey: 'key', session, options: { substrate_instance_id: 'cc-agent-test', user_id: 'owner' } }], unresolved: 0 }),
     inspect: (_parent, _predicate, deps) => { inspected++; return alive && deps?.requests?.length === children.length },
     quarantine: (_parent, predicate, deps) => { detached++; return predicate(parent.sessionId) && deps?.requests?.length === children.length },
     processVerdict: () => alive ? 'ours-alive' : 'confirmed-gone' }
   const preparation = signed(body)
   const completion = (prep = preparation) => signed<NativeParentTerminationCompletion>({ version: 1, kind: 'native-parent-terminated',
-    operationId: prep.body.operationId, hostId: 'host', instanceId: 'instance', bootId: 'kernel', parent,
+    operationId: prep.body.operationId, hostId: 'host', instanceId: 'instance', bootId: boot, parent,
     preparationDigest: nativeParentTerminationDigest(prep), observation: { kind: 'retained-pidfd-exit', openedWhileAlive: true,
       preparedBeforeSignal: true, executionTreeTerminated: true, observedAt: Date.now(), evidenceDigest: 'c'.repeat(64) } })
   return { dir, db, state, run, runs, attempts, body, signed, preparation, completion, options,
@@ -156,6 +163,72 @@ test('incomplete detachment retains every lease and fence; exact preparation can
   expect(f.options.admission.maintenance.isConversationQuarantined(f.body.parent.sessionId)).toBe(true)
   f.options.quarantine = quarantine
   expect(await prepareNativeParentTermination(f.options, f.preparation)).toEqual({ status: 'prepared' })
+})
+
+test('completed physical termination crosses lifecycle and real workspace placement without resuming or deleting history', async () => {
+  const child = Bun.spawn([process.execPath, '-e', 'setInterval(() => {}, 1000)'], { stdout: 'ignore', stderr: 'ignore' })
+  cleanup.push(async () => { if (child.exitCode === null) child.kill(); await child.exited })
+  const f = await fixture(undefined, 100, { pid: child.pid, processIdentity: readProcessIdentity(child.pid)! })
+  delete f.options.processVerdict // Use the actual kernel at the consuming boundary.
+  const server = new RelicWorkspaceServer(), originalCall = server.call.bind(server)
+  let foreground: 'original' | 'foreign' | 'empty' = 'original'
+  let oldPane = ''
+  server.call = async (method, params) => {
+    const response = await originalCall(method, params)
+    if (method === 'pane.get') (response.pane as Record<string, unknown>).retirement_identity = server.births.get(String(params.pane_id))
+    if (method === 'pane.process_info' && params.pane_id === oldPane && foreground !== 'original') {
+      (response.process_info as Record<string, unknown>).foreground_processes = foreground === 'empty' ? []
+        : [{ pid: process.pid, argv: ['unrelated-native'] }]
+    }
+    return response
+  }
+  const makeTerminal = () => createConversationTerminal({
+    host: createWorkerTerminalHost(f.dir, { selected: herdrHost, connect: async () => server }), instanceId: 'owner', selected: herdrHost })!
+  const terminal = makeTerminal()
+  const placed = await terminal.host!.spawn(f.body.parent.launch!.argv, {
+    cwd: f.dir, env: {}, projectPlacement: terminal.placementFor('project'),
+  })
+  placed.detach?.(); oldPane = placed.paneHandle!
+  server.panes.get(oldPane)!.shell_pid = child.pid
+  const registryPath = join(f.dir, 'registry.json')
+  saveRegistry(registryPath, { original: { sessionKey: 'original', sessionId: f.body.parent.sessionId,
+    child_generation: f.body.parent.childGeneration, pid: child.pid, cwd: f.dir,
+    channelName: 'neutron-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', conversationProjectId: 'project', has_session: true, pane_handle: oldPane } })
+  const beforeRegistry = readFileSync(registryPath, 'utf8'), journal = projectWorkspaceJournalPath(f.dir)
+  const beforeJournal = readFileSync(journal, 'utf8'), beforePane = structuredClone(server.panes.get(oldPane))
+  const lifecycle = createProjectScopeLifecycle({ admission: f.options.admission, registryPath, conversationTerminal: terminal, idleMs: 0,
+    isConversationQuarantined: id => f.options.admission.maintenance.isConversationQuarantined(id),
+    completedConversationQuarantine: (scope, id) => completedNativeParentTermination(f.options, scope, id) })
+  const handoff = () => lifecycle.handoffChat('project', { sessionKey: 'fresh-native-key', credentialId: 'fresh-native-route' })
+  expect(await prepareNativeParentTermination(f.options, f.preparation)).toEqual({ status: 'prepared' })
+  expect((await handoff()).status).toBe('refused')
+  expect(readFileSync(journal, 'utf8')).toBe(beforeJournal)
+  const completion = f.completion()
+  expect(await consumeNativeParentTermination(f.options, { preparation: f.preparation, completion })).toEqual({ status: 'refused' })
+  child.kill(); await child.exited; f.exit()
+  expect(await consumeNativeParentTermination(f.options, { preparation: f.preparation, completion })).toEqual({ status: 'released' })
+  foreground = 'foreign'
+  expect((await handoff()).status).toBe('refused')
+  foreground = 'empty'
+  const birth = server.births.get(oldPane)!
+  server.births.set(oldPane, { ...birth, runtime_generation: 'foreign-pane' })
+  expect((await handoff()).status).toBe('refused')
+  server.births.set(oldPane, birth)
+  expect((await handoff()).status).toBe('ready')
+  const fresh = await makeTerminal().host!.spawn(['/bin/fixture-native', '--session-id', 'fresh-session'], {
+    cwd: f.dir, env: {}, projectPlacement: terminal.placementFor('project'),
+  })
+  fresh.detach?.()
+  expect(fresh.paneHandle).not.toBe(oldPane)
+  expect(server.panes.get(oldPane)).toEqual(beforePane)
+  expect(server.closed).not.toContain(oldPane)
+  expect(readFileSync(registryPath, 'utf8')).toBe(beforeRegistry)
+  const row = Object.values(JSON.parse(readFileSync(journal, 'utf8')))[0] as {
+    chat: { pane: string }; quarantinedChats: Array<{ pane: string; quarantine: { nativeLoop: string } }>
+  }
+  expect(row.chat.pane).toBe(fresh.paneHandle)
+  expect(row.quarantinedChats).toMatchObject([{ pane: oldPane, quarantine: { nativeLoop: 'terminated' } }])
+  expect((await makeTerminal().inspectChat!('project')).status).toBe('live')
 })
 
 test.each(['signature', 'operation', 'preparation', 'parent', 'opened', 'prepared', 'execution-tree', 'future', 'kernel'] as const)(

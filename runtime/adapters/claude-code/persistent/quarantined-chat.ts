@@ -41,7 +41,7 @@ export async function relinquishQuarantinedConversationChat(input: {
         && (committedDispatches.get(key) ?? 0) === 0
     }
     if (!current()) return false
-    return await input.relinquish({ operationId: proof.operationId, sessionId: row.sessionId,
+    return await input.relinquish({ ...(proof.nativeLoop ? { nativeLoop: proof.nativeLoop } : {}), operationId: proof.operationId, sessionId: row.sessionId,
       childGeneration: proof.parent.childGeneration, pid: proof.parent.pid, processIdentity: proof.parent.processIdentity,
       pane: input.pane, channelName: row.channelName }, current)
   } catch { return false }

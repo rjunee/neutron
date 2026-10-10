@@ -579,7 +579,8 @@ export class ReplSession {
 
   /** Preparation may retain only the exact requests' positively bound background
    * slots. Unknown readers, another request, queued input and active submission
-   * remain busy. Completion still requires zero slots after authority drain. */
+   * remain busy. The caller separately proves authority retirement or physical
+   * termination before releasing the retained workflow leases. */
   hasOnlyQuarantineRequests(requests: readonly BoundedWorkRequest[]): boolean {
     return this.activeTurn === undefined && !this.parentSlotActive && this.parentQueue.length === 0
       && this.turnSlotHeld === this.backgroundChildren.size
