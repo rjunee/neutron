@@ -72,11 +72,15 @@ and physical-exit evidence plus the newly served process's protected target tree
 entrypoint, listener and health identity; pending/unknown replay refuses. See
 `docs/spec-items/project-herdr-workspaces.md` for the operator contract.
 
-## Terminating an authenticated expired-review parent
+## Terminating an authenticated expired native parent
 
 The owner-authenticated `/admin/prepare-native-parent-termination` and
 `/admin/consume-native-parent-termination` routes require independent operator
-signatures and the original signed review dispatches. Preparation atomically
+signatures and the original signed dispatches. The accepted policies cover
+expired reviews of terminal runs or one expired writable planner of a
+canonically stopped run. Planner recovery verifies its exact request contract
+and stopped state at preparation and consumption; the independent operator also
+checks the canonical stopped row before signalling. Preparation atomically
 holds the complete project scope and permanently quarantines its old work and
 conversation. An independent operator must retain the original live process
 handles for the complete attributed execution tree through preparation and

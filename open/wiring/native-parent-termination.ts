@@ -26,6 +26,7 @@ function original(options: NativeParentTerminationOptions, body: NativeParentTer
       const request = dispatch.body.request, run = options.runs.get(request.run_id)
       if (lease.scope.ownerHandle !== options.admission.ownerHandle || lease.scope.projectId === null
         || !options.listProjectIds().includes(lease.scope.projectId) || !run || !isTerminalPhase(run.phase)
+        || body.policy === 'expired-stopped-planner-v1' && run.phase !== 'stopped'
         || options.projectIdForRun(run) !== lease.scope.projectId || dispatch.body.deadlineMs! > Date.now()) return false
       const saved = readClaudeNativeDispatchReceipt(join(options.stateRoot, encodeURIComponent(request.run_id)), request)
       if (!isDeepStrictEqual(saved, dispatch)) return false
