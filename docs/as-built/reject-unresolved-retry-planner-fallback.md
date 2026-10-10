@@ -52,5 +52,13 @@ suites still pass all 173 cases after this correction.
 
 This delivers a dispatch refusal, not native-task cancellation or a general
 recovery implementation. Live autonomous task-sequence acceptance and production
-token savings remain unverified for this change. Full local validation and the
-publication revision are recorded below after the required gate finishes.
+token savings remain unverified for this change. Local validation used Bun 1.4.2 on clean revision `75ef457bb3dc7196422dfcf647f0eef6d637269a`.
+`bash scripts/check-shared-host.sh` passed all 51 typecheck projects and all
+1,812 discovered test files: 28,573 passed, 24 skipped,
+zero failed. The tested tree stayed unchanged through completion. Lint and
+dependency layering also passed. Only this receipt changed afterward.
+
+Added-line, commit-message and publication-prose privacy checks passed with
+a failing hosted-domain control. The local full-tree scan reported 452
+findings, including its worktree pointer and existing denylist collisions;
+it is not claimed green. Exact-head CI purity remains required before merge.
