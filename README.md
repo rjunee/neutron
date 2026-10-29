@@ -201,7 +201,8 @@ host runs deterministic gates, so no agent's own say-so moves a change forward:
 - **Planner-selected strategy.** A planner proposes building the task in one
   pass or as a task sequence. The host validates and records that decision
   before any builder runs (`trident/execution-strategy.ts`).
-- **Cross-model review.** When the Codex CLI is installed, a second model
+- **Cross-model review.** When the Codex CLI is installed and signed in
+  (`codex login`), a second model
   family reviews the diff, so Claude doesn't grade its own work
   (`trident/codex-review.sh`, `trident/review-run.ts`). Without Codex, review
   falls back to Claude only.
@@ -236,8 +237,8 @@ records its failure rates and fixes as measured, not as hoped.
   `.env`, which uses the in-process PTY host instead. **The installer does not
   install herdr for you.**
 - **Optional:** `gbrain` for knowledge-graph memory (installed by default), the
-  Codex CLI for cross-model review (installed by default; skipping it is
-  non-fatal), and a Telegram bot token if you want the Telegram surface.
+  Codex CLI for cross-model review (installed by default, then run
+  `codex login`; skipping it is non-fatal), and a Telegram bot token if you want the Telegram surface.
 
 ### Install
 
@@ -298,7 +299,12 @@ bun run start               # onboarding + chat at http://127.0.0.1:7800/chat
 ### Day to day
 
 ```bash
-neutron status | restart | logs | stop | backup | url
+neutron status     # is it running?
+neutron restart    # e.g. after editing .env
+neutron logs       # tail the server log
+neutron stop       # stop it (it still starts at next login)
+neutron backup     # run a data backup now
+neutron url        # print the chat URL
 ```
 
 ### Where your data lives
@@ -310,7 +316,8 @@ neutron status | restart | logs | stop | backup | url
   markdown). A deterministic git backup of this directory runs every 12 hours.
   Set `NEUTRON_BACKUP_REMOTE` to also push it offsite.
 
-`sh uninstall.sh` removes the service, CLI, code and data. It lists each path
+`sh uninstall.sh`, run from the code directory (`$HOME/neutron/core` by
+default), removes the service, CLI, code and data. It lists each path
 and asks before deleting anything.
 
 > **Security:** the gateway binds loopback (`127.0.0.1:7800`) by default. Don't
