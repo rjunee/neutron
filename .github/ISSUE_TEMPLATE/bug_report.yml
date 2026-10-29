@@ -1,0 +1,44 @@
+name: Bug report
+description: Something in Neutron does not work the way the docs say it should.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. Issues are Neutron's inbox: a maintainer triages each one
+        and, if it is worth building, specifies it under `docs/spec-items/` in the repo
+        (see `docs/process/work-tracking.md`). Security problems go through SECURITY.md,
+        not here.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. sh install.sh
+        2. open http://127.0.0.1:7800/chat
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Output of `neutron logs` or the server console. Redact tokens, keys and personal paths.
+      render: text
+  - type: input
+    id: commit
+    attributes:
+      label: Neutron commit
+      description: Output of `git rev-parse --short HEAD` in your code directory.
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, `bun --version`, `claude --version`, REPL host (herdr or NEUTRON_REPL_HOST=bun).
