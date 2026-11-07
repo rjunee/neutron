@@ -1,0 +1,27 @@
+name: Feature or proposal
+description: Suggest a capability or a change in direction.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem first and the solution second. For anything large or
+        architectural, expect a discussion before code. Accepted work is specified in
+        the repo under `docs/spec-items/`, where acceptance criteria are reviewed
+        through PRs, so this issue is the starting point rather than the spec.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: How you would solve it, and any alternatives you considered.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context

@@ -1,453 +1,364 @@
-> ⚠️ **Pre-release — not recommended for production use yet. Watch / star this repo to be notified when it's ready.**
-
 # Neutron
 
-> **An agent harness for Claude Code.** Neutron orchestrates long-lived Claude
-> Code sessions and gives them what a raw CLI session lacks on its own:
-> persistent memory, projects, scheduled and autonomous jobs, reminders, and an
-> always-on web interface (plus a mobile app). You run it yourself, on your own
-> machine, backed by your own Claude subscription.
+[![ci](https://github.com/rjunee/neutron/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/rjunee/neutron/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Neutron is a **self-hosted agent harness**. Claude Code does the thinking;
-Neutron is everything *around* the thinking — it spawns and supervises your
-Claude Code sessions, routes each turn to the right one, and wraps them in
-durable state so your agent remembers you, works on a schedule, runs jobs while
-you sleep, and is reachable from anywhere. Its job is **orchestration, not
-inference**: persistent memory, projects, scheduled + autonomous work, reminders,
-and the surfaces you reach it through.
+**Neutron is a self-hosted agent harness. It runs a fleet of long-lived Claude
+Code sessions on your own machine, one per project, and gives you one place to
+talk to all of them.**
 
-The **primary interface is the bundled web app** (with a mobile app), served at
-`http://127.0.0.1:7800/chat`. A **Telegram bot is an optional add-on** —
-convenient for reaching your agent from your phone, but never required;
-everything works through the web interface with no Telegram setup at all.
+Claude Code is a great agent, but a raw CLI session forgets you when it exits.
+It can't run on a schedule, and you can only reach it from the terminal it was
+started in. Neutron supplies the rest. It spawns and supervises the sessions and
+routes each message to the right project. It keeps durable memory of who you are
+and what you're working on, runs scheduled and autonomous jobs, and serves a web
+app and a mobile app so you can reach your agents from anywhere. The model work
+happens inside the `claude` binary. Neutron handles the orchestration.
 
-It interviews you when you first start it, builds a persistent memory of who you
-are and what you're working on, and gets more useful the longer you use it. Your
-data lives in plain files and a SQLite database on your own disk — nothing is
-sent anywhere except the Claude Code sessions you authorize.
+**Who it's for:** people who already use Claude Code (or Codex) every day and
+want it to work as an always-on agent system across many projects. It runs on
+your own hardware, under your own subscription, with your data in plain files
+on your own disk.
 
-**License:** Apache License 2.0 (see [`LICENSE`](LICENSE)).
+**Why it exists:** I ran my work through a homemade agent system for a long time.
+In that system the rules lived in prompts and conventions, and the agents kept
+breaking them. Neutron is the rebuilt version, and its main idea is that **a
+rule only holds if code enforces it**. A required reply is a `Stop` hook, a
+privacy boundary is a write gate, and a build that claims a test guards its
+change has to show that test going red when the change is reverted. The longer
+story is in [Why I built Neutron](https://ryanjunee.com/posts/why-neutron).
 
-> **Status: pre-release.** The architecture described below is real and runs,
-> but it is **not ready for general use** — expect rough edges, breaking changes,
-> and incomplete pieces. `bun run start` boots the full single-owner harness (it
-> opens the SQLite database, runs migrations, brings up the substrate machinery,
-> and serves the in-chat onboarding interview + web chat at
-> `http://127.0.0.1:7800/chat`, with `/healthz` for liveness), but please don't
-> depend on it yet. Watch the repo for the first release.
+> **Status: pre-release.** The architecture below is real and runs, but expect
+> rough edges and breaking changes. Don't depend on it yet. Watch the repo for
+> the first release.
+
+**Read more:**
+[Neutron is open source](https://ryanjunee.com/posts/neutron-is-open-source) ·
+[Why I built Neutron](https://ryanjunee.com/posts/why-neutron) ·
+[Build your own Neutron](https://ryanjunee.com/posts/build-your-own-neutron) ·
+For teams and operators: [Neutron Enterprise](https://github.com/rjunee/neutron-enterprise)
 
 ---
 
-## The one idea that explains everything: the agent *is* a Claude Code process
+## What it does
 
-This is the single design decision the rest of the system hangs off.
+Each item below is backed by code in this repo, and the paths point to it.
 
-Neutron does **not** call the Anthropic API directly. Every model "turn" — a
-chat reply, an onboarding classification, a research synthesis — is dispatched
-into a real **`claude` CLI process** (Claude Code, Anthropic's official agent
-CLI) that Neutron spawns and supervises as a child process. Claude Code is the
-**substrate**. Neutron's job is everything *around* judgment — channels, state,
-scheduling, memory, buttons — and when judgment is needed it hands the turn to a
-spawned Claude Code session that already brings the full agentic harness (tools,
-file access, transcripts, resumability) for free.
+- **One persistent agent per project.** A pool of warm, long-lived `claude`
+  REPLs, one per conversation. Context lives in the process and is not replayed
+  each turn. A watchdog respawns a wedged or crashed REPL with `--resume`, so
+  the conversation survives. REPLs run in [herdr](https://herdr.dev) panes by
+  default. A gateway restart re-adopts them with their conversations intact
+  (`runtime/adapters/claude-code/persistent/`, `watchdog/`).
+- **Memory that builds up as you talk.** After every reply, `scribe/` pulls
+  entities, facts and typed relations out of the turn and writes them to a
+  personal knowledge graph ([GBrain](https://github.com/garrytan/gbrain)). This
+  runs in the background, so it never blocks chat. Onboarding can bulk-import
+  your ChatGPT, Claude or Gemini history, so the agent knows you from the first
+  session.
+- **Local search over your own corpus.** The agent can search your project docs
+  (`doc-search/`) and your chat history (`message-search/`) with SQLite FTS5.
+  This needs no SaaS and no embedding provider.
+- **Scheduled and autonomous work.** An in-process scheduler handles time zones
+  and missed fires: if the laptop sleeps through 09:00, the job fires once on
+  wake (`cron/`). Context-aware reminders and a task store with a focus score
+  run on top of it.
+- **Autonomous build pipeline (Trident).** `/code <task>` plans, builds, reviews
+  and publishes a change on its own worktree, with deterministic gates between
+  the agents. [More below](#trident-autonomous-builds-with-gates-agents-cant-talk-past).
+- **Plugin system (Cores).** Capability-gated plugins with a single Zod manifest
+  contract. Nine ship in the box: tasks, reminders, calendar, email, Google
+  Workspace, research, code-gen, scraping and agent settings (`cores/`).
+- **Surfaces.** A bundled web chat, an Expo mobile app (`app/`) and an optional
+  Telegram bot (`channels/`). One cross-channel button primitive
+  (`ButtonPrompt`) renders the same "agent asks, you tap or type" prompt on all
+  three.
+- **Swappable model backend.** The runtime talks to a formal `Substrate`
+  interface (`runtime/substrate.ts`). Claude Code is the default adapter. Codex
+  CLI and OpenAI Responses API adapters already conform, and a local model is
+  just another adapter (`runtime/adapters/`).
+- **Cross-instance sharing (Connect).** A project can span independently run
+  Neutron instances, with one owner, any number of collaborators and a
+  default-deny replication allowlist (`connect/`).
+- **A privacy wall.** Every durable memory write goes through one gate
+  (`runtime/entity-writer.ts`). The gate refuses any write that didn't come from
+  you or an explicitly allowlisted collaborator.
 
-Two consequences matter to you as a self-hoster:
+---
 
-- **You bring your own Claude.** Run `claude setup-token` locally, paste the
-  result into onboarding, and Neutron attaches *your* Claude subscription. A
-  long-lived interactive Claude Code session runs under your own subscription,
-  billed as exactly what it is. An API-key fallback is also supported.
-- **The model relationship is owned by the `claude` binary**, which holds every
-  header, OAuth refresh, and signature. Neutron only feeds a turn in and takes
-  one reply out — it never holds your credentials in its own HTTP client.
+## Architecture
 
-### The substrate is swappable
+```mermaid
+flowchart TB
+  subgraph Surfaces["Surfaces"]
+    WEB["Web chat<br/>(landing/)"]
+    APP["Mobile app<br/>(app/, Expo)"]
+    TG["Telegram bot<br/>(channels/, optional)"]
+  end
 
-"The agent is a Claude Code process" describes the *default* backend, not a
-lock-in. The runtime talks to a formal **substrate interface**
-(`runtime/substrate.ts`: `Substrate.start(spec) → SessionHandle` plus an `Event`
-stream), and backends are adapters under `runtime/adapters/<kind>/`:
+  subgraph Gateway["Neutron gateway — one Bun process (gateway/)"]
+    ROUTER["Channel router<br/>topic → (user, project)"]
+    POOL["REPL pool + watchdog<br/>(runtime/)"]
+    CRON["Scheduler · reminders · tasks<br/>(cron/, reminders/, tasks/)"]
+    CORES["Cores runtime<br/>capability gate (cores/)"]
+    TRIDENT["Trident build pipeline<br/>(trident/)"]
+    MCP["Per-instance MCP server<br/>(mcp/)"]
+    SCRIBE["Scribe extraction<br/>(scribe/)"]
+    GATE["Privacy gate<br/>(runtime/entity-writer.ts)"]
+  end
 
-- Claude Code is one adapter (`runtime/adapters/claude-code/`).
-- Non-Anthropic adapters already conform (an OpenAI Responses-API backend and a
-  Codex-CLI backend) — proof the seam is real, not theoretical.
-- A new backend — your own GPU box serving open weights via vLLM, another
-  vendor's API, a local inference server — is just a new adapter implementing
-  `Substrate`. No core rewrite. This all lives in `runtime/`, which ships here,
-  so bring-your-own-model is a first-class self-host capability.
+  subgraph Agents["Agent processes (your subscription)"]
+    CC1["claude — project A"]
+    CC2["claude — project B"]
+    CX["codex / other Substrate adapters"]
+  end
 
-### How a server talks to a CLI (the spawn-and-stdio model)
+  subgraph Data["Your disk ($NEUTRON_HOME)"]
+    DB[("project.db<br/>SQLite")]
+    FILES["Projects/ · entities/<br/>plain files + git"]
+    BRAIN[("GBrain<br/>knowledge graph")]
+  end
 
-A terminal CLI has no HTTP API, so how does a long-running server hold a
-conversation with one? Neutron runs a **persistent interactive REPL**:
+  WEB & APP & TG --> ROUTER
+  ROUTER --> POOL
+  CRON --> POOL
+  TRIDENT --> POOL
+  POOL -- "turn in via loopback MCP<br/>reply(text) out" --> CC1 & CC2 & CX
+  CC1 & CC2 -- "tool calls" --> MCP
+  MCP --> CORES
+  ROUTER -. "after reply, background" .-> SCRIBE
+  SCRIBE --> GATE --> BRAIN & FILES
+  Gateway --> DB
+```
 
-- **One warm REPL per conversation.** A pool of long-lived interactive `claude`
-  processes is kept keyed by `(instance, user, project, credential)`. The same
-  process serves turn after turn, so conversation context lives *in* the
-  process — no re-feeding history every turn.
-- **The PTY is not the data path.** `claude` needs a real terminal to boot, so
-  each REPL runs on a pseudo-terminal — but turn data never travels as
-  keystrokes or screen-scraping. The gateway injects each turn through a small
-  per-session loopback MCP server (the **dev-channel**); the REPL answers by
-  calling that server's `reply(text)` tool, which resolves the in-flight turn as
-  exactly one completion. A `Stop` hook guarantees one reply per turn.
-- **Self-healing.** A registry records each session's resumable id and pid; a
-  watchdog detects wedged or crashed REPLs and respawns them with `--resume`
-  (context preserved), guarded against double-spawns and orphan duplication.
+### The design choice everything else depends on: the agent is a Claude Code process
 
-The runtime picture for one install: **one Bun gateway process** (deterministic
-mechanics) supervising **a small pool of warm `claude` REPL children**
-(judgment), talking over localhost MCP plumbing.
+Neutron does not call the Anthropic API. Every model turn, whether a chat reply,
+an onboarding classification or a research synthesis, goes into a real `claude`
+CLI process that Neutron spawns and supervises. Neutron handles channels, state,
+scheduling, memory and buttons. When a decision needs judgment, it hands the
+turn to a session that already has Claude Code's full harness: tools, file
+access, transcripts and resume.
+
+- **You bring your own Claude.** `claude setup-token` attaches your own
+  subscription. An Anthropic API key also works.
+- **The `claude` binary owns the model relationship**: headers, OAuth refresh
+  and signatures. Neutron feeds a turn in and takes one reply out. It never
+  holds your credentials in an HTTP client of its own.
+
+### How a server holds a conversation with a CLI
+
+- **One warm REPL per conversation**, keyed by `(instance, user, project,
+  credential)`. The same process serves turn after turn.
+- **The terminal is not the data path.** `claude` needs a real terminal to boot,
+  so each REPL runs in a herdr pane, or on an in-process PTY if
+  `NEUTRON_REPL_HOST=bun` is set. Turn data never travels as keystrokes or
+  screen-scraping. The gateway sends each turn through a small per-session
+  loopback MCP server, and the REPL answers by calling its `reply(text)` tool. A
+  `Stop` hook guarantees exactly one reply per turn.
+- **Self-healing.** A registry records each session's resumable id. The watchdog
+  detects a wedged or crashed REPL and respawns it with `--resume`, with guards
+  against double-spawns and orphaned duplicates.
+
+### One turn, end to end
+
+```
+ you type "what's blocking the launch?" (web, app or Telegram)
+      │
+      ▼
+ channel router ── topic → (user, project); button taps short-circuit here
+      │
+      ▼
+ REPL pool ── warm REPL for this project? reuse : spawn `claude`
+      │
+      ▼
+ ┌─ claude (your subscription) ───────────────────────────────┐
+ │  turn arrives via the loopback MCP server                  │
+ │  reads project files, queries memory, calls Core tools     │
+ │  (capability-gated), may run its own sub-agents            │
+ │  answers by calling reply(text) — one reply per turn       │
+ └────────────────────────────────────────────────────────────┘
+      │ reply resolves the turn
+      ▼
+ delivered back to the surface you typed on
+      │
+      └─ in the background: scribe extracts entities, facts and
+         relations → privacy gate → memory pages + graph edges
+```
+
+Memory is a side effect of talking. Extraction runs after the reply path, so it
+can never block or break chat.
+
+---
+
+## Trident: autonomous builds with gates agents can't talk past
+
+Trident (`trident/`) sits behind the `/code` command and the Work board. It
+takes a task and builds it on a dedicated git worktree
+(`trident/build-workspace.ts`), reviews it and publishes a PR. In between, the
+host runs deterministic gates, so no agent's own say-so moves a change forward:
+
+- **Planner-selected strategy.** A planner proposes building the task in one
+  pass or as a task sequence. The host validates and records that decision
+  before any builder runs (`trident/execution-strategy.ts`).
+- **Cross-model review.** When the Codex CLI is installed and signed in
+  (`codex login`), a second model
+  family reviews the diff, so Claude doesn't grade its own work
+  (`trident/codex-review.sh`, `trident/review-run.ts`). Without Codex, review
+  falls back to Claude only.
+- **Mutation prover.** Before a merge, the prover breaks the production line the
+  PR's behavior depends on, in a throwaway worktree. It then watches the guard
+  test go red and come back green. No agent writes the evidence. Plain
+  TypeScript records what happened (`trident/mutation-prover.ts`).
+- **Leak preflight.** The public-repo purity gate runs on the branch's own tree
+  before a PR opens (`trident/leak-preflight.ts`).
+- **Tool-less arbiter.** A judge with no filesystem tools decides build
+  escalations such as rebase conflicts. It sees the evidence only as quoted data (`trident/arbiter.ts`).
+- **Restart-safe runs.** Durable checkpoints, liveness tracking and recovery
+  mean a gateway restart doesn't lose work that is in flight.
+
+Trident is still being hardened against live use. `SPEC.md`'s Decisions Log
+records its failure rates and fixes as measured, not as hoped.
 
 ---
 
 ## Quickstart (self-host)
 
-`bun run start` boots the **full product**: it opens your SQLite database, runs
-migrations, brings up the substrate machinery, and serves the in-chat onboarding
-interview + web chat at `http://127.0.0.1:7800/chat` (with `/healthz` for
-liveness). On first visit the onboarding interview asks who you are, optionally
-imports your ChatGPT/Claude/Gemini history, generates your agent's persona,
-connects your Claude subscription, and opens your first projects.
+### Prerequisites
 
-Prerequisites:
+- **[Bun](https://bun.sh) 1.4.2+.** The installer offers to install it if it's
+  missing.
+- **`git`.**
+- **The [`claude`](https://docs.claude.com/en/docs/claude-code) CLI**, plus
+  either a Claude subscription (`claude setup-token`) or an Anthropic API key.
+- **[herdr](https://herdr.dev)**, the default terminal host for REPLs
+  (`brew install herdr`). Keep a herdr session running, and Neutron connects to
+  it over its socket. To run without herdr, set `NEUTRON_REPL_HOST=bun` in
+  `.env`, which uses the in-process PTY host instead. **The installer does not
+  install herdr for you.**
+- **Optional:** `gbrain` for knowledge-graph memory (installed by default), the
+  Codex CLI for cross-model review (installed by default, then run
+  `codex login`; skipping it is non-fatal), and a Telegram bot token if you want the Telegram surface.
 
-- [Bun](https://bun.sh) (the runtime and package manager) — the installer offers
-  to bootstrap it for you via Bun's official installer if it is missing.
-- The [`claude`](https://docs.claude.com/en/docs/claude-code) CLI, authenticated
-  with `claude setup-token` (or an Anthropic API key) — Neutron spawns `claude`
-  as its LLM substrate. The installer detects your auth state: when run in an
-  interactive terminal it runs `claude setup-token` for you (it opens a browser),
-  captures the token, and writes it to your `.env`. When piped non-interactively
-  (the `curl … | sh -s -- --yes` one-liner has no terminal for the browser
-  sign-in) it can't complete that step, so it prints the exact command to run
-  afterward and tells you auth is still required. You can also paste a token
-  during onboarding in chat.
-- The `gbrain` memory binary on `PATH` — the installer installs it by default
-  and its own step **aborts the install** if it can't be confirmed on PATH
-  afterward. Pass `--no-gbrain` (or set `NEUTRON_SKIP_GBRAIN=1`) to explicitly
-  opt out and install without it — see [Memory](#memory-how-it-learns-you) for
-  what degrades in that case.
-- A Telegram bot token from [@BotFather](https://t.me/BotFather) — optional; the
-  bundled web chat works with no Telegram setup
+### Install
 
-### Install (one line)
+From a clone, in an interactive terminal (recommended):
+
+```bash
+git clone https://github.com/rjunee/neutron.git && cd neutron
+sh install.sh
+```
+
+The installer installs dependencies and writes `.env` from `.env.example`. It
+runs the database migrations, installs `gbrain` and the Codex CLI, and runs
+`claude setup-token` for you. It then installs a boot and crash-restart service
+(launchd on macOS, systemd on Linux), sets up the `neutron` CLI, schedules data
+backups and starts the server. At the end it prints the chat URL, by default
+`http://127.0.0.1:7800/chat`.
+
+Or with one line:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/rjunee/neutron/main/install.sh | sh -s -- --yes
 ```
 
-The installer bootstraps Bun if it is missing, clones the repo into
-`$HOME/neutron/core` (the **code** directory, alongside your `$HOME/neutron/data`
-**data** directory), installs dependencies, writes a default `.env`, runs
-migrations, installs a boot/crash system service + the `neutron` CLI, schedules
-data backups, and **auto-starts the server** — ending with the working chat URL.
-Because this one-liner is piped (no terminal for the browser sign-in), it does
-**not** complete `claude setup-token` — it tells you auth is still required and
-prints the exact command to run: `claude setup-token` (then add the printed
-`CLAUDE_CODE_OAUTH_TOKEN=…` to your `.env` and run `neutron restart`), or set
-`ANTHROPIC_API_KEY` in `.env`. Run the installer from an interactive terminal
-(the manual path below) to have it connect your account for you. Opt-outs:
-`--no-start`, `--no-service`, `--no-backup`, `--no-open`.
-
-### Install (manual)
-
-Clone it yourself and run the installer in place — it detects the checkout and
-skips the clone:
+A piped install has no terminal for the browser sign-in. It does everything up
+to Claude auth and then **stops before installing the service or starting the
+server**, so it never starts a chat that can't answer. Finish it like this:
 
 ```bash
-git clone https://github.com/rjunee/neutron.git && cd neutron
-sh install.sh          # installs, starts the service, prints the URL
+claude setup-token          # add the printed CLAUDE_CODE_OAUTH_TOKEN=… to the .env it names
+neutron install             # installs the service and starts it
 ```
 
-Or do the same steps by hand. Use `$HOME`, not `~`, for paths in `.env` (Bun
-does not expand a leading tilde):
+You can set `ANTHROPIC_API_KEY=…` in `.env` instead. Opt-outs: `--no-start`,
+`--no-service`, `--no-gbrain`, `--no-codex`, `--no-backup`, `--no-open`. Run
+`sh install.sh --help` for the rest.
 
-```bash
-bun install
-cp .env.example .env       # every value has a default; edit what you need
-bun run migrate            # create / migrate $NEUTRON_HOME/project.db (or NEUTRON_DB_PATH)
-bun run start              # onboarding + chat at http://127.0.0.1:7800/chat
-```
-
-`bun run migrate` with no argument resolves the same database the server opens —
-`NEUTRON_DB_PATH` if you set it, otherwise `$NEUTRON_HOME/project.db` — so the
-migrate target and the server always agree.
-
-Confirm it's up:
+### Check that it's up
 
 ```bash
 curl localhost:7800/healthz
-# {"status":"ok","uptime_ms":1234}
 ```
 
-### Controlling the service
+This returns a JSON status. It reports `"status":"degraded"` with
+`"memory":"unavailable"` if you installed without `gbrain`. Open
+`http://127.0.0.1:7800/chat`. On first visit, an onboarding interview asks who
+you are, optionally imports your chat history, connects your Claude
+subscription and opens your first projects.
 
-The installer puts a `neutron` command on your PATH (`$HOME/.local/bin/neutron`)
-that drives the launchd (macOS) / systemd (Linux) service that keeps Neutron
-running across reboots and crashes:
+### Run it by hand (no service)
+
+```bash
+bun install
+cp .env.example .env        # every value has a default; use $HOME, not ~, in paths
+bun run migrate             # creates/migrates the database the server will open
+bun run start               # onboarding + chat at http://127.0.0.1:7800/chat
+```
+
+### Day to day
 
 ```bash
 neutron status     # is it running?
-neutron restart    # e.g. after adding your Claude token to .env
+neutron restart    # e.g. after editing .env
 neutron logs       # tail the server log
-neutron stop       # stop it (it still boots next login)
+neutron stop       # stop it (it still starts at next login)
 neutron backup     # run a data backup now
 neutron url        # print the chat URL
 ```
 
 ### Where your data lives
 
-A single `$HOME/neutron` umbrella holds both halves:
+- `$HOME/neutron/core`: the code (`NEUTRON_SRC_DIR`).
+- `$HOME/neutron/data`: your data (`NEUTRON_HOME`). This holds auth, the
+  registry, `project.db` (one SQLite database holds all operational state),
+  `Projects/` (one plain folder per project) and `entities/` (memory as
+  markdown). A deterministic git backup of this directory runs every 12 hours.
+  Set `NEUTRON_BACKUP_REMOTE` to also push it offsite.
 
-- `$HOME/neutron/core` — the **code** directory (`NEUTRON_SRC_DIR`).
-- `$HOME/neutron/data` — your **data** directory (`NEUTRON_HOME`): auth,
-  registry, and the project database. This is the directory the git backup
-  protects.
-- `$HOME/neutron/data/project.db` — the default database (inside `NEUTRON_HOME`)
-  when `NEUTRON_DB_PATH` is left unset. Set `NEUTRON_DB_PATH` to pin it elsewhere.
+`sh uninstall.sh`, run from the code directory (`$HOME/neutron/core` by
+default), removes the service, CLI, code and data. It lists each path
+and asks before deleting anything.
 
-An older flat install (data at `$HOME/neutron`) is migrated into
-`$HOME/neutron/data` automatically.
-
-The gateway binds port 7800 (override with `NEUTRON_PORT`) and listens on
-loopback only — `127.0.0.1` (override the bind address with `NEUTRON_HOST`).
-
-### Backups
-
-The installer schedules a deterministic, no-LLM git backup of your data dir
-every 12 hours (`NEUTRON_BACKUP_INTERVAL` seconds to change). With no remote,
-local git history alone is fully recoverable. Set `NEUTRON_BACKUP_REMOTE` to a
-git URL to also push offsite on the same schedule.
-
-### Uninstall
-
-`uninstall.sh` stops + removes the service and backup timer, removes the
-`neutron` CLI, stops a running gateway, and removes your code + data directories
-(and the now-empty `$HOME/neutron` umbrella). It prints each path first and asks
-before deleting — pass `--yes` to skip the prompt:
-
-```bash
-sh uninstall.sh            # from a checkout
-```
-
-> Exposing the gateway beyond `localhost` without configuring authentication is
-> not yet safe. The gateway binds loopback (`127.0.0.1`) by default, so it is
-> off your LAN out of the box — leave it that way until the auth gate ships
-> fail-closed (tracked for the public launch). Only widen the bind (set
-> `NEUTRON_HOST=0.0.0.0`) behind a trusted network you control.
+> **Security:** the gateway binds loopback (`127.0.0.1:7800`) by default. Don't
+> expose it beyond localhost (`NEUTRON_HOST=0.0.0.0`) without a trusted network
+> or your own authenticating reverse proxy in front of it. See
+> [SECURITY.md](SECURITY.md).
 
 ---
 
-## Architecture at a glance
+## Repository layout
 
-The repo is a Bun workspace, grouped into five layers (bottom-up):
+A Bun workspace, grouped into five layers (bottom-up):
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│  PRODUCT SURFACES   onboarding/  app/  landing/  prompts/      │
-├──────────────────────────────────────────────────────────────┤
-│  CORES              cores/sdk  cores/runtime                   │
-│                     cores/free/{tasks,reminders,calendar,      │
-│                       email,research,code-gen,agent-settings,  │
-│                       google-workspace,scraping}               │
-├──────────────────────────────────────────────────────────────┤
-│  MEMORY             gbrain-memory/  scribe/                    │
-│                     runtime/entity-writer (privacy gate)       │
-├──────────────────────────────────────────────────────────────┤
-│  SUBSTRATE/RUNTIME  gateway/ (composition root)                │
-│                     runtime/ (dispatcher + CC adapter +        │
-│                       credential pool)                         │
-│                     persistence/ migrations/ cron/             │
-│                     reminders/ tasks/ tools/ mcp/ watchdog/    │
-├──────────────────────────────────────────────────────────────┤
-│  EDGE/TRANSPORT     channels/ (Telegram + buttons + app-ws)    │
-│                     landing/ (web chat server + auth gate)     │
-│                     auth/ (secrets + Claude paste-token)       │
-│                     connect/ (share projects across instances) │
-└──────────────────────────────────────────────────────────────┘
-```
-
-**Edge / transport.** `channels/` is the Telegram adapter (Bot API client,
-webhook server, inline keyboards) plus the **button primitive** — `ButtonPrompt`
-is the one cross-channel envelope for "agent asks, you tap or type", rendered
-identically by Telegram, the web chat, and the app. `landing/` is the web chat
-surface (a WS-based browser client, the Bun.serve server, the session-cookie
-auth gate). `auth/` holds the secrets store and `max-oauth.ts` — the paste-token
-client that attaches your Claude subscription.
-
-**Substrate / runtime.** `gateway/` is the composition root: it opens the
-database, runs migrations, wires the module graph, and binds the HTTP/WS
-surface. `runtime/` is the substrate machinery — the `Substrate`/`Event`
-contract, the Claude Code adapter, and the credential pool (threaded into each
-spawn's environment, never the parent process). `persistence/` + `migrations/`
-are the SQLite layer; `cron/` is an in-process scheduler with timezone math and
-missed-fire catch-up (laptop slept through 09:00 → fires once on wake).
-
-**Memory, Cores, product surfaces** — see below.
-
-### One turn, end to end
-
-You type *"what's blocking the launch?"* into Telegram:
-
-```
- Telegram cloud
-      │ webhook POST
-      ▼
- channels (Telegram adapter) ─── one Bun process: your gateway
-      │ normalize → inbound message
-      ▼
- ChannelRouter → chat-bridge      (topic → (user, project) routing;
-      │                            button taps short-circuit here)
-      ▼
- substrate → persistent REPL pool
-      │ warm REPL exists? reuse : spawn `claude` on a PTY
-      ▼
- ┌─ claude (Claude Code, your subscription) ──────────────────┐
- │  • turn injected via the dev-channel MCP server            │
- │  • agent reads your project files, queries memory (MCP),   │
- │    calls Core tools (capability-gated), maybe sub-agents   │
- │  • answers by calling reply(text); one reply per turn      │
- └────────────────────────────────────────────────────────────┘
-      │ reply resolves the turn → one completion event
-      ▼
- chat-bridge → Telegram sendMessage
-      │
-      └─ (parallel, fire-and-forget) scribe extracts entities,
-         facts, and relations from the turn → writeEntity →
-         privacy gate ✓ → memory page + knowledge-graph edges
-```
-
-The gateway never talks to the Anthropic API; the `claude` child owns the model
-relationship entirely. Memory is a side effect of talking — the extraction runs
-*after* the reply path and can never block or break chat. The web and app paths
-are identical from the chat-bridge down; only the edge differs.
-
----
-
-## Data model
-
-Everything lives under **`NEUTRON_HOME`** — `~/neutron/` by default (never
-hardcoded; the location is resolved from the environment):
-
-```
-~/neutron/
-├── STATUS.md          current state
-├── project.db         one SQLite database = all operational state
-├── entities/          compiled-truth pages (people / companies / concepts)
-├── Memory/            the memory layer
-├── Projects/          one folder per project — each a self-contained git repo
-│   └── <project>/     (Cores add sidecars: notes/, code/, email/ …)
-├── skills/  references/  inbox/
-```
-
-Three properties worth internalizing:
-
-1. **One install = one SQLite database + one folder tree.** No shared database,
-   no opaque store. Backup is copying the folder.
-2. **Projects are plain folders; memory is plain markdown plus a local
-   knowledge graph.** What the agent knows about you is inspectable files under
-   your home directory — the app's docs viewer renders them directly.
-3. **The privacy boundary is load-bearing.** Every durable memory write funnels
-   through `writeEntity` → `assertPersistable` (`runtime/entity-writer.ts`),
-   which refuses any write whose origin isn't you or an explicitly allowlisted
-   collaborator (provenance stamped). On a solo install it's mostly invisible;
-   the moment you share projects across instances it's the wall that keeps other
-   people's content out of your memory.
-
----
-
-## Memory: how it learns you
-
-The long-term memory store is **GBrain** ([`github.com/garrytan/gbrain`](https://github.com/garrytan/gbrain),
-an external Postgres-native personal-knowledge-graph binary; PGLite for a solo
-install), driven over a stdio MCP client. Every entity write is mirrored into
-GBrain as pages plus typed knowledge-graph edges, queried by the agent over MCP.
-
-Memory grows as you talk: **`scribe/`** runs a fire-and-forget LLM extraction on
-every real turn (entities, facts, typed relations) and writes the results
-through the same privacy gate. Onboarding's history-import does the same in bulk
-from your exported chat history, so the agent knows you from session one.
-
-> The `gbrain` binary is a REQUIRED host prerequisite, not an optional
-> best-effort one: `install.sh` installs it by default and **aborts the
-> install** if it can't confirm the binary lands on PATH — pass `--no-gbrain`
-> (or `NEUTRON_SKIP_GBRAIN=1`) to explicitly install without it. Only in that
-> opted-out case (or a hand-run dev boot with no `gbrain` on PATH at all) does
-> the running server degrade fail-soft at the runtime layer: no crash, but
-> memory writes silently no-op and recall falls back to on-disk entity pages.
-
----
-
-## Cores: the extension system
-
-A **Core** is Neutron's plugin unit — a package with a `"neutron"` manifest
-block declaring its id, capabilities, tools, secrets, and data namespace. The
-single manifest contract is the Zod schema in **`cores/sdk/`**
-(`@neutronai/cores-sdk`, workspace-internal — not published to npm). The former
-`core-sdk/` path-shim (its hand validator + JSON-schema mirror were dead code)
-has been removed now that all consumers import `@neutronai/cores-sdk` directly.
-`cores/runtime/` owns the install lifecycle (validate manifest → allocate a
-per-Core data namespace → walk OAuth secrets if needed → register → start) and
-enforces the **capability gate on every tool call**.
-
-Nine free Cores ship bundled in `cores/free/`:
-
-| Core | What it does |
+| Layer | Packages |
 |---|---|
-| **tasks** | A task store with a deterministic focus-score and task↔reminder linking |
-| **reminders** | Context-aware, LLM-composed nudges fired by the scheduler |
-| **calendar** | Google Calendar |
-| **email** | Gmail triage and drafting |
-| **google-workspace** | Drive, Sheets, and Docs (read/create/update) over per-Core Google OAuth |
-| **research** | A brief-producing research workflow with citation invariants |
-| **code-gen** | An autonomous build → review → merge orchestrator, driven by `/code <task>` |
-| **scraping** | Instagram + X/Twitter scraping via Apify (`/scrape <url>`) |
-| **agent-settings** | In-chat configuration of your agent |
+| Product surfaces | `onboarding/` `app/` `landing/` `prompts/` |
+| Cores | `cores/sdk` (manifest contract) · `cores/runtime` (install + capability gate) · `cores/free/*` |
+| Memory | `gbrain-memory/` `scribe/` `runtime/entity-writer.ts` · `doc-search/` `message-search/` |
+| Substrate / runtime | `gateway/` (composition root) · `runtime/` (Substrate + adapters + credential pool) · `persistence/` `migrations/` `cron/` `reminders/` `tasks/` `tools/` `mcp/` `watchdog/` · `trident/` |
+| Edge / transport | `channels/` (Telegram, buttons, app WebSocket) · `landing/` (web chat server + auth gate) · `auth/` · `connect/` |
 
-(The former **notes** Core — second-brain capture over a per-project SQLite
-sidecar — was removed 2026-07-01: GBrain is now the sole per-owner memory
-store, making the sidecar redundant.)
+**Cores** are packages with a `"neutron"` manifest block that declares their id,
+capabilities, tools, secrets and data namespace. The design locks in one
+invariant: **the runtime cannot tell a free Core from a paid one.** There are no
+license checks, no entitlement tables and no heartbeats. If you can
+`bun install` a Core, you can run it.
 
-Design invariant, locked: **the runtime cannot tell a free Core from a paid
-one.** No license checks, no entitlement tables, no heartbeats — ever. Whether
-you can install a Core is determined purely by whether you can `bun install` it.
-
----
-
-## Sharing across instances (Neutron Connect)
-
-`connect/` is Neutron's cross-instance collaboration surface — "Slack Connect
-for AI agents": a shared project that spans *independently operated* Neutron
-instances, with chat and agent context syndicated across the boundary. One
-**owner** plus N **collaborators**; the only capability axis is memory scope
-(admin / write / read). A meeting-point node mounts the cross-instance API and a
-public accept page; collaborators' turns route into the owner's project session
-with server-side identity resolution, and activity replicates through a
-monotonic per-project event log with a default-deny allowlist. Any instance can
-self-host a Connect node, free, forever.
-
----
-
-## What you need to run it
-
-- **Bun 1.4.2 or later** — runtime and package manager.
-- **A Claude subscription** (via `claude setup-token`) **or an Anthropic API
-  key** — Neutron runs your turns through the `claude` CLI under your own
-  account.
-- **Optionally**, a different substrate entirely (your own model behind the
-  `Substrate` interface — see [The substrate is swappable](#the-substrate-is-swappable)).
-- **A Telegram bot** (from @BotFather) if you want the Telegram surface — it is
-  optional; the bundled web chat at `/chat` works with no Telegram setup (see
-  [Quickstart](#quickstart-self-host)).
-- **The `gbrain` binary** for persistent memory.
+Deeper references: [`SPEC.md`](SPEC.md) is the current target plus an immutable
+Decisions Log. [`docs/SYSTEM-OVERVIEW.md`](docs/SYSTEM-OVERVIEW.md) explains how
+it works now, and [`docs/INVARIANTS.md`](docs/INVARIANTS.md) lists the
+invariants that hold the design together.
 
 ---
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for how to run the suite and reproduce CI locally before opening a PR (bare
-`bun test` OOMs on the full suite — use `bash scripts/run-tests.sh`). Full
-contribution guidelines (DCO, code style, the Core-author guide) are being
-finalized ahead of the public launch.
+Issues and PRs are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md): it
+covers running the partitioned test suite (`bash scripts/run-tests.sh`, not bare
+`bun test`) and reproducing CI locally. Report security issues privately, as
+described in [SECURITY.md](SECURITY.md).
+
+## License
+
+[Apache License 2.0](LICENSE).
