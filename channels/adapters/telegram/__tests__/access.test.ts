@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import {
+  TelegramAccessUnreadableError,
   MAX_PENDING_CODES,
   PAIRING_CODE_TTL_MS,
   TelegramAccess,
@@ -133,5 +134,17 @@ describe('TelegramAccess', () => {
     a.issueCode({ user_id: '222', name: 'Parent Two' })
     expect(statSync(path).mode & 0o777).toBe(0o600)
     expect(() => JSON.parse(readFileSync(path, 'utf8'))).not.toThrow()
+  })
+
+  test('an unreadable file is never overwritten by a change', () => {
+    mkdirSync(dirname(path), { recursive: true })
+    const halfSaved = '{"users": {"111": {"name": "Parent One"}}, "chats": {'
+    writeFileSync(path, halfSaved)
+    const a = access()
+    expect(a.isAllowedUser('111')).toBe(false)
+    expect(() => a.issueCode({ user_id: '222', name: 'Stranger' })).toThrow(TelegramAccessUnreadableError)
+    expect(() => a.pair({ code: 'ABCDEF', by_user_id: '111' })).toThrow(TelegramAccessUnreadableError)
+    expect(() => a.connect({ chat_id: '-1', chat_type: 'group', by_user_id: '111' })).toThrow(TelegramAccessUnreadableError)
+    expect(readFileSync(path, 'utf8')).toBe(halfSaved)
   })
 })

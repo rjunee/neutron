@@ -366,7 +366,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
         send,
         // A Telegram message never joins a web-chat turn (or another chat's) as
         // an injection: its answer must come back to this chat.
-        reply_sink: `telegram:${chat_id}`,
+        reply_sink: `telegram:${chat_id}${first.thread_id !== undefined ? `:${first.thread_id}` : ''}`,
         observed_at: first.event.received_at,
       })
     } catch (err) {
@@ -394,7 +394,16 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       if (!seen.claim(event.event_id)) return
       const rawThread = event.adapter_metadata?.['message_thread_id']
       const thread_id = typeof rawThread === 'number' && Number.isInteger(rawThread) ? rawThread : undefined
-      if (await handleCommand(event, { chat_id, thread_id }, chat_type)) return
+      let handled: boolean
+      try {
+        handled = await handleCommand(event, { chat_id, thread_id }, chat_type)
+      } catch (err) {
+        // An unreadable access file refuses changes (see TelegramAccess); say
+        // nothing in the chat, log it for the operator.
+        opts.log.warn('telegram_command_failed', { chat: chat_id, error: errMsg(err) })
+        return
+      }
+      if (handled) return
       const project_id = opts.access.deliveryProject({ chat_id, user_id: event.user.channel_user_id })
       if (project_id === null) {
         opts.log.info('telegram_message_dropped', { chat: chat_id, user: event.user.channel_user_id })
@@ -499,7 +508,10 @@ export function composeTelegramTurnText(input: {
   const from = (first?.user.display_name ?? '').replace(/["\n\r]/g, '')
   const user = first?.user.channel_user_id ?? ''
   const msg = String(first?.adapter_metadata?.['message_id'] ?? '')
-  const lines: string[] = [`[telegram chat=${input.chat_id} from="${from}" user=${user} msg=${msg}]`]
+  const lines: string[] = [
+    `[telegram chat=${input.chat_id} from="${from}" user=${user} msg=${msg}]`,
+    TELEGRAM_REPLY_NOTE,
+  ]
   if (input.saved.length > 0) {
     lines.push(
       '<user_attachments>',
@@ -540,6 +552,13 @@ export function composeTelegramTurnText(input: {
   }
   return lines.join('\n')
 }
+
+/**
+ * Told to the agent on every Telegram turn, right under the header: where the
+ * reply goes and how to send a file with it.
+ */
+export const TELEGRAM_REPLY_NOTE =
+  '(Your reply goes to this Telegram chat. To send a file with it, put each file on its own line of the reply as [[file: /absolute/path]]; images go as photos, mp4 as video, anything else as a document; at most 10 files.)'
 
 function attachmentType(ref: TelegramAttachmentRef, file_path: string): { ext: string; content_type: string } {
   const fromPath = /\.([A-Za-z0-9]{1,8})$/.exec(file_path)?.[1]?.toLowerCase()

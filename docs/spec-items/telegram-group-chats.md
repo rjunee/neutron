@@ -39,7 +39,8 @@ them to a router whose topic handler was a no-op, so nothing reached an agent.
   caption reads `[voice] <transcript>`.
 - **The turn.** The turn runs on the project's web-chat topic, so a project has
   one warm session whichever surface a message came from. Its text is a header
-  line `[telegram chat=<id> from="<name>" user=<id> msg=<id>]`, then a
+  line `[telegram chat=<id> from="<name>" user=<id> msg=<id>]`, a one-line note
+  telling the agent the reply goes to the chat and how to attach files, then a
   `<user_attachments>` block of local paths when files came with it, then the
   words.
 - **The reply.** The agent's reply is posted to the chat it came from, split at

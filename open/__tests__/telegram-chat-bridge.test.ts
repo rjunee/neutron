@@ -28,7 +28,7 @@ import { TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import { buildWebhookHandler, type TelegramUpdate } from '@neutronai/channels/adapters/telegram/webhook-server.ts'
 import type { LiveAgentTurnRequest } from '@neutronai/gateway/http/chat-sender-registry.ts'
 
-import { TRANSCRIPT_MAX_CHARS, buildTelegramChatBridge, type TelegramChatBridge, type TelegramChatBridgeOptions } from '../wiring/telegram-chat.ts'
+import { TELEGRAM_REPLY_NOTE, TRANSCRIPT_MAX_CHARS, buildTelegramChatBridge, type TelegramChatBridge, type TelegramChatBridgeOptions } from '../wiring/telegram-chat.ts'
 
 // ── mock Bot API ────────────────────────────────────────────────────────────
 interface ApiCall {
@@ -184,7 +184,7 @@ describe('telegram chat bridge', () => {
     expect(t.topic_id).toBe('app:owner:family')
     expect(t.project_id).toBe('family')
     expect(t.user_id).toBe('owner')
-    expect(t.user_text).toBe(`[telegram chat=${GROUP} from="Parent One" user=${PARENT_ONE} msg=${messageId}]\nhello after connect`)
+    expect(t.user_text).toBe(`[telegram chat=${GROUP} from="Parent One" user=${PARENT_ONE} msg=${messageId}]\n${TELEGRAM_REPLY_NOTE}\nhello after connect`)
     expect(sentTexts()).toContain('ok')
   })
 
@@ -332,6 +332,23 @@ describe('telegram chat bridge', () => {
     const reply = calls.find((c) => c.method === 'sendMessage')
     expect(reply?.json?.['message_thread_id']).toBe(77)
     expect(calls.find((c) => c.method === 'sendChatAction')?.json?.['message_thread_id']).toBe(77)
+    expect(turns[0]?.reply_sink).toBe(`telegram:${GROUP}:77`)
+  })
+
+  test('the reply sink names the chat, so a family message never joins a web-chat turn', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    await post({ text: 'plain group' })
+    await bridge.idle()
+    expect(turns[0]?.reply_sink).toBe(`telegram:${GROUP}`)
+  })
+
+  test('/start against an unreadable access file says nothing and leaves the file alone', async () => {
+    const p = telegramAccessPath(home)
+    writeFileSync(p, '{"users": {')
+    await post({ text: '/start' }, { from: PARENT_TWO, chat: { id: PARENT_TWO, type: 'private' } })
+    await bridge.idle()
+    expect(calls).toEqual([])
+    expect(readFileSync(p, 'utf8')).toBe('{"users": {')
   })
 
   test('a re-sent update runs once even after a restart', async () => {
@@ -363,7 +380,7 @@ describe('telegram chat bridge', () => {
     await long.idle()
     const text = turns[0]?.user_text ?? ''
     expect(text).toContain('[transcript truncated]')
-    expect(text.length).toBeLessThan(TRANSCRIPT_MAX_CHARS + 600)
+    expect(text.length).toBeLessThan(TRANSCRIPT_MAX_CHARS + 900)
     // The captionless note's transcript appears once, as the message.
     expect(text).toContain('transcript is the message below')
   })

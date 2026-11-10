@@ -78,13 +78,26 @@ export function telegramAccessPath(neutron_home: string): string {
  * EMPTY state (nobody allowed), never a crash and never "allow everyone".
  */
 export function parseAccessState(raw: string): TelegramAccessState {
+  return parseAccessStateStrict(raw) ?? emptyAccessState()
+}
+
+/** Thrown by a change to the access list while its file cannot be parsed. */
+export class TelegramAccessUnreadableError extends Error {
+  override readonly name = 'TelegramAccessUnreadableError'
+  constructor(path: string) {
+    super(`${path} is not valid access JSON; refusing to overwrite it`)
+  }
+}
+
+/** Like {@link parseAccessState}, but null when the text is not a JSON object at all. */
+function parseAccessStateStrict(raw: string): TelegramAccessState | null {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
   } catch {
-    return emptyAccessState()
+    return null
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return emptyAccessState()
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null
   const o = parsed as Record<string, unknown>
   const state = emptyAccessState()
   if (typeof o['default_project_id'] === 'string' && o['default_project_id'].length > 0) {
@@ -145,6 +158,7 @@ export class TelegramAccess {
     private readonly now: () => number = Date.now,
   ) {}
 
+  /** The current list. An unreadable file reads as empty: nobody is allowed. */
   read(): TelegramAccessState {
     if (!existsSync(this.path)) return emptyAccessState()
     try {
@@ -152,6 +166,19 @@ export class TelegramAccess {
     } catch {
       return emptyAccessState()
     }
+  }
+
+  /**
+   * The list as the base for a change. A file that exists but is not a JSON
+   * object (an operator's half-saved edit) is never replaced: the change is
+   * refused with {@link TelegramAccessUnreadableError}, so the operator's users
+   * and chats survive for them to repair.
+   */
+  private readForChange(): TelegramAccessState {
+    if (!existsSync(this.path)) return emptyAccessState()
+    const state = parseAccessStateStrict(readFileSync(this.path, 'utf8'))
+    if (state === null) throw new TelegramAccessUnreadableError(this.path)
+    return state
   }
 
   private write(state: TelegramAccessState): void {
@@ -197,7 +224,7 @@ export class TelegramAccess {
    * {@link MAX_PENDING_CODES} outstanding.
    */
   issueCode(input: { user_id: string; name: string }): string {
-    const state = this.read()
+    const state = this.readForChange()
     const t = this.now()
     for (const [code, p] of Object.entries(state.pending)) {
       if (p.expires_at <= t) delete state.pending[code]
@@ -219,7 +246,7 @@ export class TelegramAccess {
 
   /** `/pair <code>` by `by_user_id`. Only an allowed user can admit anyone. */
   pair(input: { code: string; by_user_id: string }): PairResult {
-    const state = this.read()
+    const state = this.readForChange()
     if (!Object.prototype.hasOwnProperty.call(state.users, input.by_user_id)) {
       return { ok: false, reason: 'not_allowed' }
     }
@@ -240,7 +267,7 @@ export class TelegramAccess {
 
   /** `/connect` inside a group by `by_user_id`: bind the group to the default project. */
   connect(input: { chat_id: string; chat_type: string; title?: string; by_user_id: string }): ConnectResult {
-    const state = this.read()
+    const state = this.readForChange()
     if (!Object.prototype.hasOwnProperty.call(state.users, input.by_user_id)) {
       return { ok: false, reason: 'not_allowed' }
     }

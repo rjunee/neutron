@@ -24,8 +24,10 @@ absent, as before.
 - `channels/adapters/telegram/access.ts` — the access list in
   `<NEUTRON_HOME>/telegram/access.json`: allowed users, connected chats with their
   project id, the default project, pairing codes (six characters, one hour, one
-  per person, at most five outstanding). Malformed content reads as an empty list.
-  Writes are atomic, mode 0600.
+  per person, at most five outstanding). Malformed content reads as an empty list
+  (nobody allowed), and a file that is not a JSON object is never overwritten: a
+  change against it is refused, so an operator's half-saved edit keeps its users
+  and chats. Writes are atomic, mode 0600.
 - `channels/adapters/telegram/reply-files.ts` — `[[file: /absolute/path]]` lines
   in a reply, classification into photo / video / document, album planning, and
   4096-character chunking that never splits a surrogate pair.
@@ -48,7 +50,7 @@ absent, as before.
   `gateway/http/chat-sender-registry.ts` — a turn request may name its
   `reply_sink` (absent = the web chat). A follow-up is injected into the topic's
   active turn only when both reply to the same sink; otherwise it queues behind
-  it. Telegram turns carry `telegram:<chat_id>`, so a family message arriving
+  it. Telegram turns carry `telegram:<chat_id>[:<forum topic>]`, so a family message arriving
   while a web-chat or timer turn runs is answered in the family chat, not in the
   web chat. Web-chat turns inject into each other exactly as before.
 - `open/composer.ts` — the voice-note transcriber the upload route used inline is
@@ -61,6 +63,7 @@ absent, as before.
 
 ```
 [telegram chat=<chat_id> from="<display name>" user=<user_id> msg=<message_id>]
+(Your reply goes to this Telegram chat. To send a file with it, put each file on its own line of the reply as [[file: /absolute/path]]; …)
 <user_attachments>
 …one line per local file; audio lines carry the transcript…
 </user_attachments>
