@@ -7,7 +7,7 @@
  *     [[file: /absolute/path/to/file.pdf]]
  *
  * and the Telegram receiver lifts those lines out, posts the remaining text, then
- * posts each file: images as photos, mp4/mov as videos, everything else as a
+ * posts each file: images as photos, mp4 as videos, everything else (.mov too) as a
  * document. Two or more photos and videos in one reply go out as one album.
  *
  * The convention is Telegram-side only; it changes nothing about the reply tool or
@@ -66,7 +66,8 @@ export function extractReplyFiles(reply: string): ReplyWithFiles {
 export type TelegramFileKind = 'photo' | 'video' | 'document'
 
 const PHOTO_EXT: Record<string, string> = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }
-const VIDEO_EXT: Record<string, string> = { '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.m4v': 'video/mp4' }
+/** `sendVideo` takes MPEG-4; other video (QuickTime .mov) goes as a document. */
+const VIDEO_EXT: Record<string, string> = { '.mp4': 'video/mp4', '.m4v': 'video/mp4' }
 const DOC_EXT: Record<string, string> = {
   '.pdf': 'application/pdf',
   '.txt': 'text/plain',
@@ -79,6 +80,7 @@ const DOC_EXT: Record<string, string> = {
   '.wav': 'audio/wav',
   '.gif': 'image/gif',
   '.zip': 'application/zip',
+  '.mov': 'video/quicktime',
 }
 
 /**

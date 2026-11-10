@@ -272,10 +272,13 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
 
   const handleCommand = async (event: IncomingEvent, to: Dest, chat_type: string): Promise<boolean> => {
     const chat_id = to.chat_id
-    const m = /^\/(start|pair|connect)(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(event.body.text.trim())
+    const m = /^\/(start|pair|connect)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]*))?$/i.exec(event.body.text.trim())
     if (m === null) return false
     const command = (m[1] ?? '').toLowerCase()
-    const arg = (m[2] ?? '').trim()
+    const addressedTo = m[2]
+    const arg = (m[3] ?? '').trim()
+    // `/connect@other_bot` in a group is for another bot: not ours to act on.
+    if (addressedTo !== undefined && addressedTo.toLowerCase() !== (await ownUsername())) return true
     const user_id = event.user.channel_user_id
     const allowed = opts.access.isAllowedUser(user_id)
     if (command === 'start') {
@@ -334,6 +337,19 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
    * or when it is an admin of the group. Unknown (an API error) counts as yes,
    * so a transient failure never produces a false warning.
    */
+  let usernameCache: string | null = null
+  /** This bot's username, lowercased ('' when it cannot be read, which matches no suffix). */
+  const ownUsername = async (): Promise<string> => {
+    if (usernameCache !== null) return usernameCache
+    try {
+      usernameCache = (await opts.client.getMe()).username.toLowerCase()
+      return usernameCache
+    } catch (err) {
+      opts.log.warn('telegram_getme_failed', { error: errMsg(err) })
+      return ''
+    }
+  }
+
   const botSeesGroupMessages = async (chat_id: string): Promise<boolean> => {
     try {
       const me = await opts.client.getMe()
@@ -489,7 +505,10 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     const send = (ev: ChatOutbound): void => {
       if (ev.type === 'agent_message') {
         const body = withOptionsAsText(ev.body, ev.options)
+        // The newest reply's choices are the live ones; a reply without any
+        // clears them.
         if (ev.options !== undefined && ev.options.length > 0) lastOptions.set(destKey(to), ev.options)
+        else lastOptions.delete(destKey(to))
         chain = chain.then(() => sendReply(to, body)).catch((err) => {
           opts.log.warn('telegram_reply_failed', { chat: chat_id, error: errMsg(err) })
         })

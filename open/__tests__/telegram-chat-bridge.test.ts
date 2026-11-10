@@ -563,4 +563,14 @@ describe('telegram chat bridge', () => {
     expect(turns.length).toBe(1)
     expect(turns[0]?.user_text.endsWith('with words')).toBe(true)
   })
+
+  test('a command addressed to another bot is ignored', async () => {
+    await post({ text: '/connect@other_bot' })
+    await bridge.idle()
+    expect(new TelegramAccess(telegramAccessPath(home)).chatProject(String(GROUP))).toBeNull()
+    expect(sentTexts()).toEqual([])
+    await post({ text: '/connect@Family_Bot' })
+    await bridge.idle()
+    expect(sentTexts()).toContain('This chat is connected.')
+  })
 })

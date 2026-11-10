@@ -46,7 +46,8 @@ absent, as before.
   before the turn runs. Recent update ids are kept in
   `<NEUTRON_HOME>/telegram/seen-updates.json` (last 1000), so a re-sent update
   runs once across a restart. A message written in a forum topic is answered in
-  that topic. `/connect` checks `getMe.can_read_all_group_messages` and the bot's
+  that topic. A command addressed to another bot (`/connect@other_bot`) is
+  ignored. `/connect` checks `getMe.can_read_all_group_messages` and the bot's
   membership status and warns in the chat when the bot would see only commands. A project with no model that can answer gets the same "no AI
   credential" message as the web chat (`canDispatchLiveAgent`). Transcripts are cut at 4000 characters, and a captionless voice
   note's transcript appears once, as the `[voice]` line. Reply files are read one

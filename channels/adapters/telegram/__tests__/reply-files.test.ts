@@ -43,6 +43,7 @@ describe('classifyReplyFile', () => {
     // Over the 10 MB photo limit, an image goes as a document.
     expect(classifyReplyFile('/a/big.jpg', 11 * 1024 * 1024)).toEqual({ kind: 'document', content_type: 'image/jpeg', filename: 'big.jpg' })
     expect(classifyReplyFile('/a/ok.jpg', 9 * 1024 * 1024).kind).toBe('photo')
+    expect(classifyReplyFile('/a/clip.mov')).toEqual({ kind: 'document', content_type: 'video/quicktime', filename: 'clip.mov' })
   })
 })
 
