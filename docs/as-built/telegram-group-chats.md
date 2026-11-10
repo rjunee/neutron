@@ -52,7 +52,11 @@ absent, as before.
   note's transcript appears once, as the `[voice]` line. Reply files are read one
   upload at a time and capped at 50 MB each and 100 MB per reply, checked again on
   the bytes actually read. A `[[file: …]]` path must resolve (through symlinks)
-  inside the instance home, `<NEUTRON_HOME>`; anything else is not sent. An image over Telegram's 10 MB photo limit is sent as a
+  inside `<NEUTRON_HOME>/Projects`, `<NEUTRON_HOME>/telegram/outbox`, or a folder
+  named in `NEUTRON_TELEGRAM_FILE_ROOTS` (colon-separated absolute paths); never
+  the rest of the instance home, which holds the database and the secrets key.
+  The file is opened once, checked through the descriptor (regular file, same
+  device and inode as the resolved path) and read with a hard byte bound. An image over Telegram's 10 MB photo limit is sent as a
   document. A 429 from Telegram is waited out (its `retry_after`, at most a minute,
   three tries) instead of dropping that part of the reply. At shutdown the bridge drains
   first, inside the composition's `on_shutdown_start` right after chat recovery
@@ -72,6 +76,12 @@ absent, as before.
   turns carry `telegram:<chat_id>[:<forum topic>]`, so a family message arriving
   while a web-chat or timer turn runs is answered in the family chat, not in the
   web chat. Web-chat turns inject into each other exactly as before.
+- `open/wiring/app-ws.ts` — the instance's `ChannelRouter` dispatches events of a
+  kind other than `app_socket` to a handler bound with `bindChannelHandler`. The
+  Telegram webhook's receiver is that router (topic resolution, author stamp),
+  and the composer binds `telegram` to the bridge and registers the
+  `TelegramAdapter` on the router, so `router.send` can deliver plain text to a
+  Telegram topic. Web-chat inbound is unchanged (it never used `router.receive`).
 - `open/composer.ts` — the voice-note transcriber the upload route used inline is
   now one named function (`transcribeVoiceNote`) shared by the upload route and
   the bridge; the Telegram surface gets a late-bound receiver that forwards to the

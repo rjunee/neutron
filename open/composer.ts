@@ -6567,6 +6567,7 @@ export function buildOpenGraphComposer(
     const {
       appWsSurface,
       channelRouter,
+      bindChannelHandler,
       cleanups: appWsCleanups,
     } = wireAppWs(wiringCtx, {
       appWs,
@@ -7212,11 +7213,10 @@ export function buildOpenGraphComposer(
         url_slug: project_slug,
         secrets: secretsStore,
         is_known_sender: (senderId) => telegramAccess.isAllowedUser(senderId),
-        receiver: {
-          receive: async (event) => {
-            if (telegramChatBridge !== null) await telegramChatBridge.receive(event)
-          },
-        },
+        // Through the router like every channel: it resolves the chat's topic
+        // and stamps the author, then the handler bound below passes the event
+        // to the bridge.
+        receiver: channelRouter,
       })
       if (telegramWebhookSurface !== null) {
         const telegramLog = createLogger('telegram-chat')
@@ -7227,7 +7227,18 @@ export function buildOpenGraphComposer(
           access: telegramAccess,
           client: telegramWebhookSurface.client,
           inbox_dir: joinPath(owner_home, 'telegram', 'inbox'),
-          reply_file_roots: [owner_home],
+          // Files a reply may send: project folders and the Telegram outbox, plus
+          // any folder the operator names in NEUTRON_TELEGRAM_FILE_ROOTS
+          // (colon-separated, absolute). Never the rest of the instance home,
+          // which holds the database and the secrets key.
+          reply_file_roots: [
+            joinPath(owner_home, 'Projects'),
+            joinPath(owner_home, 'telegram', 'outbox'),
+            ...(env['NEUTRON_TELEGRAM_FILE_ROOTS'] ?? '')
+              .split(':')
+              .map((r) => r.trim())
+              .filter((r) => r.startsWith('/')),
+          ],
           ...(scribeOnUserTurn !== undefined
             ? {
                 // The same general scribe the web chat runs after a user turn.
@@ -7253,6 +7264,10 @@ export function buildOpenGraphComposer(
         })
         const bridgeForShutdown = telegramChatBridge
         drainTelegramBridge = () => bridgeForShutdown.close()
+        bindChannelHandler('telegram', async (_topic, event) => bridgeForShutdown.receive(event))
+        // The adapter's own `send` (plain text to a chat) becomes the router's
+        // Telegram delivery; the bridge posts its replies and files itself.
+        channelRouter.registerAdapter(telegramWebhookSurface.adapter)
       }
     } catch (err) {
       log.error('telegram_webhook_build_failed', {

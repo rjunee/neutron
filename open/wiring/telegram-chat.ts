@@ -48,7 +48,7 @@
  * side unchanged.
  */
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, sep } from 'node:path'
 
 import type { IncomingEvent, IncomingEventReceiver } from '@neutronai/channels/types.ts'
@@ -111,8 +111,6 @@ export interface TelegramChatBridgeOptions {
   log: TelegramChatLog
   now?: () => number
   album_window_ms?: number
-  /** Read a reply file; injectable for tests. */
-  read_file?: (path: string) => Uint8Array
   /** Size of a reply file, or null when it is not a regular file. */
   file_size?: (path: string) => number | null
   /** Wait used for Telegram's retry_after; injectable for tests. */
@@ -166,7 +164,6 @@ export interface TelegramChatBridge extends IncomingEventReceiver {
 export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): TelegramChatBridge {
   const now = opts.now ?? Date.now
   const albumWindow = opts.album_window_ms ?? ALBUM_WINDOW_MS
-  const readFile = opts.read_file ?? ((p: string) => new Uint8Array(readFileSync(p)))
   const fileSize =
     opts.file_size ??
     ((p: string): number | null => {
@@ -192,6 +189,33 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       return false
     }
     return roots.some((root) => real === root || real.startsWith(root.endsWith(sep) ? root : `${root}${sep}`))
+  }
+  /**
+   * Read a reply file in one open: the opened file must be a regular file whose
+   * resolved path is inside a root (checked against the descriptor's device and
+   * inode, so swapping a symlink after the check reads nothing), and at most
+   * `max` bytes are read, so a file that grows cannot exceed the cap.
+   */
+  const readInsideRoots = (path: string, max: number): Uint8Array => {
+    const fd = openSync(path, 'r')
+    try {
+      const st = fstatSync(fd)
+      if (!st.isFile()) throw new Error('not a regular file')
+      const real = statSync(realpathSync(path))
+      if (real.dev !== st.dev || real.ino !== st.ino || !insideRoots(path)) throw new Error('outside the allowed folders')
+      if (st.size > max) throw new Error('over the size limit')
+      const buf = Buffer.alloc(max + 1)
+      let n = 0
+      for (;;) {
+        const r = readSync(fd, buf, n, buf.length - n, null)
+        if (r === 0) break
+        n += r
+        if (n > max) throw new Error('over the size limit')
+      }
+      return new Uint8Array(buf.subarray(0, n))
+    } finally {
+      closeSync(fd)
+    }
   }
   const seen = new SeenUpdates(opts.seen_path, opts.log)
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
@@ -385,11 +409,11 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       const items = 'album' in step ? step.album : [step.single]
       try {
         const uploads = items.map((u) => {
-          if (!insideRoots(u.path)) throw new Error(`${u.filename} is outside the allowed folders`)
-          const bytes = readFile(u.path)
           // The file may have changed since it was sized; the caps hold on what
           // was actually read.
           const planned = sizes.get(u.path) ?? 0
+          const cap0 = u.kind === 'photo' ? TELEGRAM_PHOTO_MAX_BYTES : TELEGRAM_UPLOAD_MAX_BYTES
+          const bytes = readInsideRoots(u.path, Math.min(cap0, REPLY_FILES_MAX_TOTAL_BYTES - (total - planned)))
           const cap = u.kind === 'photo' ? TELEGRAM_PHOTO_MAX_BYTES : TELEGRAM_UPLOAD_MAX_BYTES
           if (bytes.byteLength > cap || total - planned + bytes.byteLength > REPLY_FILES_MAX_TOTAL_BYTES) {
             throw new Error(`${u.filename} grew past the size limit`)

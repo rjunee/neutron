@@ -88,6 +88,7 @@ let unconfigured: Harness
 interface Harness {
   base: string
   dir: string
+  db: ProjectDb
   close(): Promise<void>
 }
 
@@ -171,6 +172,7 @@ async function startHarness(withTelegramSecrets: boolean): Promise<Harness> {
   return {
     base: `http://127.0.0.1:${server.port}`,
     dir,
+    db,
     close: async () => {
       await server.stop(true)
       for (const cleanup of composition.realmode_cleanups ?? []) {
@@ -231,6 +233,22 @@ describe('POST /webhook/telegram — configured instance', () => {
     const res = await post(configured, { secret: WEBHOOK_SECRET })
     expect(res.status).toBe(200)
     expect(res.body).toBe('ok')
+  })
+
+  test('a message goes through the channel router to the chat bridge (a stranger is dropped there)', async () => {
+    // The router resolves (and records) the chat's topic before the bridge sees
+    // the event; the bridge then drops a sender who is not on the access list,
+    // without calling the Bot API. So a `topics` row for the chat proves the
+    // router path, and no network is touched.
+    const res = await post(configured, {
+      secret: WEBHOOK_SECRET,
+      raw: JSON.stringify({ update_id: 2, message: { message_id: 5, from: { id: 31337, first_name: 'Stranger' }, chat: { id: -4242, type: 'group' }, date: 1, text: 'hello' } }),
+    })
+    expect(res.status).toBe(200)
+    const row = configured.db
+      .prepare<{ channel_kind: string }, [string]>(`SELECT channel_kind FROM topics WHERE channel_topic_id = ?`)
+      .get('-4242')
+    expect(row?.channel_kind).toBe('telegram')
   })
 
   test('NO secret header is refused BY THE HANDLER, not 404d past', async () => {
