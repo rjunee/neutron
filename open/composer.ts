@@ -7222,6 +7222,7 @@ export function buildOpenGraphComposer(
           inbox_dir: joinPath(owner_home, 'telegram', 'inbox'),
           seen_path: joinPath(owner_home, 'telegram', 'seen-updates.json'),
           chat_turn: appWsChatTurn,
+          can_dispatch: (projectId) => canDispatchLiveAgent(projectId),
           transcribe: transcribeVoiceNote,
           log: {
             info: (event, meta) => telegramLog.info(event, meta ?? {}),

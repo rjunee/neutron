@@ -101,6 +101,9 @@ const moduleLog = createLogger('live-agent-turn')
  */
 export const CHAT_TURN_INACTIVITY_MS = 30 * 60_000
 
+/** `LiveAgentTurnRequest.reply_sink` of a web-chat turn (the field is absent there). */
+const APP_REPLY_SINK = 'app'
+
 /**
  * Absolute-ceiling backstop (ms) for a single turn — the hard upper bound, wired
  * to BOTH the composer's AbortController AND the substrate
@@ -1060,7 +1063,8 @@ export function buildLiveAgentTurn(
   const admissionOrder = new Map<string, Promise<void>>()
   /** Turns per topic that arrived but have not been routed (queued or refused) yet. */
   const admittingCount = new Map<string, number>()
-  const activeTopics = new Set<string>()
+  /** Topics with a turn that accepts injection, and the surface that turn replies to. */
+  const activeTopics = new Map<string, string>()
   const queuedTurnCount = new Map<string, number>()
 
   // The REPL `--tools` allow-list only consumes `t.name`; the rest of the
@@ -1083,7 +1087,7 @@ export function buildLiveAgentTurn(
     // else is queued or still being admitted ahead of it. Admission then decides
     // whether it may proceed at all.
     const injectable = turn.user_text.trim() !== '/effective-prompt' &&
-      activeTopics.has(topicKey) &&
+      activeTopics.get(topicKey) === (turn.reply_sink ?? APP_REPLY_SINK) &&
       queuedTurnCount.get(topicKey) === 1 &&
       (admittingCount.get(topicKey) ?? 0) === 0 &&
       input.configuredModel?.(turn.project_id) === undefined &&
@@ -1224,7 +1228,7 @@ export function buildLiveAgentTurn(
         turn.button_prompt_id === undefined &&
         turn.user_text !== RETRY_TURN_VALUE &&
         turn.user_text !== RECONNECT_AUTH_VALUE
-      if (acceptsInjection) activeTopics.add(topicKey)
+      if (acceptsInjection) activeTopics.set(topicKey, turn.reply_sink ?? APP_REPLY_SINK)
       try {
         return await runTurnBody(turn)
       } finally {

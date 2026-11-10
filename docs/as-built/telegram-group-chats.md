@@ -38,11 +38,19 @@ absent, as before.
   before the turn runs. Recent update ids are kept in
   `<NEUTRON_HOME>/telegram/seen-updates.json` (last 1000), so a re-sent update
   runs once across a restart. A message written in a forum topic is answered in
-  that topic. Transcripts are cut at 4000 characters, and a captionless voice
+  that topic. A project with no model that can answer gets the same "no AI
+  credential" message as the web chat (`canDispatchLiveAgent`). Transcripts are cut at 4000 characters, and a captionless voice
   note's transcript appears once, as the `[voice]` line. Reply files are read one
   upload at a time and capped at 100 MB per reply. At shutdown the bridge drains
   first: it starts the turn for an album still being gathered and waits up to
   20 s for running turns.
+- `gateway/wiring/build-live-agent-turn.ts` and
+  `gateway/http/chat-sender-registry.ts` — a turn request may name its
+  `reply_sink` (absent = the web chat). A follow-up is injected into the topic's
+  active turn only when both reply to the same sink; otherwise it queues behind
+  it. Telegram turns carry `telegram:<chat_id>`, so a family message arriving
+  while a web-chat or timer turn runs is answered in the family chat, not in the
+  web chat. Web-chat turns inject into each other exactly as before.
 - `open/composer.ts` — the voice-note transcriber the upload route used inline is
   now one named function (`transcribeVoiceNote`) shared by the upload route and
   the bridge; the Telegram surface gets a late-bound receiver that forwards to the

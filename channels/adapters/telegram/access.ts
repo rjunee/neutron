@@ -23,7 +23,7 @@
  * Nothing here talks to Telegram; the receiver does. This module is pure state.
  */
 
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomInt } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
@@ -262,8 +262,8 @@ export class TelegramAccess {
 }
 
 function generateCode(): string {
-  const bytes = randomBytes(CODE_LENGTH)
   let out = ''
-  for (let i = 0; i < CODE_LENGTH; i++) out += CODE_ALPHABET[(bytes[i] as number) % CODE_ALPHABET.length]
+  // `randomInt` is uniform over the alphabet (no modulo bias).
+  for (let i = 0; i < CODE_LENGTH; i++) out += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)]
   return out
 }

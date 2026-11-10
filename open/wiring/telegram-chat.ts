@@ -103,6 +103,8 @@ export interface TelegramChatBridgeOptions {
   seen_path: string
   /** Runs one turn on the live agent. Null when no agent is configured. */
   chat_turn: ((turn: LiveAgentTurnRequest) => Promise<unknown>) | null
+  /** Whether a model can answer for this project right now (the web chat's same check). */
+  can_dispatch?: (project_id: string) => boolean
   /** The shared voice-note transcriber; null result = no transcript. */
   transcribe: (input: { bytes: Uint8Array; content_type: string; hash: string }) => Promise<string | null>
   log: TelegramChatLog
@@ -200,7 +202,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       }
       const code = opts.access.issueCode({ user_id, name: event.user.display_name })
       await say(
-        chat_id,
+        to,
         `Your pairing code is ${code}. Ask someone who is already paired to send /pair ${code} in your group. The code works for one hour.`,
       )
       opts.log.info('telegram_pairing_code_issued', { user: user_id })
@@ -322,7 +324,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     if (first === undefined) return
     const { chat_id, project_id } = first
     const to: Dest = { chat_id, thread_id: first.thread_id }
-    if (opts.chat_turn === null) {
+    if (opts.chat_turn === null || (opts.can_dispatch !== undefined && !opts.can_dispatch(project_id))) {
       await say(to, "I can't answer yet: this instance has no AI credential configured.")
       return
     }
@@ -362,6 +364,9 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
         project_id,
         user_text,
         send,
+        // A Telegram message never joins a web-chat turn (or another chat's) as
+        // an injection: its answer must come back to this chat.
+        reply_sink: `telegram:${chat_id}`,
         observed_at: first.event.received_at,
       })
     } catch (err) {
