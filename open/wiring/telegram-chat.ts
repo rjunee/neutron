@@ -546,6 +546,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
         send,
         // A Telegram message never joins a web-chat turn (or another chat's) as
         // an injection: its answer must come back to this chat.
+        channel_kind: 'telegram',
         reply_sink: `telegram:${chat_id}${first.thread_id !== undefined ? `:${first.thread_id}` : ''}`,
         observed_at: first.event.received_at,
       })

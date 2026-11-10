@@ -118,8 +118,9 @@ Telegram turns and their replies are part of the project's chat history, so they
 show in the web chat for that project (it is one session). Replies to web-chat
 turns are not sent to Telegram. The turn runs as the instance owner (Open is
 single-owner, and the warm session is keyed on the owner), so the stored row's
-speaker is the owner; who actually wrote the message is the header line's
-`from=` and `user=`, which is stored with the text.
+speaker is the owner and its channel is `telegram` (`LiveAgentTurnRequest.channel_kind`);
+who actually wrote the message is the header line's `from=` and `user=`, which is
+stored with the text.
 
 ### Tests
 

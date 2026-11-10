@@ -366,6 +366,7 @@ describe('telegram chat bridge', () => {
     await post({ text: 'plain group' })
     await bridge.idle()
     expect(turns[0]?.reply_sink).toBe(`telegram:${GROUP}`)
+    expect(turns[0]?.channel_kind).toBe('telegram')
   })
 
   test('/start against an unreadable access file says nothing and leaves the file alone', async () => {

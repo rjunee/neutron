@@ -116,6 +116,11 @@ export interface LiveAgentTurnRequest {
    * the web chat, which is every turn that existed before other surfaces did.
    */
   reply_sink?: string
+  /**
+   * The channel the message came in on, recorded on the persisted user row.
+   * Absent = the web chat (`app_socket`).
+   */
+  channel_kind?: 'app_socket' | 'telegram'
   observed_at: number
   /**
    * Path 1 onboarding auto-start: a synthetic system-origin turn that seeds

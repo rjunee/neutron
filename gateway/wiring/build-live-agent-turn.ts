@@ -1201,7 +1201,7 @@ export function buildLiveAgentTurn(
             topic_id: turn.topic_id,
             text: persistedText,
             speaker_user_id: turn.user_id,
-            channel_kind: 'app_socket',
+            channel_kind: turn.channel_kind ?? 'app_socket',
             observed_at: turn.observed_at ?? now(),
           })
         } catch (err) {
@@ -2191,7 +2191,7 @@ async function resolvePreviousRowWithUserText(
           topic_id: turn.topic_id,
           text: turn.user_text,
           speaker_user_id: turn.user_id,
-          channel_kind: 'app_socket',
+          channel_kind: turn.channel_kind ?? 'app_socket',
         })
       }
       return latest !== null && typeof latest.body === 'string' ? latest.body : null
@@ -2204,7 +2204,7 @@ async function resolvePreviousRowWithUserText(
         freeform_text: turn.user_text,
         chosen_at: observed_at,
         speaker_user_id: turn.user_id,
-        channel_kind: 'app_socket',
+        channel_kind: turn.channel_kind ?? 'app_socket',
       },
     })
     return priorBody
