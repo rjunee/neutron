@@ -28,7 +28,7 @@ import { TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import { buildWebhookHandler, type TelegramUpdate } from '@neutronai/channels/adapters/telegram/webhook-server.ts'
 import type { LiveAgentTurnRequest } from '@neutronai/gateway/http/chat-sender-registry.ts'
 
-import { withOptionsAsText, TELEGRAM_REPLY_NOTE, TRANSCRIPT_MAX_CHARS, buildTelegramChatBridge, type TelegramChatBridge, type TelegramChatBridgeOptions } from '../wiring/telegram-chat.ts'
+import { pickOption, withOptionsAsText, TELEGRAM_REPLY_NOTE, TRANSCRIPT_MAX_CHARS, buildTelegramChatBridge, type TelegramChatBridge, type TelegramChatBridgeOptions } from '../wiring/telegram-chat.ts'
 
 // ── mock Bot API ────────────────────────────────────────────────────────────
 interface ApiCall {
@@ -430,9 +430,59 @@ describe('telegram chat bridge', () => {
   })
 
   test('choices offered in a reply are posted as a numbered list', async () => {
-    expect(withOptionsAsText('Which one?', [{ label: 'Tomorrow' }, { label: 'Friday' }])).toBe(
+    expect(withOptionsAsText('Which one?', [{ label: 'A', body: 'Tomorrow' }, { label: 'B', body: 'Friday' }])).toBe(
       'Which one?\n\n1. Tomorrow\n2. Friday\n\nReply with the number or the words.',
     )
     expect(withOptionsAsText('Plain', undefined)).toBe('Plain')
+  })
+
+  test('a numbered or worded answer picks the offered choice', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    const opts = [{ label: 'A', body: 'Retry', value: '__retry_turn__' }, { label: 'B', body: 'Leave it', value: 'leave' }]
+    expect(pickOption('1', opts)).toBe('__retry_turn__')
+    expect(pickOption(' leave it ', opts)).toBe('leave')
+    expect(pickOption('3', opts)).toBeNull()
+    expect(pickOption('something else', opts)).toBeNull()
+    let first = true
+    const withChoices = buildTelegramChatBridge({
+      ...bridgeOptions(),
+      chat_turn: async (turn) => {
+        turns.push(turn)
+        if (first) {
+          first = false
+          turn.send({ type: 'agent_message', body: 'That failed.', options: opts })
+        } else {
+          turn.send({ type: 'agent_message', body: 'ok' })
+        }
+        return { ok: true }
+      },
+    })
+    const h = buildWebhookHandler({ bot_user_id: 1, secret_token: 'sec', receiver: withChoices })
+    const say = (id: number, text: string) =>
+      h(new Request('http://x/webhook/telegram', {
+        method: 'POST',
+        headers: { 'x-telegram-bot-api-secret-token': 'sec' },
+        body: JSON.stringify({ update_id: id, message: { message_id: id, from: { id: PARENT_ONE, first_name: 'P' }, chat: { id: GROUP, type: 'group' }, date: 1, text } }),
+      }))
+    await say(9301, 'do the thing')
+    await withChoices.idle()
+    expect(sentTexts()[0]).toContain('1. Retry')
+    await say(9302, '1')
+    await say(9303, '1')
+    await withChoices.idle()
+    expect(turns[1]?.user_text).toBe('__retry_turn__')
+    // The choices apply to the next message only.
+    expect(turns[2]?.user_text).toContain('\n1')
+  })
+
+  test('a quick follow-up never overtakes the album before it', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    await post({ media_group_id: 'ord', photo: [{ file_id: 'photo-a' }] })
+    await post({ media_group_id: 'ord', photo: [{ file_id: 'photo-b' }] })
+    await post({ text: 'those are her pages' })
+    await bridge.idle()
+    expect(turns.length).toBe(2)
+    expect(turns[0]?.user_text).toContain('(image/jpeg)')
+    expect(turns[1]?.user_text.endsWith('those are her pages')).toBe(true)
   })
 })

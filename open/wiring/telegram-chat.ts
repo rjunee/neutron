@@ -130,6 +130,8 @@ interface Dest {
   thread_id: number | undefined
 }
 
+const destKey = (d: Dest): string => `${d.chat_id}:${d.thread_id ?? ''}`
+
 const threadField = (d: Dest): { message_thread_id?: number } =>
   d.thread_id !== undefined ? { message_thread_id: d.thread_id } : {}
 
@@ -166,7 +168,25 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     })
   const seen = new SeenUpdates(opts.seen_path, opts.log)
   let closed = false
-  const albums = new Map<string, { items: Accepted[]; timer: ReturnType<typeof setTimeout> }>()
+  const albums = new Map<string, { items: Accepted[]; timer: ReturnType<typeof setTimeout>; ready: () => void }>()
+  /**
+   * Turns run one after another per chat, in the order their messages arrived,
+   * so a quick follow-up never reaches the session ahead of the photo, voice note
+   * or album it refers to (which take time to download, transcribe or gather).
+   */
+  const chatQueues = new Map<string, Promise<void>>()
+  const enqueueChat = (chat_id: string, work: () => Promise<void>): void => {
+    const prev = chatQueues.get(chat_id) ?? Promise.resolve()
+    const next = prev.then(work).catch((err) => opts.log.warn('telegram_turn_failed', { chat: chat_id, error: errMsg(err) }))
+    chatQueues.set(chat_id, next)
+    track(
+      next.finally(() => {
+        if (chatQueues.get(chat_id) === next) chatQueues.delete(chat_id)
+      }),
+    )
+  }
+  /** The choices the last reply in a chat offered, so "2" can pick the second. */
+  const lastOptions = new Map<string, ReadonlyArray<{ label: string; body: string; value: string }>>()
   const inFlight = new Set<Promise<void>>()
 
   const track = (p: Promise<void>): void => {
@@ -366,13 +386,19 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       const t = a.event.body.text.trim()
       if (t.length > 0) texts.push(t)
     }
-    const user_text = composeTelegramTurnText({ items: items.map((i) => i.event), chat_id, saved, texts })
+    // A bare answer to the last reply's choices ("2", or the choice's words)
+    // is sent as that choice's value, as a tap on a button would be.
+    const offered = lastOptions.get(destKey(to))
+    lastOptions.delete(destKey(to))
+    const chosen = items.length === 1 && saved.length === 0 && offered !== undefined ? pickOption(texts[0] ?? '', offered) : null
+    const user_text = chosen ?? composeTelegramTurnText({ items: items.map((i) => i.event), chat_id, saved, texts })
     // Replies are posted in order, one after the other, even when the runner
     // emits several messages for one turn.
     let chain: Promise<void> = Promise.resolve()
     const send = (ev: ChatOutbound): void => {
       if (ev.type === 'agent_message') {
         const body = withOptionsAsText(ev.body, ev.options)
+        if (ev.options !== undefined && ev.options.length > 0) lastOptions.set(destKey(to), ev.options)
         chain = chain.then(() => sendReply(to, body)).catch((err) => {
           opts.log.warn('telegram_reply_failed', { chat: chat_id, error: errMsg(err) })
         })
@@ -405,7 +431,8 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     const album = albums.get(key)
     if (album === undefined) return
     albums.delete(key)
-    track(runTurn(album.items).catch((err) => opts.log.warn('telegram_turn_failed', { error: errMsg(err) })))
+    clearTimeout(album.timer)
+    album.ready()
   }
 
   return {
@@ -443,24 +470,24 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
           album.items.push(accepted)
           return
         }
-        albums.set(key, { items: [accepted], timer: setTimeout(() => flushAlbum(key), albumWindow) })
+        // The album takes its place in the chat's queue now, at its first item,
+        // and runs once gathered.
+        const items: Accepted[] = [accepted]
+        let ready!: () => void
+        const gathered = new Promise<void>((resolve) => { ready = resolve })
+        albums.set(key, { items, timer: setTimeout(() => flushAlbum(key), albumWindow), ready })
+        enqueueChat(chat_id, () => gathered.then(() => runTurn(items)))
         return
       }
-      track(runTurn([accepted]).catch((err) => opts.log.warn('telegram_turn_failed', { error: errMsg(err) })))
+      enqueueChat(chat_id, () => runTurn([accepted]))
     },
     async idle(): Promise<void> {
-      for (const [key, album] of albums) {
-        clearTimeout(album.timer)
-        flushAlbum(key)
-      }
+      for (const key of [...albums.keys()]) flushAlbum(key)
       while (inFlight.size > 0) await Promise.all([...inFlight])
     },
     async close(timeout_ms: number = SHUTDOWN_DRAIN_MS): Promise<void> {
       closed = true
-      for (const [key, album] of albums) {
-        clearTimeout(album.timer)
-        flushAlbum(key)
-      }
+      for (const key of [...albums.keys()]) flushAlbum(key)
       let timer: ReturnType<typeof setTimeout> | undefined
       const deadline = new Promise<void>((resolve) => {
         timer = setTimeout(resolve, timeout_ms)
@@ -589,10 +616,24 @@ export const TELEGRAM_REPLY_NOTE =
  * A reply that offers choices carries them in `options`, already stripped from
  * the body. Telegram gets them as a numbered list the person can answer in words.
  */
-export function withOptionsAsText(body: string, options: ReadonlyArray<{ label: string }> | undefined): string {
+export function withOptionsAsText(body: string, options: ReadonlyArray<{ label: string; body: string }> | undefined): string {
   if (options === undefined || options.length === 0) return body
-  const list = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')
+  const list = options.map((o, i) => `${i + 1}. ${o.body.length > 0 ? o.body : o.label}`).join('\n')
   return `${body.trimEnd()}\n\n${list}\n\nReply with the number or the words.`
+}
+
+/**
+ * The value of the choice a reply names: its number in the list, its words, or
+ * its label. Null when the reply is anything else (it is then sent as written).
+ */
+export function pickOption(text: string, options: ReadonlyArray<{ label: string; body: string; value: string }>): string | null {
+  const t = text.trim()
+  if (t.length === 0) return null
+  const n = /^\d{1,2}$/.test(t) ? Number(t) : NaN
+  if (Number.isInteger(n) && n >= 1 && n <= options.length) return (options[n - 1] as { value: string }).value
+  const lower = t.toLowerCase()
+  const hit = options.find((o) => o.body.trim().toLowerCase() === lower || o.label.trim().toLowerCase() === lower)
+  return hit !== undefined ? hit.value : null
 }
 
 function attachmentType(ref: TelegramAttachmentRef, file_path: string): { ext: string; content_type: string } {

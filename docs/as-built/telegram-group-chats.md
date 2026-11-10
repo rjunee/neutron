@@ -53,7 +53,11 @@ absent, as before.
   first, from the composition's `on_shutdown_start` (before the persistent REPLs
   stop): it starts the turn for an album still being gathered and waits up to
   10 s for running turns. A reply that offers choices (`options`) is posted with
-  them as a numbered list.
+  them as a numbered list, and a bare answer to the next message ("2",
+  or the choice's words) is sent as that choice's value, as a button tap would
+  be. Turns run one after another per chat in arrival order: an album takes its
+  place in the queue at its first item, so a follow-up never reaches the session
+  ahead of the photos or voice note it refers to.
 - `gateway/wiring/build-live-agent-turn.ts` and
   `gateway/http/chat-sender-registry.ts` — a turn request may name its
   `reply_sink` (absent = the web chat). A follow-up is injected into the topic's
@@ -89,7 +93,10 @@ absent, as before.
 
 Telegram turns and their replies are part of the project's chat history, so they
 show in the web chat for that project (it is one session). Replies to web-chat
-turns are not sent to Telegram.
+turns are not sent to Telegram. The turn runs as the instance owner (Open is
+single-owner, and the warm session is keyed on the owner), so the stored row's
+speaker is the owner; who actually wrote the message is the header line's
+`from=` and `user=`, which is stored with the text.
 
 ### Tests
 
