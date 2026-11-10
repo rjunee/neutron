@@ -440,6 +440,9 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
       parsed = await req.json()
     } catch (err) {
       log.warn('malformed_json', { error: err instanceof Error ? err.message : String(err) })
+      // With a sender classifier the charge happens after the parse; a body that
+      // never parses has no sender, so it is charged as a stranger's.
+      if (opts.is_known_sender !== undefined) charge(strangerHits)
       return new Response('ok', { status: 200 })
     }
     // `req.json()` only throws on UNPARSEABLE input. `null`, `[]`, `3` and
@@ -451,6 +454,7 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     // `null` body. Same disposition as unparseable: log, absorb, 200.
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       log.warn('non_object_update', { type: Array.isArray(parsed) ? 'array' : typeof parsed })
+      if (opts.is_known_sender !== undefined) charge(strangerHits)
       return new Response('ok', { status: 200 })
     }
     const body = parsed as TelegramUpdate

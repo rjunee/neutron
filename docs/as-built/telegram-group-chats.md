@@ -20,7 +20,7 @@ absent, as before.
 - `channels/adapters/telegram/webhook-server.ts` also takes an optional
   `is_known_sender`; when set (the composer passes the access list), updates from
   senders not on the list are rate-limited in their own bucket, charged after the
-  body is parsed. Without it the single bucket is charged before parsing, as
+  body is parsed; a body that does not parse is charged to that bucket too. Without it the single bucket is charged before parsing, as
   before.
 - `channels/adapters/telegram/client.ts` — `getFile`, `downloadFile` (reads the
   stream and stops past the cap, whatever `Content-Length` says), `getChatMember`, `sendFile` (`sendPhoto` / `sendVideo` /
@@ -83,8 +83,11 @@ absent, as before.
   instance.
 - A group upgraded to a supergroup gets a new chat id and has to be connected
   again with `/connect`.
-- Replies to a Telegram turn are not copied into the web chat transcript; the
-  turn itself is part of the project session's history.
+### History
+
+Telegram turns and their replies are part of the project's chat history, so they
+show in the web chat for that project (it is one session). Replies to web-chat
+turns are not sent to Telegram.
 
 ### Tests
 
