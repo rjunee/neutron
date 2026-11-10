@@ -1725,9 +1725,14 @@ export function buildOpenGraphComposer(
     // `stop()`); the gateway shutdown runner awaits each before `db.close()`.
     const realmodeCleanups: Array<() => void | Promise<void>> = []
     let stopChatRecovery: (() => Promise<void>) | undefined
+    // Set once the Telegram bridge exists (below). Drained right after recovery
+    // stops and before the persistent REPLs do: an album still in its window
+    // becomes a turn, and running turns get a bounded wait.
+    let drainTelegramBridge: (() => Promise<void>) | undefined
     const quiesceChatRecovery = async (): Promise<void> => {
       projectScopeLifecycle.close()
       await stopChatRecovery?.()
+      await drainTelegramBridge?.()
     }
     // Boot invokes this before its first shutdown await, including listener drain.
     // Retain idempotent disposal for callers that compose without boot().
@@ -7231,6 +7236,8 @@ export function buildOpenGraphComposer(
             warn: (event, meta) => telegramLog.warn(event, meta ?? {}),
           },
         })
+        const bridgeForShutdown = telegramChatBridge
+        drainTelegramBridge = () => bridgeForShutdown.close()
       }
     } catch (err) {
       log.error('telegram_webhook_build_failed', {
@@ -7276,13 +7283,7 @@ export function buildOpenGraphComposer(
       // regain authority only after that binding, with no synthetic chat turn.
       // Maintenance resumes its existing generation fences before pure startup
       // recovery can resume a lost parent. Recovery never takes a turn/build lease.
-      // Shutdown starts by draining the Telegram bridge (when there is one): an
-      // album still in its window becomes a turn, and running turns get a bounded
-      // wait, all before the persistent REPLs are stopped.
-      on_shutdown_start: async (): Promise<void> => {
-        if (telegramChatBridge !== null) await telegramChatBridge.close()
-        await quiesceChatRecovery()
-      },
+      on_shutdown_start: quiesceChatRecovery,
       on_graph_ready: async () => {
         const recovery = startProjectChatRecovery(async () => {
           await reconcileNativeDispatches()

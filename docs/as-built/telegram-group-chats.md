@@ -49,9 +49,10 @@ absent, as before.
   membership status and warns in the chat when the bot would see only commands. A project with no model that can answer gets the same "no AI
   credential" message as the web chat (`canDispatchLiveAgent`). Transcripts are cut at 4000 characters, and a captionless voice
   note's transcript appears once, as the `[voice]` line. Reply files are read one
-  upload at a time and capped at 100 MB per reply. At shutdown the bridge drains
-  first, from the composition's `on_shutdown_start` (before the persistent REPLs
-  stop): it starts the turn for an album still being gathered and waits up to
+  upload at a time and capped at 50 MB each and 100 MB per reply, checked again on
+  the bytes actually read. At shutdown the bridge drains
+  first, inside the composition's `on_shutdown_start` right after chat recovery
+  stops (before the persistent REPLs stop): it starts the turn for an album still being gathered and waits up to
   10 s for running turns. A reply that offers choices (`options`) is posted with
   them as a numbered list, and a bare answer to the next message ("2",
   or the choice's words) is sent as that choice's value, as a button tap would

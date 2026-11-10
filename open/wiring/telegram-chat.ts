@@ -324,6 +324,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     // capped at REPLY_FILES_MAX_TOTAL_BYTES.
     const planned: Array<{ kind: 'photo' | 'video' | 'document'; path: string; filename: string; content_type: string }> = []
     const skipped = [...rejected]
+    const sizes = new Map<string, number>()
     let total = 0
     for (const path of files) {
       const size = fileSize(path)
@@ -331,13 +332,25 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
         skipped.push(path)
         continue
       }
+      sizes.set(path, size)
       total += size
       planned.push({ path, ...classifyReplyFile(path) })
     }
     for (const step of planReplyUploads(planned)) {
       const items = 'album' in step ? step.album : [step.single]
       try {
-        const uploads = items.map((u) => ({ kind: u.kind, upload: { bytes: readFile(u.path), filename: u.filename, content_type: u.content_type } }))
+        const uploads = items.map((u) => {
+          const bytes = readFile(u.path)
+          // The file may have changed since it was sized; the caps hold on what
+          // was actually read.
+          const planned = sizes.get(u.path) ?? 0
+          if (bytes.byteLength > TELEGRAM_UPLOAD_MAX_BYTES || total - planned + bytes.byteLength > REPLY_FILES_MAX_TOTAL_BYTES) {
+            throw new Error(`${u.filename} grew past the size limit`)
+          }
+          total += bytes.byteLength - planned
+          sizes.set(u.path, bytes.byteLength)
+          return { kind: u.kind, upload: { bytes, filename: u.filename, content_type: u.content_type } }
+        })
         if ('album' in step) {
           await opts.client.sendMediaGroup({
             chat_id: to.chat_id,
