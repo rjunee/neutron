@@ -41,8 +41,8 @@ absent, as before.
   into `<NEUTRON_HOME>/telegram/inbox/<chat>/`, transcription with a `.txt` beside
   the audio, album gathering (1.5 s window), de-duplication by `<chat>:<message>`,
   the turn on `appWsProjectTopicId(owner, project)` through the same live-agent
-  runner the web chat uses (and the same general post-turn scribe, with voice
-  transcripts appended), and the reply back to the chat. The webhook returns
+  runner the web chat uses (and the same general post-turn scribe, given the turn
+  text with its transcripts), and the reply back to the chat. The webhook returns
   before the turn runs. Recent update ids are kept in
   `<NEUTRON_HOME>/telegram/seen-updates.json` (last 1000), so a re-sent update
   runs once across a restart. A message written in a forum topic is answered in

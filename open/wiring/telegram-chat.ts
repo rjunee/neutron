@@ -460,15 +460,22 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     typing(to)
     const saved: SavedAttachment[] = []
     const texts: string[] = []
+    let failedFiles = 0
     for (const a of items) {
       const message_id = String(a.event.adapter_metadata?.['message_id'] ?? '')
       for (const ref of a.event.body.attachments ?? []) {
         if (!isTelegramAttachmentRef(ref)) continue
         const s = await saveAttachment(chat_id, message_id, ref)
         if (s !== null) saved.push(s)
+        else failedFiles++
       }
       const t = a.event.body.text.trim()
       if (t.length > 0) texts.push(t)
+    }
+    if (failedFiles > 0) {
+      await say(to, `I couldn't receive ${failedFiles === 1 ? 'one file' : `${failedFiles} files`} (Telegram lets bots download up to 20 MB).`)
+      // Nothing else came with it: there is no message to answer.
+      if (saved.length === 0 && texts.length === 0) return
     }
     // A bare answer to the last reply's choices ("2", or the choice's words)
     // is sent as that choice's value, as a tap on a button would be.
@@ -492,9 +499,10 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     }
     if (opts.scribe !== undefined && chosen === null) {
       try {
-        const transcripts = saved.filter((a) => a.transcript !== null).map((a) => a.transcript as string)
+        // The turn text already carries every transcript (inline or as the
+        // `[voice]` line), so it goes to the scribe as it is.
         opts.scribe({
-          text: transcripts.length > 0 ? `${user_text}\n\n[voice note transcript]\n${transcripts.join('\n---\n')}` : user_text,
+          text: user_text,
           topic_id: opts.project_topic_id(project_id),
           observed_at: first.event.received_at,
         })
@@ -706,7 +714,7 @@ export function composeTelegramTurnText(input: {
  * reply goes and how to send a file with it.
  */
 export const TELEGRAM_REPLY_NOTE =
-  '(Your reply goes to this Telegram chat. To send a file with it, put each file on its own line of the reply as [[file: /absolute/path]]; images go as photos, mp4 as video, anything else as a document; at most 10 files.)'
+  '(Your reply goes to this Telegram chat. To send a file with it, put each file on its own line of the reply as [[file: /absolute/path]]; images go as photos, mp4 as video, anything else as a document; at most 10 files. Only files inside a project folder (Projects/<project>/), telegram/outbox/ or a folder the operator allowed can be sent; copy a file there first if needed.)'
 
 /**
  * A reply that offers choices carries them in `options`, already stripped from

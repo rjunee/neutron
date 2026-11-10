@@ -35,7 +35,9 @@ them to a router whose topic handler was a no-op, so nothing reached an agent.
   it are counted in their own bucket, so a stranger flooding the bot cannot use up
   the budget of the people it serves.
 - **Media.** Photos (largest rendition), voice notes, audio, documents and videos
-  are downloaded after the access check into
+  are downloaded after the access check (a file that cannot be, such as one over
+  the Bot API's 20 MB, is reported in the chat; with nothing else in the message
+  no turn runs) into
   `<NEUTRON_HOME>/telegram/inbox/<chat>/`, capped at the Bot API's 20 MB. The
   items of one album become one turn.
 - **Voice.** Voice notes and audio are transcribed with the same transcriber the
@@ -49,7 +51,8 @@ them to a router whose topic handler was a no-op, so nothing reached an agent.
   `<user_attachments>` block of local paths when files came with it, then the
   words.
 - **The reply.** The agent's reply is posted to the chat it came from, split at
-  4096 characters. A reply line `[[file: /absolute/path]]` is posted as a photo,
+  4096 characters. A reply line `[[file: /absolute/path]]` (inside a project
+  folder, `telegram/outbox/` or an operator-allowed folder) is posted as a photo,
   video or document; two or more consecutive photos and videos go out as one
   album; at most 10 files, 50 MB each. A file that cannot be sent is reported in
   the chat.
