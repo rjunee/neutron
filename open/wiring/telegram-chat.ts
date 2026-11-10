@@ -96,7 +96,7 @@ export interface TelegramChatBridgeOptions {
   /** The topic key the web chat uses for a project, so both surfaces share one session. */
   project_topic_id: (project_id: string) => string
   access: TelegramAccess
-  client: Pick<TelegramClient, 'sendMessage' | 'sendChatAction' | 'getFile' | 'downloadFile' | 'sendFile' | 'sendMediaGroup'>
+  client: Pick<TelegramClient, 'sendMessage' | 'sendChatAction' | 'getFile' | 'downloadFile' | 'sendFile' | 'sendMediaGroup' | 'getMe' | 'getChatMember'>
   /** `<NEUTRON_HOME>/telegram/inbox` */
   inbox_dir: string
   /** `<NEUTRON_HOME>/telegram/seen-updates.json`: recent update ids, so a re-sent update runs once across restarts. */
@@ -227,13 +227,38 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     const r = opts.access.connect({ chat_id, chat_type, by_user_id: user_id, ...(title !== undefined ? { title } : {}) })
     if (r.ok) {
       opts.log.info('telegram_chat_connected', { chat: chat_id, project: r.project_id, by: user_id })
-      await say(to, r.already ? 'This chat is already connected.' : 'This chat is connected.')
+      const sees = await botSeesGroupMessages(chat_id)
+      await say(
+        to,
+        (r.already ? 'This chat is already connected.' : 'This chat is connected.') +
+          (sees
+            ? ''
+            : " But I can only see commands here: in BotFather turn off this bot's group privacy (/setprivacy → Disable), or make me an admin of this group, then remove and re-add me."),
+      )
     } else if (r.reason === 'not_a_group') {
       await say(to, 'Send /connect inside the group you want to connect.')
     } else if (r.reason === 'no_default_project') {
       await say(to, 'No project is set up for Telegram on this instance yet.')
     }
     return true
+  }
+
+  /**
+   * With Telegram's default group privacy a bot sees only commands, so ordinary
+   * group messages would never arrive. It sees everything when privacy is off
+   * or when it is an admin of the group. Unknown (an API error) counts as yes,
+   * so a transient failure never produces a false warning.
+   */
+  const botSeesGroupMessages = async (chat_id: string): Promise<boolean> => {
+    try {
+      const me = await opts.client.getMe()
+      if (me.can_read_all_group_messages === true) return true
+      const member = await opts.client.getChatMember({ chat_id, user_id: me.id })
+      return member.status === 'administrator' || member.status === 'creator'
+    } catch (err) {
+      opts.log.warn('telegram_privacy_check_failed', { chat: chat_id, error: errMsg(err) })
+      return true
+    }
   }
 
   const saveAttachment = async (chat_id: string, message_id: string, ref: TelegramAttachmentRef): Promise<SavedAttachment | null> => {

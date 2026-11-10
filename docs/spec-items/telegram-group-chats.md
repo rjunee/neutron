@@ -28,7 +28,12 @@ them to a router whose topic handler was a no-op, so nothing reached an agent.
   a connected chat or a private chat, admits that person. `/start` in a group
   never shows a code. `/pair` and `/connect` from a stranger get no answer.
 - **Connecting a group.** `/connect` from an allowed user inside a group connects
-  it to the default project.
+  it to the default project. With Telegram's default group privacy a bot sees
+  only commands, so the reply to `/connect` warns unless the bot can read every
+  group message (privacy off in BotFather, or the bot is a group admin).
+- **Rate limit.** With the access list wired, updates from senders who are not on
+  it are counted in their own bucket, so a stranger flooding the bot cannot use up
+  the budget of the people it serves.
 - **Media.** Photos (largest rendition), voice notes, audio, documents and videos
   are downloaded after the access check into
   `<NEUTRON_HOME>/telegram/inbox/<chat>/`, capped at the Bot API's 20 MB. The
@@ -66,6 +71,8 @@ them to a router whose topic handler was a no-op, so nothing reached an agent.
 - [x] A reply with `[[file: …]]` lines posts its text, then a document and a
       video; two photos go out as one album.
 - [x] An instance with no Telegram secrets mounts no route and builds no bridge.
+- [x] A stranger sending many updates does not stop an allowed member's messages.
+- [x] `/connect` warns when the bot cannot read ordinary group messages.
 
 Tests: `open/__tests__/telegram-chat-bridge.test.ts` (end to end through the
 webhook handler against a local mock of the Bot API),

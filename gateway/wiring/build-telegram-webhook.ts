@@ -83,6 +83,11 @@ export interface BuildTelegramWebhookSurfaceInput {
    * `on_start_command` shape.
    */
   on_bind_command?: TelegramBindCommandHandler
+  /**
+   * Whether a sender is one this instance answers. Strangers are rate-limited in
+   * their own bucket so they cannot silence the people the bot serves.
+   */
+  is_known_sender?: (sender_id: string) => boolean
 }
 
 export interface TelegramWebhookSurface {
@@ -187,6 +192,7 @@ export async function buildTelegramWebhookSurface(
     receiver: input.receiver,
     ...(input.on_start_command !== undefined ? { on_start_command: input.on_start_command } : {}),
     ...(input.on_bind_command !== undefined ? { on_bind_command: input.on_bind_command } : {}),
+    ...(input.is_known_sender !== undefined ? { is_known_sender: input.is_known_sender } : {}),
   })
   return {
     handler: adapter.webhookHandler(),

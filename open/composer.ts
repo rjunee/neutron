@@ -7200,11 +7200,13 @@ export function buildOpenGraphComposer(
     // with the reply posted back to the chat. With no Telegram secrets there is
     // no surface, no route and no bridge, exactly as before.
     let telegramChatBridge: TelegramChatBridge | null = null
+    const telegramAccess = new TelegramAccess(telegramAccessPath(owner_home))
     try {
       telegramWebhookSurface = await buildTelegramWebhookSurface({
         owner_handle,
         url_slug: project_slug,
         secrets: secretsStore,
+        is_known_sender: (senderId) => telegramAccess.isAllowedUser(senderId),
         receiver: {
           receive: async (event) => {
             if (telegramChatBridge !== null) await telegramChatBridge.receive(event)
@@ -7217,7 +7219,7 @@ export function buildOpenGraphComposer(
           project_slug,
           owner_user_id: OWNER_USER_ID,
           project_topic_id: (projectId) => appWsProjectTopicId(OWNER_USER_ID, projectId),
-          access: new TelegramAccess(telegramAccessPath(owner_home)),
+          access: telegramAccess,
           client: telegramWebhookSurface.client,
           inbox_dir: joinPath(owner_home, 'telegram', 'inbox'),
           seen_path: joinPath(owner_home, 'telegram', 'seen-updates.json'),

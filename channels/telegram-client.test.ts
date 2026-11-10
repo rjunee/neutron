@@ -78,3 +78,26 @@ describe('TelegramClient', () => {
     expect(() => new TelegramClient('')).toThrow(/non-empty token/)
   })
 })
+
+describe('TelegramClient.downloadFile — streaming cap', () => {
+  test('stops reading once the body passes the cap, even with no Content-Length', async () => {
+    let pulled = 0
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled++
+        controller.enqueue(new Uint8Array(1024))
+        if (pulled > 1000) controller.close()
+      },
+    })
+    const fetcher = (async () => new Response(body)) as unknown as typeof fetch
+    const client = new TelegramClient('t', { fetcher })
+    await expect(client.downloadFile('a/b.jpg', 4096)).rejects.toThrow('cap')
+    expect(pulled).toBeLessThan(20)
+  })
+
+  test('returns the bytes when under the cap', async () => {
+    const fetcher = (async () => new Response(new Uint8Array([1, 2, 3]))) as unknown as typeof fetch
+    const client = new TelegramClient('t', { fetcher })
+    expect(Array.from(await client.downloadFile('a/b.jpg', 10))).toEqual([1, 2, 3])
+  })
+})

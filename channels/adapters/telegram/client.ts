@@ -211,9 +211,27 @@ export class TelegramClient {
     if (Number.isFinite(declared) && declared > max_bytes) {
       throw new Error(`Telegram downloadFile: ${declared} bytes exceeds the ${max_bytes}-byte cap`)
     }
-    const buf = new Uint8Array(await res.arrayBuffer())
-    if (buf.byteLength > max_bytes) {
-      throw new Error(`Telegram downloadFile: ${buf.byteLength} bytes exceeds the ${max_bytes}-byte cap`)
+    // Read the stream and stop the moment it passes the cap, so a missing or
+    // lying Content-Length can never make us buffer more than `max_bytes`.
+    if (res.body === null) return new Uint8Array(0)
+    const reader = res.body.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > max_bytes) {
+        await reader.cancel().catch(() => undefined)
+        throw new Error(`Telegram downloadFile: more than the ${max_bytes}-byte cap`)
+      }
+      chunks.push(value)
+    }
+    const buf = new Uint8Array(total)
+    let off = 0
+    for (const c of chunks) {
+      buf.set(c, off)
+      off += c.byteLength
     }
     return buf
   }
@@ -272,8 +290,13 @@ export class TelegramClient {
     return this.call<typeof input, true>('sendChatAction', input)
   }
 
-  getMe(): Promise<{ id: number; username: string; is_bot: boolean }> {
-    return this.call<Record<string, never>, { id: number; username: string; is_bot: boolean }>(
+  /** A chat member's status (`administrator`, `member`, …). */
+  getChatMember(input: { chat_id: number | string; user_id: number }): Promise<{ status: string }> {
+    return this.call<typeof input, { status: string }>('getChatMember', input)
+  }
+
+  getMe(): Promise<{ id: number; username: string; is_bot: boolean; can_read_all_group_messages?: boolean }> {
+    return this.call<Record<string, never>, { id: number; username: string; is_bot: boolean; can_read_all_group_messages?: boolean }>(
       'getMe',
       {},
     )

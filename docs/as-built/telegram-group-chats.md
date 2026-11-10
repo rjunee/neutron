@@ -17,8 +17,13 @@ absent, as before.
   A message with neither text nor a file (a sticker) is still ignored. Every event
   now carries `adapter_metadata` `{chat_id, chat_type, message_id, chat_title?,
   media_group_id?, edited?}`.
-- `channels/adapters/telegram/client.ts` — `getFile`, `downloadFile` (capped by
-  declared and actual length), `sendFile` (`sendPhoto` / `sendVideo` /
+- `channels/adapters/telegram/webhook-server.ts` also takes an optional
+  `is_known_sender`; when set (the composer passes the access list), updates from
+  senders not on the list are rate-limited in their own bucket, charged after the
+  body is parsed. Without it the single bucket is charged before parsing, as
+  before.
+- `channels/adapters/telegram/client.ts` — `getFile`, `downloadFile` (reads the
+  stream and stops past the cap, whatever `Content-Length` says), `getChatMember`, `sendFile` (`sendPhoto` / `sendVideo` /
   `sendDocument` as multipart), `sendMediaGroup`, `sendChatAction`, over a shared
   `callMultipart`.
 - `channels/adapters/telegram/access.ts` — the access list in
@@ -40,7 +45,8 @@ absent, as before.
   before the turn runs. Recent update ids are kept in
   `<NEUTRON_HOME>/telegram/seen-updates.json` (last 1000), so a re-sent update
   runs once across a restart. A message written in a forum topic is answered in
-  that topic. A project with no model that can answer gets the same "no AI
+  that topic. `/connect` checks `getMe.can_read_all_group_messages` and the bot's
+  membership status and warns in the chat when the bot would see only commands. A project with no model that can answer gets the same "no AI
   credential" message as the web chat (`canDispatchLiveAgent`). Transcripts are cut at 4000 characters, and a captionless voice
   note's transcript appears once, as the `[voice]` line. Reply files are read one
   upload at a time and capped at 100 MB per reply. At shutdown the bridge drains

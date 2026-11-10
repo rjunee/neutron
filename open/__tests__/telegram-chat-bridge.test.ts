@@ -38,6 +38,8 @@ interface ApiCall {
   files?: Record<string, { name: string; type: string; size: number }>
 }
 const calls: ApiCall[] = []
+let botReadsAll = true
+let botStatus = 'member'
 const FILES: Record<string, Uint8Array> = {
   'photos/file_1.jpg': new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]),
   'photos/file_2.jpg': new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 4, 5, 6]),
@@ -78,6 +80,8 @@ beforeAll(() => {
         const path = id === 'photo-a' ? 'photos/file_1.jpg' : id === 'photo-b' ? 'photos/file_2.jpg' : id === 'voice-1' ? 'voice/file_3.oga' : undefined
         return Response.json({ ok: true, result: { file_id: id, ...(path !== undefined ? { file_path: path } : {}) } })
       }
+      if (method === 'getMe') return Response.json({ ok: true, result: { id: 1, username: 'family_bot', is_bot: true, can_read_all_group_messages: botReadsAll } })
+      if (method === 'getChatMember') return Response.json({ ok: true, result: { status: botStatus } })
       if (method === 'sendMediaGroup') return Response.json({ ok: true, result: [{ message_id: 1, chat: { id: 1 }, date: 1 }] })
       if (method === 'sendChatAction') return Response.json({ ok: true, result: true })
       return Response.json({ ok: true, result: { message_id: calls.length, chat: { id: 1 }, date: 1 } })
@@ -109,6 +113,8 @@ function seedAccess(state: unknown): void {
 
 beforeEach(() => {
   calls.length = 0
+  botReadsAll = true
+  botStatus = 'member'
   home = mkdtempSync(join(tmpdir(), 'tg-bridge-'))
   turns = []
   replyFor = () => 'ok'
@@ -186,6 +192,18 @@ describe('telegram chat bridge', () => {
     expect(t.user_id).toBe('owner')
     expect(t.user_text).toBe(`[telegram chat=${GROUP} from="Parent One" user=${PARENT_ONE} msg=${messageId}]\n${TELEGRAM_REPLY_NOTE}\nhello after connect`)
     expect(sentTexts()).toContain('ok')
+  })
+
+  test('/connect warns when the bot cannot see ordinary group messages', async () => {
+    botReadsAll = false
+    await post({ text: '/connect' })
+    await bridge.idle()
+    expect(sentTexts()[0]).toContain('I can only see commands here')
+    calls.length = 0
+    botStatus = 'administrator'
+    await post({ text: '/connect' })
+    await bridge.idle()
+    expect(sentTexts()).toEqual(['This chat is already connected.'])
   })
 
   test("a stranger's message in a connected group is dropped: no turn, no download, no reply", async () => {

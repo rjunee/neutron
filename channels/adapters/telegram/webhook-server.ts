@@ -163,6 +163,14 @@ export interface WebhookHandlerOptions {
   rate_limit?: TelegramWebhookRateLimit
   /** DI clock (tests). */
   now?: () => number
+  /**
+   * Whether an update's sender is one this instance answers (for example a
+   * member of its Telegram access list). When set, updates from other senders are
+   * counted in a SEPARATE bucket with the same cap, so a stranger who floods the
+   * bot cannot use up the budget and silence the people it serves. Unset: one
+   * bucket for every accepted update, counted before the body is parsed.
+   */
+  is_known_sender?: (sender_id: string) => boolean
   /** Optional self-echo filter; recommended in production. */
   self_echo_filter?: SelfEchoFilter
   /**
@@ -356,6 +364,24 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
   // webhook in one process must not share a window, or one instance's traffic
   // silences the other's. The admin-respawn limiter took this same correction.
   const rateHits: number[] = []
+  const strangerHits: number[] = []
+  const charge = (hits: number[]): boolean => {
+    const cfg = opts.rate_limit ?? DEFAULT_RATE_LIMIT
+    const nowMs = (opts.now ?? Date.now)()
+    const cutoff = nowMs - cfg.windowMs
+    // Drop expired hits first so a quiet period always restores full budget.
+    while (hits.length > 0 && (hits[0] as number) <= cutoff) hits.shift()
+    if (hits.length >= cfg.maxRequests) {
+      log.warn('rate_limited_update_dropped', {
+        window_ms: cfg.windowMs,
+        max_requests: cfg.maxRequests,
+        ...(hits === strangerHits ? { bucket: 'unknown_sender' } : {}),
+      })
+      return false
+    }
+    hits.push(nowMs)
+    return true
+  }
   return async (req) => {
     if (req.method !== 'POST') {
       return new Response('method not allowed', { status: 405 })
@@ -389,9 +415,9 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
 
     // ── Accepted-update cap (ISSUES #442) ─────────────────────────────────
     // Placed AFTER the secret compare so an unauthenticated caller still costs
-    // only a constant-time compare, and BEFORE the body parse so an over-limit
-    // request costs a timestamp push and nothing else — no JSON, no dispatch,
-    // no agent turn.
+    // only a constant-time compare, and (with no sender classifier) BEFORE the
+    // body parse so an over-limit request costs a timestamp push and nothing
+    // else — no JSON, no dispatch, no agent turn.
     //
     // OVER-LIMIT ANSWERS 200, NOT 429, AND THAT IS THE WHOLE DESIGN DECISION.
     // Telegram re-sends non-2xx for hours — this file already returns 200 for
@@ -403,21 +429,10 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     //
     // The bucket is per-mounted-surface, not module-global: two gateways in one
     // process must not share a window (the same correction the admin-respawn
-    // limiter took).
-    {
-      const cfg = opts.rate_limit ?? DEFAULT_RATE_LIMIT
-      const nowMs = (opts.now ?? Date.now)()
-      const cutoff = nowMs - cfg.windowMs
-      // Drop expired hits first so a quiet period always restores full budget.
-      while (rateHits.length > 0 && (rateHits[0] as number) <= cutoff) rateHits.shift()
-      if (rateHits.length >= cfg.maxRequests) {
-        log.warn('rate_limited_update_dropped', {
-          window_ms: cfg.windowMs,
-          max_requests: cfg.maxRequests,
-        })
-        return new Response('ok', { status: 200 })
-      }
-      rateHits.push(nowMs)
+    // limiter took). With `is_known_sender`, the sender decides the bucket, which
+    // needs the body, so the charge moves after the parse.
+    if (opts.is_known_sender === undefined && !charge(rateHits)) {
+      return new Response('ok', { status: 200 })
     }
 
     let parsed: unknown
@@ -439,6 +454,11 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
       return new Response('ok', { status: 200 })
     }
     const body = parsed as TelegramUpdate
+    if (opts.is_known_sender !== undefined) {
+      const sender = updateSenderId(body)
+      const known = sender !== null && opts.is_known_sender(sender)
+      if (!charge(known ? rateHits : strangerHits)) return new Response('ok', { status: 200 })
+    }
 
     // Inline-keyboard tap path (P2 S1 button primitive). Dispatch to the
     // gateway-supplied callback handler when wired; otherwise drop with a
@@ -502,6 +522,12 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     }
     return new Response('ok', { status: 200 })
   }
+}
+
+/** The Telegram user id behind an update, or null when it has none. */
+function updateSenderId(update: TelegramUpdate): string | null {
+  const from = update.message?.from ?? update.edited_message?.from ?? update.callback_query?.from
+  return from !== undefined && typeof from.id === 'number' ? String(from.id) : null
 }
 
 /**
