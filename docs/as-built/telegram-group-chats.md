@@ -60,7 +60,8 @@ absent, as before.
   device and inode as the resolved path) and read with a hard byte bound. An image over Telegram's 10 MB photo limit is sent as a
   document. A 429 from Telegram is waited out (its `retry_after`, at most a minute,
   three tries) instead of dropping that part of the reply. At shutdown the bridge drains
-  first, inside the composition's `on_shutdown_start` right after chat recovery
+  first (after which the webhook answers 503, so Telegram re-sends rather than a
+  message being lost), inside the composition's `on_shutdown_start` right after chat recovery
   stops (before the persistent REPLs stop): it starts the turn for an album still being gathered and waits up to
   10 s for running turns. A reply that offers choices (`options`) is posted with
   them as a numbered list, and a bare answer to the next message ("2",

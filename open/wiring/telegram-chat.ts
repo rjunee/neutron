@@ -57,6 +57,7 @@ import type { LogFields } from '@neutronai/logger'
 import { TelegramRetryAfterError, type TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import type { TelegramAccess } from '@neutronai/channels/adapters/telegram/access.ts'
 import {
+  TelegramReceiverUnavailableError,
   isTelegramAttachmentRef,
   type TelegramAttachmentRef,
 } from '@neutronai/channels/adapters/telegram/webhook-server.ts'
@@ -610,7 +611,8 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
 
   return {
     async receive(event: IncomingEvent): Promise<void> {
-      if (closed) return
+      // Shutting down: refuse in a way Telegram retries (503), never a silent 200.
+      if (closed) throw new TelegramReceiverUnavailableError('telegram bridge is shutting down')
       // Tracked for its whole run, so a shutdown that begins while a message is
       // being accepted still waits for the turn it starts.
       const p = receiveOne(event)

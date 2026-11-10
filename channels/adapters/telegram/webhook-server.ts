@@ -69,6 +69,15 @@ interface TelegramMessage {
 }
 
 /**
+ * Thrown by a receiver that cannot take updates right now (it is shutting down).
+ * The webhook answers 503 for it, so Telegram re-sends the update later instead
+ * of the message being lost; any other receiver error is still answered 200.
+ */
+export class TelegramReceiverUnavailableError extends Error {
+  override readonly name = 'TelegramReceiverUnavailableError'
+}
+
+/**
  * One file a Telegram message carried, as `IncomingEvent.body.attachments`
  * entries. Only the reference travels: the receiver that decides the sender is
  * allowed downloads it with `getFile`, so an update from a stranger never costs a
@@ -96,8 +105,10 @@ export function isTelegramAttachmentRef(v: unknown): v is TelegramAttachmentRef 
 
 function attachmentRefs(msg: TelegramMessage): TelegramAttachmentRef[] {
   const refs: TelegramAttachmentRef[] = []
-  const push = (kind: TelegramAttachmentRef['kind'], f: TelegramFileRef | undefined): void => {
-    if (f === undefined || typeof f.file_id !== 'string' || f.file_id.length === 0) return
+  const push = (kind: TelegramAttachmentRef['kind'], f: TelegramFileRef | null | undefined): void => {
+    // A malformed update (`photo: [null]`, `voice: 3`) must decode to nothing,
+    // never throw out of the handler as a 500 that Telegram would keep re-sending.
+    if (f === null || typeof f !== 'object' || typeof f.file_id !== 'string' || f.file_id.length === 0) return
     refs.push({
       kind,
       file_id: f.file_id,
@@ -521,6 +532,10 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     try {
       await opts.receiver.receive(event)
     } catch (err) {
+      if (err instanceof TelegramReceiverUnavailableError) {
+        log.warn('receiver_unavailable_retry_later')
+        return new Response('unavailable', { status: 503 })
+      }
       log.error('receiver_threw', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
       // Still 200 — letting Telegram retry would amplify the failure.
     }

@@ -423,7 +423,13 @@ describe('telegram chat bridge', () => {
     expect(turns.length).toBe(0)
     await slow.close(5_000)
     expect(turns.length).toBe(1)
-    // Closed: nothing new is accepted.
+    // Closed: nothing new is accepted, and the webhook tells Telegram to retry.
+    const late = await h(new Request('http://x/webhook/telegram', {
+      method: 'POST',
+      headers: { 'x-telegram-bot-api-secret-token': 'sec' },
+      body: JSON.stringify({ update_id: 91, message: { message_id: 9101, from: { id: PARENT_ONE, first_name: 'P' }, chat: { id: GROUP, type: 'group' }, date: 1, text: 'late' } }),
+    }))
+    expect(late.status).toBe(503)
     await slow.receive({
       channel_kind: 'telegram',
       channel_topic_id: String(GROUP),
@@ -432,7 +438,7 @@ describe('telegram chat bridge', () => {
       event_id: `${GROUP}:9200`,
       received_at: 1,
       adapter_metadata: { chat_id: String(GROUP), chat_type: 'group', message_id: 9200 },
-    })
+    }).catch(() => undefined)
     await slow.idle()
     expect(turns.length).toBe(1)
   })

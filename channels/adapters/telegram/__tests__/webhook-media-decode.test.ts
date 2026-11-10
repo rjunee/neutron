@@ -58,6 +58,12 @@ describe('decodeUpdate — media', () => {
     expect(vid?.adapter_metadata?.['media_group_id']).toBe('g1')
   })
 
+  test('malformed media references decode to nothing instead of throwing', () => {
+    expect(decodeUpdate(update({ photo: [null] }), opts)).toBeNull()
+    expect(decodeUpdate(update({ voice: null, document: 3 }), opts)).toBeNull()
+    expect(decodeUpdate(update({ caption: 'hi', photo: [null] }), opts)?.body).toEqual({ text: 'hi' })
+  })
+
   test('a message with neither text nor a file is ignored', () => {
     expect(decodeUpdate(update({ sticker: { file_id: 's' } }), opts)).toBeNull()
   })
