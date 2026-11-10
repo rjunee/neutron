@@ -243,6 +243,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
    * or album it refers to (which take time to download, transcribe or gather).
    */
   const chatQueues = new Map<string, Promise<void>>()
+  const admissions = new Map<string, Promise<void>>()
   const enqueueChat = (chat_id: string, work: () => Promise<void>): void => {
     const prev = chatQueues.get(chat_id) ?? Promise.resolve()
     const next = prev.then(work).catch((err) => opts.log.warn('telegram_turn_failed', { chat: chat_id, error: errMsg(err) }))
@@ -571,6 +572,23 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       // An edit is not a new message; acting on it would run a second turn.
       if (event.adapter_metadata?.['edited'] === true) return
       if (!seen.claim(event.event_id)) return
+      // Admission (commands and the access check) runs in arrival order per
+      // chat, so a message right after `/connect` sees the chat connected.
+      const prev = admissions.get(chat_id) ?? Promise.resolve()
+      let done!: () => void
+      const mine = new Promise<void>((r) => { done = r })
+      const tail = prev.then(() => mine)
+      admissions.set(chat_id, tail)
+      try {
+        await prev
+        await admit(event, chat_id, chat_type)
+      } finally {
+        done()
+        if (admissions.get(chat_id) === tail) admissions.delete(chat_id)
+      }
+  }
+
+  const admit = async (event: IncomingEvent, chat_id: string, chat_type: string): Promise<void> => {
       const rawThread = event.adapter_metadata?.['message_thread_id']
       const thread_id = typeof rawThread === 'number' && Number.isInteger(rawThread) ? rawThread : undefined
       let handled: boolean

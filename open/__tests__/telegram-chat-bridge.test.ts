@@ -616,4 +616,30 @@ describe('telegram chat bridge', () => {
     await closing
     expect(closed).toBe(true)
   })
+
+  test('a message right after /connect is not dropped while /connect is still being handled', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const real = new TelegramClient(TOKEN, { base_url: base })
+    const slowClient = Object.assign(Object.create(real) as TelegramClient, {
+      getMe: async () => { await gate; return real.getMe() },
+    })
+    const b = buildTelegramChatBridge({ ...bridgeOptions(), client: slowClient })
+    const ev = (id: number, text: string) => ({
+      channel_kind: 'telegram' as const,
+      channel_topic_id: String(GROUP),
+      user: { channel_user_id: String(PARENT_ONE), display_name: 'P' },
+      body: { text },
+      event_id: `${GROUP}:${id}`,
+      received_at: 1,
+      adapter_metadata: { chat_id: String(GROUP), chat_type: 'group', message_id: id },
+    })
+    const connecting = b.receive(ev(9701, '/connect@family_bot'))
+    const following = b.receive(ev(9702, 'first real message'))
+    release()
+    await Promise.all([connecting, following])
+    await b.idle()
+    expect(turns.length).toBe(1)
+    expect(turns[0]?.user_text.endsWith('first real message')).toBe(true)
+  })
 })

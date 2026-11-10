@@ -66,7 +66,9 @@ absent, as before.
   10 s for running turns. A reply that offers choices (`options`) is posted with
   them as a numbered list, and a bare answer to the next message ("2",
   or the choice's words) is sent as that choice's value, as a button tap would
-  be. Turns run one after another per chat in arrival order: an album takes its
+  be. Commands and the access check run in arrival order per chat (a message
+  right after `/connect` sees the chat connected), and turns run one after
+  another per chat in arrival order: an album takes its
   place in the queue at its first item, so a follow-up never reaches the session
   ahead of the photos or voice note it refers to.
 - `gateway/wiring/build-live-agent-turn.ts` and
@@ -108,6 +110,8 @@ absent, as before.
   instance.
 - A group upgraded to a supergroup gets a new chat id and has to be connected
   again with `/connect`.
+- The choices a reply offered are remembered in memory only: after a restart, a
+  bare "1" is sent as written rather than as the choice's value.
 ### History
 
 Telegram turns and their replies are part of the project's chat history, so they
