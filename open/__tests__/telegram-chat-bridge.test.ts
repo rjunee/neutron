@@ -19,7 +19,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -142,6 +142,7 @@ function bridgeOptions(): TelegramChatBridgeOptions {
     client: new TelegramClient(TOKEN, { base_url: base }),
     inbox_dir: join(home, 'telegram', 'inbox'),
     seen_path: join(home, 'telegram', 'seen-updates.json'),
+    reply_file_roots: [home],
     chat_turn: async (turn) => {
       turns.push(turn)
       turn.send({ type: 'agent_message', body: replyFor(turn) })
@@ -331,6 +332,7 @@ describe('telegram chat bridge', () => {
       client: new TelegramClient(TOKEN, { base_url: base }),
       inbox_dir: join(home, 'inbox'),
       seen_path: join(home, 'seen.json'),
+      reply_file_roots: [home],
       chat_turn: null,
       transcribe: async () => null,
       log: { info: () => undefined, warn: () => undefined },
@@ -510,5 +512,42 @@ describe('telegram chat bridge', () => {
     expect(waits).toEqual([2000])
     // The mock records the refused attempt too: one 429, then the retry.
     expect(sentTexts()).toEqual(['ok', 'ok'])
+  })
+
+  test('a reply cannot send a file from outside the allowed folders', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    const outside = mkdtempSync(join(tmpdir(), 'tg-outside-'))
+    try {
+      const secret = join(outside, 'secret.txt')
+      writeFileSync(secret, 'do not send')
+      // A symlink inside the home pointing out of it does not count as inside.
+      const link = join(home, 'link.txt')
+      symlinkSync(secret, link)
+      replyFor = () => `[[file: ${secret}]]\n[[file: ${link}]]`
+      await post({ text: 'send it' })
+      await bridge.idle()
+      expect(calls.some((c) => c.method === 'sendDocument')).toBe(false)
+      expect(sentTexts().join('\n')).toContain('Could not send 2 files')
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+
+  test('each delivered message reaches the general scribe once, with its transcript', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    const scribed: string[] = []
+    const b = buildTelegramChatBridge({ ...bridgeOptions(), scribe: ({ text }) => { scribed.push(text) } })
+    await b.receive({
+      channel_kind: 'telegram',
+      channel_topic_id: String(GROUP),
+      user: { channel_user_id: String(PARENT_ONE), display_name: 'P' },
+      body: { text: '', attachments: [{ kind: 'voice', file_id: 'voice-1' }] },
+      event_id: `${GROUP}:9501`,
+      received_at: 1,
+      adapter_metadata: { chat_id: String(GROUP), chat_type: 'group', message_id: 9501 },
+    })
+    await b.idle()
+    expect(scribed.length).toBe(1)
+    expect(scribed[0]).toContain('[voice note transcript]\nshe read all four words')
   })
 })

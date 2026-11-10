@@ -41,7 +41,8 @@ absent, as before.
   into `<NEUTRON_HOME>/telegram/inbox/<chat>/`, transcription with a `.txt` beside
   the audio, album gathering (1.5 s window), de-duplication by `<chat>:<message>`,
   the turn on `appWsProjectTopicId(owner, project)` through the same live-agent
-  runner the web chat uses, and the reply back to the chat. The webhook returns
+  runner the web chat uses (and the same general post-turn scribe, with voice
+  transcripts appended), and the reply back to the chat. The webhook returns
   before the turn runs. Recent update ids are kept in
   `<NEUTRON_HOME>/telegram/seen-updates.json` (last 1000), so a re-sent update
   runs once across a restart. A message written in a forum topic is answered in
@@ -50,7 +51,8 @@ absent, as before.
   credential" message as the web chat (`canDispatchLiveAgent`). Transcripts are cut at 4000 characters, and a captionless voice
   note's transcript appears once, as the `[voice]` line. Reply files are read one
   upload at a time and capped at 50 MB each and 100 MB per reply, checked again on
-  the bytes actually read; an image over Telegram's 10 MB photo limit is sent as a
+  the bytes actually read. A `[[file: …]]` path must resolve (through symlinks)
+  inside the instance home, `<NEUTRON_HOME>`; anything else is not sent. An image over Telegram's 10 MB photo limit is sent as a
   document. A 429 from Telegram is waited out (its `retry_after`, at most a minute,
   three tries) instead of dropping that part of the reply. At shutdown the bridge drains
   first, inside the composition's `on_shutdown_start` right after chat recovery

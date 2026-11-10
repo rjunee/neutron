@@ -48,8 +48,8 @@
  * side unchanged.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join, sep } from 'node:path'
 
 import type { IncomingEvent, IncomingEventReceiver } from '@neutronai/channels/types.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
@@ -117,6 +117,14 @@ export interface TelegramChatBridgeOptions {
   file_size?: (path: string) => number | null
   /** Wait used for Telegram's retry_after; injectable for tests. */
   sleep?: (ms: number) => Promise<void>
+  /**
+   * Directories a reply may send files from (the instance's home). A
+   * `[[file: …]]` path is resolved through symlinks and must land inside one of
+   * them, so a reply can never post a file from elsewhere on the server.
+   */
+  reply_file_roots: ReadonlyArray<string>
+  /** The general post-turn scribe the web chat runs (memory extraction); optional. */
+  scribe?: (input: { text: string; topic_id: string; observed_at: number }) => void
 }
 
 interface Accepted {
@@ -169,6 +177,22 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
         return null
       }
     })
+  const roots = opts.reply_file_roots.map((r) => {
+    try {
+      return realpathSync(r)
+    } catch {
+      return r
+    }
+  })
+  const insideRoots = (path: string): boolean => {
+    let real: string
+    try {
+      real = realpathSync(path)
+    } catch {
+      return false
+    }
+    return roots.some((root) => real === root || real.startsWith(root.endsWith(sep) ? root : `${root}${sep}`))
+  }
   const seen = new SeenUpdates(opts.seen_path, opts.log)
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   /**
@@ -344,6 +368,10 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     const sizes = new Map<string, number>()
     let total = 0
     for (const path of files) {
+      if (!insideRoots(path)) {
+        skipped.push(path)
+        continue
+      }
       const size = fileSize(path)
       if (size === null || size > TELEGRAM_UPLOAD_MAX_BYTES || total + size > REPLY_FILES_MAX_TOTAL_BYTES) {
         skipped.push(path)
@@ -357,6 +385,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       const items = 'album' in step ? step.album : [step.single]
       try {
         const uploads = items.map((u) => {
+          if (!insideRoots(u.path)) throw new Error(`${u.filename} is outside the allowed folders`)
           const bytes = readFile(u.path)
           // The file may have changed since it was sized; the caps hold on what
           // was actually read.
@@ -435,6 +464,18 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
         })
       } else if (ev.type === 'agent_typing_start') {
         typing(to)
+      }
+    }
+    if (opts.scribe !== undefined && chosen === null) {
+      try {
+        const transcripts = saved.filter((a) => a.transcript !== null).map((a) => a.transcript as string)
+        opts.scribe({
+          text: transcripts.length > 0 ? `${user_text}\n\n[voice note transcript]\n${transcripts.join('\n---\n')}` : user_text,
+          topic_id: opts.project_topic_id(project_id),
+          observed_at: first.event.received_at,
+        })
+      } catch (err) {
+        opts.log.warn('telegram_scribe_failed', { chat: chat_id, error: errMsg(err) })
       }
     }
     opts.log.info('telegram_turn_dispatched', { chat: chat_id, project: project_id, messages: items.length, files: saved.length })

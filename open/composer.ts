@@ -7227,6 +7227,21 @@ export function buildOpenGraphComposer(
           access: telegramAccess,
           client: telegramWebhookSurface.client,
           inbox_dir: joinPath(owner_home, 'telegram', 'inbox'),
+          reply_file_roots: [owner_home],
+          ...(scribeOnUserTurn !== undefined
+            ? {
+                // The same general scribe the web chat runs after a user turn.
+                scribe: ({ text, topic_id, observed_at }: { text: string; topic_id: string; observed_at: number }) =>
+                  scribeOnUserTurn({
+                    owner_slug: project_slug,
+                    user_id: OWNER_USER_ID,
+                    topic_id,
+                    text,
+                    observed_at,
+                    author: { id: 'owner', display: 'owner' },
+                  }),
+              }
+            : {}),
           seen_path: joinPath(owner_home, 'telegram', 'seen-updates.json'),
           chat_turn: appWsChatTurn,
           can_dispatch: (projectId) => canDispatchLiveAgent(projectId),
