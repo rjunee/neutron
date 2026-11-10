@@ -54,13 +54,14 @@ import { dirname, join } from 'node:path'
 import type { IncomingEvent, IncomingEventReceiver } from '@neutronai/channels/types.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { LogFields } from '@neutronai/logger'
-import type { TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
+import { TelegramRetryAfterError, type TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import type { TelegramAccess } from '@neutronai/channels/adapters/telegram/access.ts'
 import {
   isTelegramAttachmentRef,
   type TelegramAttachmentRef,
 } from '@neutronai/channels/adapters/telegram/webhook-server.ts'
 import {
+  TELEGRAM_PHOTO_MAX_BYTES,
   TELEGRAM_UPLOAD_MAX_BYTES,
   chunkTelegramText,
   classifyReplyFile,
@@ -114,6 +115,8 @@ export interface TelegramChatBridgeOptions {
   read_file?: (path: string) => Uint8Array
   /** Size of a reply file, or null when it is not a regular file. */
   file_size?: (path: string) => number | null
+  /** Wait used for Telegram's retry_after; injectable for tests. */
+  sleep?: (ms: number) => Promise<void>
 }
 
 interface Accepted {
@@ -167,6 +170,22 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       }
     })
   const seen = new SeenUpdates(opts.seen_path, opts.log)
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
+  /**
+   * Telegram answers 429 with the seconds to wait when a chat gets messages too
+   * fast. Wait that long and try again (up to three times, at most a minute
+   * each) rather than dropping a chunk of the reply.
+   */
+  const withRetryAfter = async <T,>(call: () => Promise<T>): Promise<T> => {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await call()
+      } catch (err) {
+        if (!(err instanceof TelegramRetryAfterError) || attempt >= 3) throw err
+        await sleep(Math.min(err.retry_after_ms, 60_000))
+      }
+    }
+  }
   let closed = false
   const albums = new Map<string, { items: Accepted[]; timer: ReturnType<typeof setTimeout>; ready: () => void }>()
   /**
@@ -195,11 +214,9 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
   }
 
   const say = async (to: Dest, text: string): Promise<void> => {
-    try {
-      await opts.client.sendMessage({ chat_id: to.chat_id, text, ...threadField(to) })
-    } catch (err) {
+    await withRetryAfter(() => opts.client.sendMessage({ chat_id: to.chat_id, text, ...threadField(to) })).catch((err: unknown) => {
       opts.log.warn('telegram_send_failed', { chat: to.chat_id, error: errMsg(err) })
-    }
+    })
   }
   const typing = (to: Dest): void => {
     fireAndForget('telegram-chat.typing', opts.client.sendChatAction({ chat_id: to.chat_id, action: 'typing', ...threadField(to) }))
@@ -334,7 +351,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       }
       sizes.set(path, size)
       total += size
-      planned.push({ path, ...classifyReplyFile(path) })
+      planned.push({ path, ...classifyReplyFile(path, size) })
     }
     for (const step of planReplyUploads(planned)) {
       const items = 'album' in step ? step.album : [step.single]
@@ -344,7 +361,8 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
           // The file may have changed since it was sized; the caps hold on what
           // was actually read.
           const planned = sizes.get(u.path) ?? 0
-          if (bytes.byteLength > TELEGRAM_UPLOAD_MAX_BYTES || total - planned + bytes.byteLength > REPLY_FILES_MAX_TOTAL_BYTES) {
+          const cap = u.kind === 'photo' ? TELEGRAM_PHOTO_MAX_BYTES : TELEGRAM_UPLOAD_MAX_BYTES
+          if (bytes.byteLength > cap || total - planned + bytes.byteLength > REPLY_FILES_MAX_TOTAL_BYTES) {
             throw new Error(`${u.filename} grew past the size limit`)
           }
           total += bytes.byteLength - planned
@@ -352,19 +370,19 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
           return { kind: u.kind, upload: { bytes, filename: u.filename, content_type: u.content_type } }
         })
         if ('album' in step) {
-          await opts.client.sendMediaGroup({
+          await withRetryAfter(() => opts.client.sendMediaGroup({
             chat_id: to.chat_id,
             ...threadField(to),
             items: uploads.map((u) => ({ type: u.kind === 'video' ? ('video' as const) : ('photo' as const), file: u.upload })),
-          })
+          }))
         } else {
           const u = uploads[0] as (typeof uploads)[number]
-          await opts.client.sendFile({
+          await withRetryAfter(() => opts.client.sendFile({
             method: u.kind === 'photo' ? 'sendPhoto' : u.kind === 'video' ? 'sendVideo' : 'sendDocument',
             chat_id: to.chat_id,
             ...threadField(to),
             file: u.upload,
-          })
+          }))
         }
       } catch (err) {
         opts.log.warn('telegram_file_send_failed', { chat: to.chat_id, error: errMsg(err) })

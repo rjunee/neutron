@@ -39,6 +39,7 @@ interface ApiCall {
 }
 const calls: ApiCall[] = []
 let botReadsAll = true
+let throttleNext = 0
 let botStatus = 'member'
 const FILES: Record<string, Uint8Array> = {
   'photos/file_1.jpg': new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]),
@@ -80,6 +81,10 @@ beforeAll(() => {
         const path = id === 'photo-a' ? 'photos/file_1.jpg' : id === 'photo-b' ? 'photos/file_2.jpg' : id === 'voice-1' ? 'voice/file_3.oga' : undefined
         return Response.json({ ok: true, result: { file_id: id, ...(path !== undefined ? { file_path: path } : {}) } })
       }
+      if (method === 'sendMessage' && throttleNext > 0) {
+        throttleNext--
+        return Response.json({ ok: false, error_code: 429, description: 'Too Many Requests', parameters: { retry_after: 2 } }, { status: 429 })
+      }
       if (method === 'getMe') return Response.json({ ok: true, result: { id: 1, username: 'family_bot', is_bot: true, can_read_all_group_messages: botReadsAll } })
       if (method === 'getChatMember') return Response.json({ ok: true, result: { status: botStatus } })
       if (method === 'sendMediaGroup') return Response.json({ ok: true, result: [{ message_id: 1, chat: { id: 1 }, date: 1 }] })
@@ -115,6 +120,7 @@ beforeEach(() => {
   calls.length = 0
   botReadsAll = true
   botStatus = 'member'
+  throttleNext = 0
   home = mkdtempSync(join(tmpdir(), 'tg-bridge-'))
   turns = []
   replyFor = () => 'ok'
@@ -484,5 +490,25 @@ describe('telegram chat bridge', () => {
     expect(turns.length).toBe(2)
     expect(turns[0]?.user_text).toContain('(image/jpeg)')
     expect(turns[1]?.user_text.endsWith('those are her pages')).toBe(true)
+  })
+
+  test('a 429 is waited out and the message still goes', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    const waits: number[] = []
+    const b = buildTelegramChatBridge({ ...bridgeOptions(), sleep: async (ms) => { waits.push(ms) } })
+    throttleNext = 1
+    await b.receive({
+      channel_kind: 'telegram',
+      channel_topic_id: String(GROUP),
+      user: { channel_user_id: String(PARENT_ONE), display_name: 'P' },
+      body: { text: 'hi' },
+      event_id: `${GROUP}:9401`,
+      received_at: 1,
+      adapter_metadata: { chat_id: String(GROUP), chat_type: 'group', message_id: 9401 },
+    })
+    await b.idle()
+    expect(waits).toEqual([2000])
+    // The mock records the refused attempt too: one 429, then the retry.
+    expect(sentTexts()).toEqual(['ok', 'ok'])
   })
 })

@@ -21,6 +21,8 @@ import { basename, extname, isAbsolute } from 'node:path'
 export const MAX_REPLY_FILES = 10
 /** Bot API upload limit for bots (50 MB). */
 export const TELEGRAM_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+/** Bot API limit for a file sent as a photo (10 MB); a bigger image goes as a document. */
+export const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024
 /** Bot API text limit per message, in UTF-16 code units. */
 export const TELEGRAM_TEXT_MAX = 4096
 
@@ -79,12 +81,19 @@ const DOC_EXT: Record<string, string> = {
   '.zip': 'application/zip',
 }
 
-/** How a file is posted, and the content type it is uploaded with. */
-export function classifyReplyFile(path: string): { kind: TelegramFileKind; content_type: string; filename: string } {
+/**
+ * How a file is posted, and the content type it is uploaded with. An image over
+ * {@link TELEGRAM_PHOTO_MAX_BYTES} (when its size is given) goes as a document.
+ */
+export function classifyReplyFile(path: string, size?: number): { kind: TelegramFileKind; content_type: string; filename: string } {
   const ext = extname(path).toLowerCase()
   const filename = basename(path)
   const photo = PHOTO_EXT[ext]
-  if (photo !== undefined) return { kind: 'photo', content_type: photo, filename }
+  if (photo !== undefined) {
+    return size !== undefined && size > TELEGRAM_PHOTO_MAX_BYTES
+      ? { kind: 'document', content_type: photo, filename }
+      : { kind: 'photo', content_type: photo, filename }
+  }
   const video = VIDEO_EXT[ext]
   if (video !== undefined) return { kind: 'video', content_type: video, filename }
   return { kind: 'document', content_type: DOC_EXT[ext] ?? 'application/octet-stream', filename }

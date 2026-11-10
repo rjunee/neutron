@@ -50,7 +50,9 @@ absent, as before.
   credential" message as the web chat (`canDispatchLiveAgent`). Transcripts are cut at 4000 characters, and a captionless voice
   note's transcript appears once, as the `[voice]` line. Reply files are read one
   upload at a time and capped at 50 MB each and 100 MB per reply, checked again on
-  the bytes actually read. At shutdown the bridge drains
+  the bytes actually read; an image over Telegram's 10 MB photo limit is sent as a
+  document. A 429 from Telegram is waited out (its `retry_after`, at most a minute,
+  three tries) instead of dropping that part of the reply. At shutdown the bridge drains
   first, inside the composition's `on_shutdown_start` right after chat recovery
   stops (before the persistent REPLs stop): it starts the turn for an album still being gathered and waits up to
   10 s for running turns. A reply that offers choices (`options`) is posted with
@@ -63,7 +65,9 @@ absent, as before.
   `gateway/http/chat-sender-registry.ts` — a turn request may name its
   `reply_sink` (absent = the web chat). A follow-up is injected into the topic's
   active turn only when both reply to the same sink; otherwise it queues behind
-  it. Telegram turns carry `telegram:<chat_id>[:<forum topic>]`, so a family message arriving
+  it. The Retry state (the last message a Retry re-runs) is kept per topic AND
+  sink, so a Retry in one chat never re-runs another chat's message. Telegram
+  turns carry `telegram:<chat_id>[:<forum topic>]`, so a family message arriving
   while a web-chat or timer turn runs is answered in the family chat, not in the
   web chat. Web-chat turns inject into each other exactly as before.
 - `open/composer.ts` — the voice-note transcriber the upload route used inline is

@@ -40,6 +40,9 @@ describe('classifyReplyFile', () => {
     expect(classifyReplyFile('/a/b.mp4')).toEqual({ kind: 'video', content_type: 'video/mp4', filename: 'b.mp4' })
     expect(classifyReplyFile('/a/b.pdf')).toEqual({ kind: 'document', content_type: 'application/pdf', filename: 'b.pdf' })
     expect(classifyReplyFile('/a/noext').content_type).toBe('application/octet-stream')
+    // Over the 10 MB photo limit, an image goes as a document.
+    expect(classifyReplyFile('/a/big.jpg', 11 * 1024 * 1024)).toEqual({ kind: 'document', content_type: 'image/jpeg', filename: 'big.jpg' })
+    expect(classifyReplyFile('/a/ok.jpg', 9 * 1024 * 1024).kind).toBe('photo')
   })
 })
 
