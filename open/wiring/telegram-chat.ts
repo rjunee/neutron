@@ -50,6 +50,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { IncomingEvent, IncomingEventReceiver } from '@neutronai/channels/types.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import type { TelegramClient, TelegramUpload } from '@neutronai/channels/adapters/telegram/client.ts'
 import type { TelegramAccess } from '@neutronai/channels/adapters/telegram/access.ts'
 import {
@@ -139,7 +140,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
 
   const track = (p: Promise<void>): void => {
     inFlight.add(p)
-    void p.finally(() => inFlight.delete(p))
+    fireAndForget('telegram-chat.track', p.finally(() => inFlight.delete(p)))
   }
 
   const say = async (chat_id: string, text: string): Promise<void> => {
@@ -285,7 +286,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       await say(chat_id, "I can't answer yet: this instance has no AI credential configured.")
       return
     }
-    void opts.client.sendChatAction({ chat_id, action: 'typing' }).catch(() => undefined)
+    fireAndForget('telegram-chat.typing', opts.client.sendChatAction({ chat_id, action: 'typing' }))
     const saved: SavedAttachment[] = []
     const texts: string[] = []
     for (const a of items) {
@@ -309,7 +310,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
           opts.log.warn('telegram_reply_failed', { chat: chat_id, error: errMsg(err) })
         })
       } else if (ev.type === 'agent_typing_start') {
-        void opts.client.sendChatAction({ chat_id, action: 'typing' }).catch(() => undefined)
+        fireAndForget('telegram-chat.typing', opts.client.sendChatAction({ chat_id, action: 'typing' }))
       }
     }
     opts.log.info('telegram_turn_dispatched', { chat: chat_id, project: project_id, messages: items.length, files: saved.length })
