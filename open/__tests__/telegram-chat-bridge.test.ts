@@ -573,4 +573,41 @@ describe('telegram chat bridge', () => {
     await bridge.idle()
     expect(sentTexts()).toContain('This chat is connected.')
   })
+
+  test('a stranger addressing the bot by name costs no Bot API call', async () => {
+    await post({ text: '/connect@family_bot' }, { from: STRANGER })
+    await post({ text: '/pair@family_bot ABCDEF' }, { from: STRANGER })
+    await bridge.idle()
+    expect(calls).toEqual([])
+  })
+
+  test('close() waits for a message that was still being accepted', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    // The access read happens inside receive; make the command check slow by
+    // addressing the bot by name, so getMe is awaited while close() starts.
+    let release!: () => void
+    const gate = new Promise<void>((r) => { release = r })
+    const real = new TelegramClient(TOKEN, { base_url: base })
+    const slowClient = Object.assign(Object.create(real) as TelegramClient, {
+      getMe: async () => { await gate; return real.getMe() },
+    })
+    const b = buildTelegramChatBridge({ ...bridgeOptions(), client: slowClient })
+    const accepting = b.receive({
+      channel_kind: 'telegram',
+      channel_topic_id: String(GROUP),
+      user: { channel_user_id: String(PARENT_ONE), display_name: 'P' },
+      body: { text: '/start@family_bot' },
+      event_id: `${GROUP}:9601`,
+      received_at: 1,
+      adapter_metadata: { chat_id: String(GROUP), chat_type: 'group', message_id: 9601 },
+    })
+    let closed = false
+    const closing = b.close(5_000).then(() => { closed = true })
+    await Promise.resolve()
+    expect(closed).toBe(false)
+    release()
+    await accepting
+    await closing
+    expect(closed).toBe(true)
+  })
 })

@@ -277,10 +277,14 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     const command = (m[1] ?? '').toLowerCase()
     const addressedTo = m[2]
     const arg = (m[3] ?? '').trim()
-    // `/connect@other_bot` in a group is for another bot: not ours to act on.
-    if (addressedTo !== undefined && addressedTo.toLowerCase() !== (await ownUsername())) return true
     const user_id = event.user.channel_user_id
     const allowed = opts.access.isAllowedUser(user_id)
+    // A stranger's /pair or /connect gets no answer and costs no Bot API call.
+    if (!allowed && command !== 'start') return true
+    // `/connect@other_bot` in a group is for another bot: not ours to act on.
+    // (`/start` from a stranger is answered only in a private chat, where no
+    // other bot can be addressed.)
+    if (addressedTo !== undefined && !(command === 'start' && chat_type !== 'private') && addressedTo.toLowerCase() !== (await ownUsername())) return true
     if (command === 'start') {
       // Private chats only: a code shown in a group is a code anyone there can use.
       if (chat_type !== 'private') return true
@@ -558,9 +562,8 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     album.ready()
   }
 
-  return {
-    async receive(event: IncomingEvent): Promise<void> {
-      if (event.channel_kind !== 'telegram' || closed) return
+  const receiveOne = async (event: IncomingEvent): Promise<void> => {
+      if (event.channel_kind !== 'telegram') return
       const chat_id = String(event.adapter_metadata?.['chat_id'] ?? event.channel_topic_id.split(':')[0] ?? '')
       const chat_type = String(event.adapter_metadata?.['chat_type'] ?? '')
       if (chat_id.length === 0) return
@@ -603,6 +606,16 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
         return
       }
       enqueueChat(chat_id, () => runTurn([accepted]))
+  }
+
+  return {
+    async receive(event: IncomingEvent): Promise<void> {
+      if (closed) return
+      // Tracked for its whole run, so a shutdown that begins while a message is
+      // being accepted still waits for the turn it starts.
+      const p = receiveOne(event)
+      track(p.catch(() => undefined))
+      await p
     },
     async idle(): Promise<void> {
       for (const key of [...albums.keys()]) flushAlbum(key)
@@ -612,10 +625,18 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       closed = true
       for (const key of [...albums.keys()]) flushAlbum(key)
       let timer: ReturnType<typeof setTimeout> | undefined
+      let expired = false
       const deadline = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, timeout_ms)
+        timer = setTimeout(() => {
+          expired = true
+          resolve()
+        }, timeout_ms)
       })
-      await Promise.race([Promise.all([...inFlight]).then(() => undefined), deadline])
+      // Work can start work (an accepted message enqueues its turn), so wait
+      // until nothing is left, not only for what was running at the start.
+      while (inFlight.size > 0 && !expired) {
+        await Promise.race([Promise.all([...inFlight]).then(() => undefined), deadline])
+      }
       if (timer !== undefined) clearTimeout(timer)
       if (inFlight.size > 0) opts.log.warn('telegram_shutdown_turns_running', { count: inFlight.size })
     },
