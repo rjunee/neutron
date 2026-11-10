@@ -160,3 +160,46 @@ describe('telegram webhook — accepted-update cap', () => {
     expect(b.dispatched()).toBe(2)
   })
 })
+
+describe('webhook rate limit — strangers in their own bucket', () => {
+  test('a stranger flooding the bot does not use up the known senders’ budget', async () => {
+    const build = buildWebhookHandler
+    const received: string[] = []
+    const handler = build({
+      bot_user_id: 1,
+      secret_token: 'sec',
+      receiver: { receive: async (e) => { received.push(e.user.channel_user_id) } },
+      rate_limit: { windowMs: 60_000, maxRequests: 3 },
+      now: () => 1_000,
+      is_known_sender: (id) => id === '42',
+    })
+    const send = (from: number, n: number) =>
+      handler(new Request('http://x/webhook', {
+        method: 'POST',
+        headers: { 'x-telegram-bot-api-secret-token': 'sec' },
+        body: JSON.stringify({ update_id: n, message: { message_id: n, from: { id: from }, chat: { id: -5, type: 'group' }, date: 1, text: `m${n}` } }),
+      }))
+    for (let i = 0; i < 10; i++) await send(999, i)
+    for (let i = 10; i < 13; i++) await send(42, i)
+    await send(42, 13)
+    expect(received.filter((id) => id === '999').length).toBe(3)
+    expect(received.filter((id) => id === '42').length).toBe(3)
+  })
+
+  test('bodies that do not parse are charged to the strangers bucket', async () => {
+    const received: string[] = []
+    const handler = buildWebhookHandler({
+      bot_user_id: 1,
+      secret_token: 'sec',
+      receiver: { receive: async (e) => { received.push(e.user.channel_user_id) } },
+      rate_limit: { windowMs: 60_000, maxRequests: 2 },
+      now: () => 1_000,
+      is_known_sender: () => false,
+    })
+    const req = (body: string) => new Request('http://x/webhook', { method: 'POST', headers: { 'x-telegram-bot-api-secret-token': 'sec' }, body })
+    await handler(req('not json'))
+    await handler(req('[]'))
+    await handler(req(JSON.stringify({ update_id: 1, message: { message_id: 1, from: { id: 7 }, chat: { id: 7, type: 'private' }, date: 1, text: 'hi' } })))
+    expect(received).toEqual([])
+  })
+})

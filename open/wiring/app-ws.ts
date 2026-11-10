@@ -56,7 +56,7 @@ import { randomUUID } from 'node:crypto'
 import { join as joinPath } from 'node:path'
 
 import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
-import { ChannelRouter } from '@neutronai/channels/router.ts'
+import { ChannelRouter, type TopicHandler } from '@neutronai/channels/router.ts'
 import {
   createAppWsSurface,
   type AppWsSurface,
@@ -424,6 +424,12 @@ export interface WiredAppWs {
    * adapter registered.
    */
   channelRouter: ChannelRouter
+  /**
+   * Bind the topic handler for a channel the router receives (Telegram). The
+   * router resolves the event's topic and stamps its author, then hands it to the
+   * handler bound for its kind. Unbound kinds are dropped, as before.
+   */
+  bindChannelHandler: (kind: Exclude<ChannelKind, 'app_socket'>, handler: TopicHandler) => void
   /** Teardown hooks in registration order (re-registered at the carve site). */
   cleanups: Array<() => void>
 }
@@ -1110,7 +1116,14 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
   // it. `topic_handler` is a no-op: Open's app-ws INBOUND path runs through
   // `appWsReceiver` directly (above), never `router.receive`, so the router is a
   // pure OUTBOUND sink here.
-  const channelRouter = new ChannelRouter(db, project_slug, async () => undefined)
+  // Open's app-ws INBOUND runs through `appWsReceiver` directly (above), never
+  // `router.receive`. Other channels (Telegram) do arrive through the router, and
+  // reach the handler bound for their kind.
+  const channelHandlers = new Map<ChannelKind, TopicHandler>()
+  const channelRouter = new ChannelRouter(db, project_slug, async (topic, event) => {
+    const handler = channelHandlers.get(event.channel_kind)
+    if (handler !== undefined) await handler(topic, event)
+  })
   channelRouter.registerAdapter(appWsAdapter)
   // Boot-time conformance guard: every Open trident run is stamped `app_socket`
   // (`work_board_dispatch_build` + the `/code` chat-command filter), so assert an
@@ -1488,5 +1501,8 @@ export function wireAppWs(ctx: OpenWiringContext, deps: WireAppWsDeps): WiredApp
   // `AppWsAdapter.send` the bespoke #339 sink deref'd — durable chat-log persist
   // (survives reconnect) + live fan-out — so a build's completion still announces
   // in chat exactly as before, now through the one real seam.
-  return { appWsSurface, channelRouter, cleanups }
+  const bindChannelHandler = (kind: Exclude<ChannelKind, 'app_socket'>, handler: TopicHandler): void => {
+    channelHandlers.set(kind, handler)
+  }
+  return { appWsSurface, channelRouter, bindChannelHandler, cleanups }
 }

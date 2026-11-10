@@ -479,6 +479,8 @@ import { createAppAdminSurface } from '@neutronai/gateway/http/app-admin-surface
 import { createAdminPersonalitySurface } from '@neutronai/gateway/http/admin-personality-surface.ts'
 import { createAppBackupsSurface } from '@neutronai/gateway/http/app-backups-surface.ts'
 import { buildTelegramWebhookSurface } from '@neutronai/gateway/wiring/build-telegram-webhook.ts'
+import { TelegramAccess, telegramAccessPath } from '@neutronai/channels/adapters/telegram/access.ts'
+import { buildTelegramChatBridge, type TelegramChatBridge } from './wiring/telegram-chat.ts'
 import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
 import { ProjectBackupScheduler } from '@neutronai/gateway/git/project-backup-scheduler.ts'
 import { enumerateVaultProjects } from '@neutronai/gateway/git/vault-snapshot.ts'
@@ -1723,9 +1725,14 @@ export function buildOpenGraphComposer(
     // `stop()`); the gateway shutdown runner awaits each before `db.close()`.
     const realmodeCleanups: Array<() => void | Promise<void>> = []
     let stopChatRecovery: (() => Promise<void>) | undefined
+    // Set once the Telegram bridge exists (below). Drained right after recovery
+    // stops and before the persistent REPLs do: an album still in its window
+    // becomes a turn, and running turns get a bounded wait.
+    let drainTelegramBridge: (() => Promise<void>) | undefined
     const quiesceChatRecovery = async (): Promise<void> => {
       projectScopeLifecycle.close()
       await stopChatRecovery?.()
+      await drainTelegramBridge?.()
     }
     // Boot invokes this before its first shutdown await, including listener drain.
     // Retain idempotent disposal for callers that compose without boot().
@@ -4175,49 +4182,53 @@ export function buildOpenGraphComposer(
       resolveSharedKey: () =>
         resolveOnboardingOpenAiKey({ db, owner_home, owner_handle, project_slug }),
     })
+    // ONE voice-note transcriber for every surface that receives audio: the web
+    // chat's upload route and a connected Telegram chat both call it, so both use
+    // the backend the owner chose in Settings and both log the same way.
+    const transcribeVoiceNote = async (i: {
+      bytes: Uint8Array
+      content_type: string
+      hash: string
+    }): Promise<string | null> => {
+      const backend = resolveTranscriber({
+        env,
+        neutron_home: owner_home,
+        choice: readTranscriptionBackend(db, project_slug),
+        openai_api_key: await openAiTranscriptionKeys.resolve(),
+      })
+      if (backend.client === null) {
+        // NOT silent. A voice note that produces no transcript because the
+        // box is unconfigured, or because both backends are set up and nobody
+        // has said which to use, is otherwise indistinguishable from a
+        // transcription that simply failed.
+        log.warn('voice_transcription_unconfigured', {
+          reason: backend.reason ?? 'unconfigured',
+          hash: i.hash,
+        })
+        return null
+      }
+      const r = await backend.client.transcribe({
+        bytes: i.bytes,
+        content_type: i.content_type,
+      })
+      if (!r.ok) {
+        log.warn('voice_transcription_failed', {
+          backend: backend.kind,
+          ...(backend.model_id !== undefined ? { model: backend.model_id } : {}),
+          code: r.code,
+          ...(r.status !== undefined ? { status: r.status } : {}),
+          hash: i.hash,
+        })
+        return null
+      }
+      const t = r.text.trim()
+      return t.length > 0 ? t : null
+    }
     const appUploadSurface = createAppUploadSurface({
       auth: appOwnerAuth,
       project_slug,
       owner_home,
-      transcribeAudio: async (i: {
-        bytes: Uint8Array
-        content_type: string
-        hash: string
-      }): Promise<string | null> => {
-        const backend = resolveTranscriber({
-          env,
-          neutron_home: owner_home,
-          choice: readTranscriptionBackend(db, project_slug),
-          openai_api_key: await openAiTranscriptionKeys.resolve(),
-        })
-        if (backend.client === null) {
-          // NOT silent. A voice note that produces no transcript because the
-          // box is unconfigured, or because both backends are set up and nobody
-          // has said which to use, is otherwise indistinguishable from a
-          // transcription that simply failed.
-          log.warn('voice_transcription_unconfigured', {
-            reason: backend.reason ?? 'unconfigured',
-            hash: i.hash,
-          })
-          return null
-        }
-        const r = await backend.client.transcribe({
-          bytes: i.bytes,
-          content_type: i.content_type,
-        })
-        if (!r.ok) {
-          log.warn('voice_transcription_failed', {
-            backend: backend.kind,
-            ...(backend.model_id !== undefined ? { model: backend.model_id } : {}),
-            code: r.code,
-            ...(r.status !== undefined ? { status: r.status } : {}),
-            hash: i.hash,
-          })
-          return null
-        }
-        const t = r.text.trim()
-        return t.length > 0 ? t : null
-      },
+      transcribeAudio: transcribeVoiceNote,
     })
 
     // The Settings-tab installer for the local backend. ONE machine-scoped
@@ -6556,6 +6567,7 @@ export function buildOpenGraphComposer(
     const {
       appWsSurface,
       channelRouter,
+      bindChannelHandler,
       cleanups: appWsCleanups,
     } = wireAppWs(wiringCtx, {
       appWs,
@@ -7187,13 +7199,76 @@ export function buildOpenGraphComposer(
     let telegramWebhookSurface: Awaited<
       ReturnType<typeof buildTelegramWebhookSurface>
     > = null
+    // The receiver is late-bound because the bridge needs the client the
+    // surface builds. A decoded update goes to the Telegram chat bridge
+    // (`open/wiring/telegram-chat.ts`): access list, pairing, media download,
+    // voice transcription, then a turn on the connected project's warm session
+    // with the reply posted back to the chat. With no Telegram secrets there is
+    // no surface, no route and no bridge, exactly as before.
+    let telegramChatBridge: TelegramChatBridge | null = null
+    const telegramAccess = new TelegramAccess(telegramAccessPath(owner_home))
     try {
       telegramWebhookSurface = await buildTelegramWebhookSurface({
         owner_handle,
         url_slug: project_slug,
         secrets: secretsStore,
+        is_known_sender: (senderId) => telegramAccess.isAllowedUser(senderId),
+        // Through the router like every channel: it resolves the chat's topic
+        // and stamps the author, then the handler bound below passes the event
+        // to the bridge.
         receiver: channelRouter,
       })
+      if (telegramWebhookSurface !== null) {
+        const telegramLog = createLogger('telegram-chat')
+        telegramChatBridge = buildTelegramChatBridge({
+          project_slug,
+          owner_user_id: OWNER_USER_ID,
+          project_topic_id: (projectId) => appWsProjectTopicId(OWNER_USER_ID, projectId),
+          access: telegramAccess,
+          client: telegramWebhookSurface.client,
+          inbox_dir: joinPath(owner_home, 'telegram', 'inbox'),
+          // Files a reply may send: project folders and the Telegram outbox, plus
+          // any folder the operator names in NEUTRON_TELEGRAM_FILE_ROOTS
+          // (colon-separated, absolute). Never the rest of the instance home,
+          // which holds the database and the secrets key.
+          reply_file_roots: [
+            joinPath(owner_home, 'Projects'),
+            joinPath(owner_home, 'telegram', 'outbox'),
+            ...(env['NEUTRON_TELEGRAM_FILE_ROOTS'] ?? '')
+              .split(':')
+              .map((r) => r.trim())
+              .filter((r) => r.startsWith('/')),
+          ],
+          ...(scribeOnUserTurn !== undefined
+            ? {
+                // The same general scribe the web chat runs after a user turn.
+                scribe: ({ text, topic_id, observed_at }: { text: string; topic_id: string; observed_at: number }) =>
+                  scribeOnUserTurn({
+                    owner_slug: project_slug,
+                    user_id: OWNER_USER_ID,
+                    topic_id,
+                    text,
+                    observed_at,
+                    author: { id: 'owner', display: 'owner' },
+                  }),
+              }
+            : {}),
+          seen_path: joinPath(owner_home, 'telegram', 'seen-updates.json'),
+          chat_turn: appWsChatTurn,
+          can_dispatch: (projectId) => canDispatchLiveAgent(projectId),
+          transcribe: transcribeVoiceNote,
+          log: {
+            info: (event, meta) => telegramLog.info(event, meta ?? {}),
+            warn: (event, meta) => telegramLog.warn(event, meta ?? {}),
+          },
+        })
+        const bridgeForShutdown = telegramChatBridge
+        drainTelegramBridge = () => bridgeForShutdown.close()
+        bindChannelHandler('telegram', async (_topic, event) => bridgeForShutdown.receive(event))
+        // The adapter's own `send` (plain text to a chat) becomes the router's
+        // Telegram delivery; the bridge posts its replies and files itself.
+        channelRouter.registerAdapter(telegramWebhookSurface.adapter)
+      }
     } catch (err) {
       log.error('telegram_webhook_build_failed', {
         error: err instanceof Error ? err.message : String(err),

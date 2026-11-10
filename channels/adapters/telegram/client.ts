@@ -50,6 +50,13 @@ export interface TelegramSetWebhookInput {
   drop_pending_updates?: boolean
 }
 
+/** A file to upload in a multipart Bot API call. */
+export interface TelegramUpload {
+  bytes: Uint8Array
+  filename: string
+  content_type: string
+}
+
 export interface TelegramAnswerCallbackQueryInput {
   callback_query_id: string
   text?: string
@@ -150,8 +157,146 @@ export class TelegramClient {
     return this.call<TelegramAnswerCallbackQueryInput, true>('answerCallbackQuery', input)
   }
 
-  getMe(): Promise<{ id: number; username: string; is_bot: boolean }> {
-    return this.call<Record<string, never>, { id: number; username: string; is_bot: boolean }>(
+  /**
+   * Multipart variant of {@link call}, for the methods that upload a file. Every
+   * non-file field is sent as a string part; a `TelegramUpload` value becomes a
+   * file part. Error handling is identical to `call`.
+   */
+  async callMultipart<TOut>(
+    method: string,
+    fields: Record<string, string | number | TelegramUpload | undefined>,
+  ): Promise<TOut> {
+    const form = new FormData()
+    for (const [k, v] of Object.entries(fields)) {
+      if (v === undefined) continue
+      if (typeof v === 'object') {
+        form.append(k, new Blob([v.bytes as Uint8Array<ArrayBuffer>], { type: v.content_type }), v.filename)
+      } else {
+        form.append(k, String(v))
+      }
+    }
+    const url = `${this.baseUrl}/bot${this.token}/${method}`
+    const res = await this.fetcher(url, { method: 'POST', body: form })
+    let payload: TelegramApiResponse<TOut>
+    try {
+      payload = (await res.json()) as TelegramApiResponse<TOut>
+    } catch (err) {
+      throw new Error(`Telegram ${method}: non-JSON response (status=${res.status}): ${(err as Error).message}`)
+    }
+    if (payload.ok && payload.result !== undefined) return payload.result
+    if (res.status === 429 && payload.parameters?.retry_after !== undefined) {
+      throw new TelegramRetryAfterError(payload.parameters.retry_after * 1000, method)
+    }
+    throw new TelegramApiError(method, res.status, payload.error_code, payload.description)
+  }
+
+  /** Resolve a `file_id` to a downloadable `file_path` (Bot API files are capped at 20 MB). */
+  getFile(file_id: string): Promise<{ file_id: string; file_size?: number; file_path?: string }> {
+    return this.call<{ file_id: string }, { file_id: string; file_size?: number; file_path?: string }>(
+      'getFile',
+      { file_id },
+    )
+  }
+
+  /**
+   * Download a file previously resolved by {@link getFile}. Refuses anything
+   * larger than `max_bytes`, both by the declared length and by what actually
+   * arrives, so a lying `Content-Length` cannot overrun the cap.
+   */
+  async downloadFile(file_path: string, max_bytes: number): Promise<Uint8Array> {
+    if (file_path.includes('..')) throw new Error('Telegram downloadFile: refusing a path with ".."')
+    const res = await this.fetcher(`${this.baseUrl}/file/bot${this.token}/${file_path}`, { method: 'GET' })
+    if (!res.ok) throw new TelegramApiError('downloadFile', res.status, undefined, undefined)
+    const declared = Number(res.headers.get('content-length') ?? '0')
+    if (Number.isFinite(declared) && declared > max_bytes) {
+      throw new Error(`Telegram downloadFile: ${declared} bytes exceeds the ${max_bytes}-byte cap`)
+    }
+    // Read the stream and stop the moment it passes the cap, so a missing or
+    // lying Content-Length can never make us buffer more than `max_bytes`.
+    if (res.body === null) return new Uint8Array(0)
+    const reader = res.body.getReader()
+    const chunks: Uint8Array[] = []
+    let total = 0
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      total += value.byteLength
+      if (total > max_bytes) {
+        await reader.cancel().catch(() => undefined)
+        throw new Error(`Telegram downloadFile: more than the ${max_bytes}-byte cap`)
+      }
+      chunks.push(value)
+    }
+    const buf = new Uint8Array(total)
+    let off = 0
+    for (const c of chunks) {
+      buf.set(c, off)
+      off += c.byteLength
+    }
+    return buf
+  }
+
+  /** `sendPhoto` / `sendVideo` / `sendDocument` with an uploaded file. */
+  sendFile(input: {
+    method: 'sendPhoto' | 'sendVideo' | 'sendDocument'
+    chat_id: number | string
+    file: TelegramUpload
+    caption?: string
+    message_thread_id?: number
+  }): Promise<TelegramSendMessageResult> {
+    const field = input.method === 'sendPhoto' ? 'photo' : input.method === 'sendVideo' ? 'video' : 'document'
+    return this.callMultipart<TelegramSendMessageResult>(input.method, {
+      chat_id: String(input.chat_id),
+      [field]: input.file,
+      caption: input.caption,
+      message_thread_id: input.message_thread_id,
+    })
+  }
+
+  /**
+   * `sendMediaGroup` — 2 to 10 photos and videos posted as one album. Each item
+   * is attached as its own multipart part and referenced by `attach://<name>`.
+   */
+  sendMediaGroup(input: {
+    chat_id: number | string
+    items: ReadonlyArray<{ type: 'photo' | 'video'; file: TelegramUpload; caption?: string }>
+    message_thread_id?: number
+  }): Promise<TelegramSendMessageResult[]> {
+    if (input.items.length < 2 || input.items.length > 10) {
+      throw new Error(`Telegram sendMediaGroup takes 2 to 10 items, got ${input.items.length}`)
+    }
+    const fields: Record<string, string | number | TelegramUpload | undefined> = {
+      chat_id: String(input.chat_id),
+      message_thread_id: input.message_thread_id,
+    }
+    const media = input.items.map((item, i) => {
+      fields[`file${i}`] = item.file
+      return {
+        type: item.type,
+        media: `attach://file${i}`,
+        ...(item.caption !== undefined ? { caption: item.caption } : {}),
+      }
+    })
+    fields['media'] = JSON.stringify(media)
+    return this.callMultipart<TelegramSendMessageResult[]>('sendMediaGroup', fields)
+  }
+
+  /** Show "typing…" (or another chat action) for about five seconds. */
+  sendChatAction(input: {
+    chat_id: number | string
+    action: 'typing' | 'upload_photo' | 'upload_video' | 'upload_document'
+    message_thread_id?: number
+  }): Promise<true> {
+    return this.call<typeof input, true>('sendChatAction', input)
+  }
+
+  /** A chat member's status (`administrator`, `member`, …). */
+  getChatMember(input: { chat_id: number | string; user_id: number }): Promise<{ status: string }> {
+    return this.call<typeof input, { status: string }>('getChatMember', input)
+  }
+
+  getMe(): Promise<{ id: number; username: string; is_bot: boolean; can_read_all_group_messages?: boolean }> {
+    return this.call<Record<string, never>, { id: number; username: string; is_bot: boolean; can_read_all_group_messages?: boolean }>(
       'getMe',
       {},
     )

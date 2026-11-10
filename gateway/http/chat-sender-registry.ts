@@ -108,6 +108,19 @@ export interface LiveAgentTurnRequest {
    */
   attachments?: ReadonlyArray<string>
   send: (event: ChatOutbound) => void
+  /**
+   * Which surface `send` delivers to, when it is not the web chat (for example
+   * `telegram:<chat_id>`). A turn may be injected into the topic's active turn
+   * only when both reply to the same surface; otherwise it queues behind it, so
+   * an answer never lands on a surface the message did not come from. Absent =
+   * the web chat, which is every turn that existed before other surfaces did.
+   */
+  reply_sink?: string
+  /**
+   * The channel the message came in on, recorded on the persisted user row.
+   * Absent = the web chat (`app_socket`).
+   */
+  channel_kind?: 'app_socket' | 'telegram'
   observed_at: number
   /**
    * Path 1 onboarding auto-start: a synthetic system-origin turn that seeds

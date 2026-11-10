@@ -35,14 +35,97 @@ interface TelegramChat {
   type: 'private' | 'group' | 'supergroup' | 'channel'
 }
 
+/** A Bot API file reference (`PhotoSize`, `Voice`, `Audio`, `Document`, `Video`, `VideoNote`). */
+interface TelegramFileRef {
+  file_id: string
+  file_unique_id?: string
+  file_size?: number
+  mime_type?: string
+  file_name?: string
+  width?: number
+  height?: number
+  duration?: number
+}
+
 interface TelegramMessage {
   message_id: number
   from?: TelegramFrom
-  chat: TelegramChat
+  chat: TelegramChat & { title?: string }
   date: number
   text?: string
+  /** Media messages carry their text here instead of `text`. */
+  caption?: string
+  /** Every size Telegram generated, smallest first. */
+  photo?: TelegramFileRef[]
+  voice?: TelegramFileRef
+  audio?: TelegramFileRef
+  document?: TelegramFileRef
+  video?: TelegramFileRef
+  video_note?: TelegramFileRef
+  /** Shared by the messages of one album; each item still arrives as its own update. */
+  media_group_id?: string
   /** Bot API 9.6 — set inside a forum supergroup. */
   message_thread_id?: number
+}
+
+/**
+ * Thrown by a receiver that cannot take updates right now (it is shutting down).
+ * The webhook answers 503 for it, so Telegram re-sends the update later instead
+ * of the message being lost; any other receiver error is still answered 200.
+ */
+export class TelegramReceiverUnavailableError extends Error {
+  override readonly name = 'TelegramReceiverUnavailableError'
+}
+
+/**
+ * One file a Telegram message carried, as `IncomingEvent.body.attachments`
+ * entries. Only the reference travels: the receiver that decides the sender is
+ * allowed downloads it with `getFile`, so an update from a stranger never costs a
+ * download.
+ */
+export interface TelegramAttachmentRef {
+  kind: 'photo' | 'voice' | 'audio' | 'document' | 'video' | 'video_note'
+  file_id: string
+  file_unique_id?: string
+  file_size?: number
+  mime_type?: string
+  file_name?: string
+}
+
+/** Narrow an `IncomingEvent.body.attachments` entry to a Telegram file reference. */
+export function isTelegramAttachmentRef(v: unknown): v is TelegramAttachmentRef {
+  if (v === null || typeof v !== 'object') return false
+  const o = v as Record<string, unknown>
+  return (
+    typeof o['file_id'] === 'string' &&
+    (o['kind'] === 'photo' || o['kind'] === 'voice' || o['kind'] === 'audio' ||
+      o['kind'] === 'document' || o['kind'] === 'video' || o['kind'] === 'video_note')
+  )
+}
+
+function attachmentRefs(msg: TelegramMessage): TelegramAttachmentRef[] {
+  const refs: TelegramAttachmentRef[] = []
+  const push = (kind: TelegramAttachmentRef['kind'], f: TelegramFileRef | null | undefined): void => {
+    // A malformed update (`photo: [null]`, `voice: 3`) must decode to nothing,
+    // never throw out of the handler as a 500 that Telegram would keep re-sending.
+    if (f === null || typeof f !== 'object' || typeof f.file_id !== 'string' || f.file_id.length === 0) return
+    refs.push({
+      kind,
+      file_id: f.file_id,
+      ...(f.file_unique_id !== undefined ? { file_unique_id: f.file_unique_id } : {}),
+      ...(f.file_size !== undefined ? { file_size: f.file_size } : {}),
+      ...(f.mime_type !== undefined ? { mime_type: f.mime_type } : {}),
+      ...(f.file_name !== undefined ? { file_name: f.file_name } : {}),
+    })
+  }
+  // The largest rendition is the last; the smaller ones are thumbnails.
+  if (Array.isArray(msg.photo) && msg.photo.length > 0) push('photo', msg.photo[msg.photo.length - 1])
+  push('voice', msg.voice)
+  push('audio', msg.audio)
+  push('document', msg.document)
+  push('video', msg.video)
+  push('video_note', msg.video_note)
+  return refs
 }
 
 export interface TelegramUpdate {
@@ -91,6 +174,14 @@ export interface WebhookHandlerOptions {
   rate_limit?: TelegramWebhookRateLimit
   /** DI clock (tests). */
   now?: () => number
+  /**
+   * Whether an update's sender is one this instance answers (for example a
+   * member of its Telegram access list). When set, updates from other senders are
+   * counted in a SEPARATE bucket with the same cap, so a stranger who floods the
+   * bot cannot use up the budget and silence the people it serves. Unset: one
+   * bucket for every accepted update, counted before the body is parsed.
+   */
+  is_known_sender?: (sender_id: string) => boolean
   /** Optional self-echo filter; recommended in production. */
   self_echo_filter?: SelfEchoFilter
   /**
@@ -284,6 +375,24 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
   // webhook in one process must not share a window, or one instance's traffic
   // silences the other's. The admin-respawn limiter took this same correction.
   const rateHits: number[] = []
+  const strangerHits: number[] = []
+  const charge = (hits: number[]): boolean => {
+    const cfg = opts.rate_limit ?? DEFAULT_RATE_LIMIT
+    const nowMs = (opts.now ?? Date.now)()
+    const cutoff = nowMs - cfg.windowMs
+    // Drop expired hits first so a quiet period always restores full budget.
+    while (hits.length > 0 && (hits[0] as number) <= cutoff) hits.shift()
+    if (hits.length >= cfg.maxRequests) {
+      log.warn('rate_limited_update_dropped', {
+        window_ms: cfg.windowMs,
+        max_requests: cfg.maxRequests,
+        ...(hits === strangerHits ? { bucket: 'unknown_sender' } : {}),
+      })
+      return false
+    }
+    hits.push(nowMs)
+    return true
+  }
   return async (req) => {
     if (req.method !== 'POST') {
       return new Response('method not allowed', { status: 405 })
@@ -317,9 +426,9 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
 
     // ── Accepted-update cap (ISSUES #442) ─────────────────────────────────
     // Placed AFTER the secret compare so an unauthenticated caller still costs
-    // only a constant-time compare, and BEFORE the body parse so an over-limit
-    // request costs a timestamp push and nothing else — no JSON, no dispatch,
-    // no agent turn.
+    // only a constant-time compare, and (with no sender classifier) BEFORE the
+    // body parse so an over-limit request costs a timestamp push and nothing
+    // else — no JSON, no dispatch, no agent turn.
     //
     // OVER-LIMIT ANSWERS 200, NOT 429, AND THAT IS THE WHOLE DESIGN DECISION.
     // Telegram re-sends non-2xx for hours — this file already returns 200 for
@@ -331,21 +440,10 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     //
     // The bucket is per-mounted-surface, not module-global: two gateways in one
     // process must not share a window (the same correction the admin-respawn
-    // limiter took).
-    {
-      const cfg = opts.rate_limit ?? DEFAULT_RATE_LIMIT
-      const nowMs = (opts.now ?? Date.now)()
-      const cutoff = nowMs - cfg.windowMs
-      // Drop expired hits first so a quiet period always restores full budget.
-      while (rateHits.length > 0 && (rateHits[0] as number) <= cutoff) rateHits.shift()
-      if (rateHits.length >= cfg.maxRequests) {
-        log.warn('rate_limited_update_dropped', {
-          window_ms: cfg.windowMs,
-          max_requests: cfg.maxRequests,
-        })
-        return new Response('ok', { status: 200 })
-      }
-      rateHits.push(nowMs)
+    // limiter took). With `is_known_sender`, the sender decides the bucket, which
+    // needs the body, so the charge moves after the parse.
+    if (opts.is_known_sender === undefined && !charge(rateHits)) {
+      return new Response('ok', { status: 200 })
     }
 
     let parsed: unknown
@@ -353,6 +451,9 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
       parsed = await req.json()
     } catch (err) {
       log.warn('malformed_json', { error: err instanceof Error ? err.message : String(err) })
+      // With a sender classifier the charge happens after the parse; a body that
+      // never parses has no sender, so it is charged as a stranger's.
+      if (opts.is_known_sender !== undefined) charge(strangerHits)
       return new Response('ok', { status: 200 })
     }
     // `req.json()` only throws on UNPARSEABLE input. `null`, `[]`, `3` and
@@ -364,9 +465,15 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     // `null` body. Same disposition as unparseable: log, absorb, 200.
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
       log.warn('non_object_update', { type: Array.isArray(parsed) ? 'array' : typeof parsed })
+      if (opts.is_known_sender !== undefined) charge(strangerHits)
       return new Response('ok', { status: 200 })
     }
     const body = parsed as TelegramUpdate
+    if (opts.is_known_sender !== undefined) {
+      const sender = updateSenderId(body)
+      const known = sender !== null && opts.is_known_sender(sender)
+      if (!charge(known ? rateHits : strangerHits)) return new Response('ok', { status: 200 })
+    }
 
     // Inline-keyboard tap path (P2 S1 button primitive). Dispatch to the
     // gateway-supplied callback handler when wired; otherwise drop with a
@@ -425,11 +532,21 @@ export function buildWebhookHandler(opts: WebhookHandlerOptions): (req: Request)
     try {
       await opts.receiver.receive(event)
     } catch (err) {
+      if (err instanceof TelegramReceiverUnavailableError) {
+        log.warn('receiver_unavailable_retry_later')
+        return new Response('unavailable', { status: 503 })
+      }
       log.error('receiver_threw', { error: err instanceof Error ? (err.stack ?? err.message) : String(err) })
       // Still 200 — letting Telegram retry would amplify the failure.
     }
     return new Response('ok', { status: 200 })
   }
+}
+
+/** The Telegram user id behind an update, or null when it has none. */
+function updateSenderId(update: TelegramUpdate): string | null {
+  const from = update.message?.from ?? update.edited_message?.from ?? update.callback_query?.from
+  return from !== undefined && typeof from.id === 'number' ? String(from.id) : null
 }
 
 /**
@@ -443,14 +560,20 @@ export function decodeUpdate(
   opts: WebhookHandlerOptions,
 ): IncomingEvent | null {
   const msg = update.message ?? update.edited_message
-  if (!msg || !msg.from || !msg.text) return null
+  if (!msg || !msg.from) return null
+  // A media message carries its words in `caption` and may carry none at all
+  // (a bare photo or voice note). Either a text or at least one file makes an
+  // event; a message with neither (a sticker, a service message) is ignored.
+  const attachments = attachmentRefs(msg)
+  const text = msg.text ?? msg.caption ?? ''
+  if (text.length === 0 && attachments.length === 0) return null
   if (msg.from.is_bot && msg.from.id === opts.bot_user_id) return null
-  if (opts.self_echo_filter !== undefined) {
+  if (opts.self_echo_filter !== undefined && text.length > 0) {
     const channel_topic_id = renderTopicId(msg)
     if (
       opts.self_echo_filter.isSelfEcho({
         channel_topic_id,
-        text_hash: hashText(msg.text),
+        text_hash: hashText(text),
       })
     ) {
       return null
@@ -467,9 +590,18 @@ export function decodeUpdate(
       channel_user_id: String(msg.from.id),
       display_name,
     },
-    body: { text: msg.text },
+    body: attachments.length > 0 ? { text, attachments } : { text },
     event_id: `${msg.chat.id}:${msg.message_id}`,
     received_at: Date.now(),
+    adapter_metadata: {
+      chat_id: String(msg.chat.id),
+      chat_type: msg.chat.type,
+      message_id: msg.message_id,
+      ...(msg.message_thread_id !== undefined ? { message_thread_id: msg.message_thread_id } : {}),
+      ...(typeof msg.chat.title === 'string' ? { chat_title: msg.chat.title } : {}),
+      ...(msg.media_group_id !== undefined ? { media_group_id: msg.media_group_id } : {}),
+      ...(update.edited_message !== undefined && update.message === undefined ? { edited: true } : {}),
+    },
   }
 }
 

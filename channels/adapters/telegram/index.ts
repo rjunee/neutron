@@ -85,6 +85,8 @@ export interface TelegramAdapterOptions {
    * match `bind_`) and then to `decodeUpdate`.
    */
   on_bind_command?: TelegramBindCommandHandler
+  /** Sender classifier for the webhook's rate buckets (see `WebhookHandlerOptions.is_known_sender`). */
+  is_known_sender?: (sender_id: string) => boolean
 }
 
 const MANIFEST: ChannelAdapterManifest = {
@@ -104,6 +106,7 @@ export class TelegramAdapter implements ChannelAdapter {
   private readonly on_callback_query?: TelegramCallbackQueryHandler
   private readonly on_start_command?: TelegramStartCommandHandler
   private readonly on_bind_command?: TelegramBindCommandHandler
+  private readonly is_known_sender?: (sender_id: string) => boolean
 
   constructor(opts: TelegramAdapterOptions) {
     this.client = opts.client
@@ -121,6 +124,9 @@ export class TelegramAdapter implements ChannelAdapter {
     }
     if (opts.on_bind_command !== undefined) {
       this.on_bind_command = opts.on_bind_command
+    }
+    if (opts.is_known_sender !== undefined) {
+      this.is_known_sender = opts.is_known_sender
     }
   }
 
@@ -146,6 +152,9 @@ export class TelegramAdapter implements ChannelAdapter {
     }
     if (this.on_bind_command !== undefined) {
       opts.on_bind_command = this.on_bind_command
+    }
+    if (this.is_known_sender !== undefined) {
+      opts.is_known_sender = this.is_known_sender
     }
     return buildWebhookHandler(opts)
   }

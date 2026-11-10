@@ -101,6 +101,9 @@ const moduleLog = createLogger('live-agent-turn')
  */
 export const CHAT_TURN_INACTIVITY_MS = 30 * 60_000
 
+/** `LiveAgentTurnRequest.reply_sink` of a web-chat turn (the field is absent there). */
+const APP_REPLY_SINK = 'app'
+
 /**
  * Absolute-ceiling backstop (ms) for a single turn — the hard upper bound, wired
  * to BOTH the composer's AbortController AND the substrate
@@ -1060,7 +1063,8 @@ export function buildLiveAgentTurn(
   const admissionOrder = new Map<string, Promise<void>>()
   /** Turns per topic that arrived but have not been routed (queued or refused) yet. */
   const admittingCount = new Map<string, number>()
-  const activeTopics = new Set<string>()
+  /** Topics with a turn that accepts injection, and the surface that turn replies to. */
+  const activeTopics = new Map<string, string>()
   const queuedTurnCount = new Map<string, number>()
 
   // The REPL `--tools` allow-list only consumes `t.name`; the rest of the
@@ -1083,7 +1087,7 @@ export function buildLiveAgentTurn(
     // else is queued or still being admitted ahead of it. Admission then decides
     // whether it may proceed at all.
     const injectable = turn.user_text.trim() !== '/effective-prompt' &&
-      activeTopics.has(topicKey) &&
+      activeTopics.get(topicKey) === (turn.reply_sink ?? APP_REPLY_SINK) &&
       queuedTurnCount.get(topicKey) === 1 &&
       (admittingCount.get(topicKey) ?? 0) === 0 &&
       input.configuredModel?.(turn.project_id) === undefined &&
@@ -1197,7 +1201,7 @@ export function buildLiveAgentTurn(
             topic_id: turn.topic_id,
             text: persistedText,
             speaker_user_id: turn.user_id,
-            channel_kind: 'app_socket',
+            channel_kind: turn.channel_kind ?? 'app_socket',
             observed_at: turn.observed_at ?? now(),
           })
         } catch (err) {
@@ -1224,7 +1228,7 @@ export function buildLiveAgentTurn(
         turn.button_prompt_id === undefined &&
         turn.user_text !== RETRY_TURN_VALUE &&
         turn.user_text !== RECONNECT_AUTH_VALUE
-      if (acceptsInjection) activeTopics.add(topicKey)
+      if (acceptsInjection) activeTopics.set(topicKey, turn.reply_sink ?? APP_REPLY_SINK)
       try {
         return await runTurnBody(turn)
       } finally {
@@ -1316,6 +1320,9 @@ export function buildLiveAgentTurn(
     }
     const observed_at = turn.observed_at ?? now()
     const topicKey = `${turn.project_slug}:${turn.topic_id}`
+    // Retry state belongs to one surface: a Retry in one Telegram chat must never
+    // re-run (and answer) a message that came from another chat or the web chat.
+    const retryKey = `${topicKey}|${turn.reply_sink ?? APP_REPLY_SINK}`
     // On-demand Claude reconnect (2026-07-24): a tap on the auth-reconnect
     // "Reconnect" button routes back `RECONNECT_AUTH_VALUE`. Unlike the Retry
     // affordance below (which re-runs the last real message), this is an ACTION —
@@ -1341,8 +1348,8 @@ export function buildLiveAgentTurn(
     // `timeoutRetrySeed` for why it must not be derived from the message.
     const attemptId = randomUUID()
     if (turn.user_text === RETRY_TURN_VALUE) {
-      const recovered = lastUserText.get(topicKey) ?? RETRY_FALLBACK_TEXT
-      if (turn.button_prompt_id !== undefined && completedUserText.get(topicKey) === recovered) {
+      const recovered = lastUserText.get(retryKey) ?? RETRY_FALLBACK_TEXT
+      if (turn.button_prompt_id !== undefined && completedUserText.get(retryKey) === recovered) {
         moduleLog.info('retry_tap_already_completed', {
           project: turn.project_slug,
           topic: turn.topic_id,
@@ -1354,7 +1361,7 @@ export function buildLiveAgentTurn(
         })
         return { outcome: 'replied', reply_prompt_id: null }
       }
-      const recoveredAttachments = lastAttachments.get(topicKey)
+      const recoveredAttachments = lastAttachments.get(retryKey)
       moduleLog.info('retry_tap', {
         project: turn.project_slug,
         topic: turn.topic_id,
@@ -1373,12 +1380,12 @@ export function buildLiveAgentTurn(
     // can recover both. Skip the synthetic seed turn (no real message) and an
     // empty body.
     if (turn.seed_turn !== true && turn.user_text.length > 0) {
-      lastUserText.set(topicKey, turn.user_text)
-      completedUserText.delete(topicKey)
+      lastUserText.set(retryKey, turn.user_text)
+      completedUserText.delete(retryKey)
       if (turn.attachments !== undefined && turn.attachments.length > 0) {
-        lastAttachments.set(topicKey, turn.attachments)
+        lastAttachments.set(retryKey, turn.attachments)
       } else {
-        lastAttachments.delete(topicKey)
+        lastAttachments.delete(retryKey)
       }
     }
     // Path 1 — is the owner still onboarding? Consulted once per turn so the
@@ -1980,7 +1987,7 @@ export function buildLiveAgentTurn(
       }
       return { outcome: 'failed', reply_prompt_id: null }
     }
-    if (turn.seed_turn !== true) completedUserText.set(topicKey, turn.user_text)
+    if (turn.seed_turn !== true) completedUserText.set(retryKey, turn.user_text)
     // Only mark the context as delivered once a turn actually completed on
     // the warm session — a failed first turn retries with full context.
     //
@@ -2184,7 +2191,7 @@ async function resolvePreviousRowWithUserText(
           topic_id: turn.topic_id,
           text: turn.user_text,
           speaker_user_id: turn.user_id,
-          channel_kind: 'app_socket',
+          channel_kind: turn.channel_kind ?? 'app_socket',
         })
       }
       return latest !== null && typeof latest.body === 'string' ? latest.body : null
@@ -2197,7 +2204,7 @@ async function resolvePreviousRowWithUserText(
         freeform_text: turn.user_text,
         chosen_at: observed_at,
         speaker_user_id: turn.user_id,
-        channel_kind: 'app_socket',
+        channel_kind: turn.channel_kind ?? 'app_socket',
       },
     })
     return priorBody
