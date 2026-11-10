@@ -57,7 +57,8 @@ absent, as before.
   named in `NEUTRON_TELEGRAM_FILE_ROOTS` (colon-separated absolute paths); never
   the rest of the instance home, which holds the database and the secrets key.
   The file is opened once, checked through the descriptor (regular file, same
-  device and inode as the resolved path) and read with a hard byte bound. An image over Telegram's 10 MB photo limit is sent as a
+  device and inode as the resolved path) and read into a buffer sized from the
+  file, with a hard byte bound. An image over Telegram's 10 MB photo limit is sent as a
   document. A 429 from Telegram is waited out (its `retry_after`, at most a minute,
   three tries) instead of dropping that part of the reply. At shutdown the bridge drains
   first (after which the webhook answers 503, so Telegram re-sends rather than a
@@ -86,6 +87,10 @@ absent, as before.
   and the composer binds `telegram` to the bridge and registers the
   `TelegramAdapter` on the router, so `router.send` can deliver plain text to a
   Telegram topic. Web-chat inbound is unchanged (it never used `router.receive`).
+- `channels/router.ts` — first-sight topic creation is `INSERT OR IGNORE` and
+  reads the winning row back, so concurrent first updates from a new chat (an
+  album, a message right after `/connect`) resolve to one topic instead of the
+  second failing on the unique channel-binding index.
 - `open/composer.ts` — the voice-note transcriber the upload route used inline is
   now one named function (`transcribeVoiceNote`) shared by the upload route and
   the bridge; the Telegram surface gets a late-bound receiver that forwards to the

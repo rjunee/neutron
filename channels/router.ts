@@ -120,8 +120,11 @@ export class ChannelRouter implements IncomingEventReceiver {
 
     const id = crypto.randomUUID()
     const now = Date.now() / 1000
+    // Two first-sight events for the same channel topic can both miss the
+    // SELECT above. The insert yields to an existing row on the unique
+    // channel-binding index, and the row that won is read back, so the second event resolves to the same topic instead of failing.
     await this.db.run(
-      `INSERT INTO topics
+      `INSERT OR IGNORE INTO topics
          (id, project_slug, project_id, channel_kind, channel_topic_id,
           privacy_mode, status, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 'regular', 'active', ?, ?)`,
@@ -135,6 +138,21 @@ export class ChannelRouter implements IncomingEventReceiver {
         now,
       ],
     )
+    const winner = this.db
+      .prepare<TopicRow, [string, string]>(
+        `SELECT id, project_id, channel_kind, channel_topic_id, privacy_mode, status
+           FROM topics
+          WHERE channel_kind = ? AND channel_topic_id = ?`,
+      )
+      .get(event.channel_kind, event.channel_topic_id)
+    if (winner && winner.id !== id) {
+      if (winner.status !== 'active') {
+        throw new Error(
+          `topic ${winner.id} for ${event.channel_kind}:${event.channel_topic_id} is ${winner.status}`,
+        )
+      }
+      return rowToTopic(winner)
+    }
     return {
       topic_id: id,
       channel_kind: event.channel_kind,

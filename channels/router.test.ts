@@ -70,6 +70,20 @@ describe('ChannelRouter', () => {
     expect(row?.id).toBe(seen[0]?.topic.topic_id ?? '')
   })
 
+  test('concurrent first-sight events for one channel topic resolve to the same row', async () => {
+    const seen: Topic[] = []
+    const router = new ChannelRouter(db, 'proj', async (topic) => { seen.push(topic) })
+    await Promise.all([
+      router.receive({ ...sampleEvent, event_id: 'a' }),
+      router.receive({ ...sampleEvent, event_id: 'b' }),
+      router.receive({ ...sampleEvent, event_id: 'c' }),
+    ])
+    expect(seen.length).toBe(3)
+    expect(new Set(seen.map((t) => t.topic_id)).size).toBe(1)
+    const rows = db.prepare<{ n: number }, []>(`SELECT COUNT(*) AS n FROM topics WHERE channel_topic_id = '12345:7'`).get()
+    expect(rows?.n).toBe(1)
+  })
+
   test('second event for the same channel topic re-uses the existing row', async () => {
     const seen: Topic[] = []
     const router = new ChannelRouter(db, 'project-A', async (topic) => { seen.push(topic) })

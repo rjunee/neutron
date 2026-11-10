@@ -205,15 +205,23 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       const real = statSync(realpathSync(path))
       if (real.dev !== st.dev || real.ino !== st.ino || !insideRoots(path)) throw new Error('outside the allowed folders')
       if (st.size > max) throw new Error('over the size limit')
-      const buf = Buffer.alloc(max + 1)
+      // Sized from the file (plus one byte, to notice growth), grown in bounded
+      // steps if the file grew since the stat, never past `max + 1`.
+      let buf = Buffer.allocUnsafe(Math.min(st.size + 1, max + 1))
       let n = 0
       for (;;) {
+        if (n === buf.length) {
+          if (buf.length > max) throw new Error('over the size limit')
+          const bigger = Buffer.allocUnsafe(Math.min(buf.length * 2, max + 1))
+          buf.copy(bigger, 0, 0, n)
+          buf = bigger
+        }
         const r = readSync(fd, buf, n, buf.length - n, null)
         if (r === 0) break
         n += r
         if (n > max) throw new Error('over the size limit')
       }
-      return new Uint8Array(buf.subarray(0, n))
+      return new Uint8Array(buf.buffer, buf.byteOffset, n)
     } finally {
       closeSync(fd)
     }
