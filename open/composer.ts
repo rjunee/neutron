@@ -7231,11 +7231,6 @@ export function buildOpenGraphComposer(
             warn: (event, meta) => telegramLog.warn(event, meta ?? {}),
           },
         })
-        // Drain FIRST at shutdown (before the substrate and the database close):
-        // gather any album still in its window into a turn and give running
-        // turns a bounded wait.
-        const bridgeForShutdown = telegramChatBridge
-        realmodeCleanups.unshift(() => bridgeForShutdown.close())
       }
     } catch (err) {
       log.error('telegram_webhook_build_failed', {
@@ -7281,7 +7276,13 @@ export function buildOpenGraphComposer(
       // regain authority only after that binding, with no synthetic chat turn.
       // Maintenance resumes its existing generation fences before pure startup
       // recovery can resume a lost parent. Recovery never takes a turn/build lease.
-      on_shutdown_start: quiesceChatRecovery,
+      // Shutdown starts by draining the Telegram bridge (when there is one): an
+      // album still in its window becomes a turn, and running turns get a bounded
+      // wait, all before the persistent REPLs are stopped.
+      on_shutdown_start: async (): Promise<void> => {
+        if (telegramChatBridge !== null) await telegramChatBridge.close()
+        await quiesceChatRecovery()
+      },
       on_graph_ready: async () => {
         const recovery = startProjectChatRecovery(async () => {
           await reconcileNativeDispatches()

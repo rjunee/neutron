@@ -81,7 +81,7 @@ export const TRANSCRIPT_MAX_CHARS = 4000
 /** Total bytes of files one reply may upload; files past it are reported, not sent. */
 export const REPLY_FILES_MAX_TOTAL_BYTES = 100 * 1024 * 1024
 /** How long shutdown waits for turns already running. */
-export const SHUTDOWN_DRAIN_MS = 20_000
+export const SHUTDOWN_DRAIN_MS = 10_000
 
 export interface TelegramChatLog {
   info: (event: string, meta?: LogFields) => void
@@ -372,7 +372,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     let chain: Promise<void> = Promise.resolve()
     const send = (ev: ChatOutbound): void => {
       if (ev.type === 'agent_message') {
-        const body = ev.body
+        const body = withOptionsAsText(ev.body, ev.options)
         chain = chain.then(() => sendReply(to, body)).catch((err) => {
           opts.log.warn('telegram_reply_failed', { chat: chat_id, error: errMsg(err) })
         })
@@ -584,6 +584,16 @@ export function composeTelegramTurnText(input: {
  */
 export const TELEGRAM_REPLY_NOTE =
   '(Your reply goes to this Telegram chat. To send a file with it, put each file on its own line of the reply as [[file: /absolute/path]]; images go as photos, mp4 as video, anything else as a document; at most 10 files.)'
+
+/**
+ * A reply that offers choices carries them in `options`, already stripped from
+ * the body. Telegram gets them as a numbered list the person can answer in words.
+ */
+export function withOptionsAsText(body: string, options: ReadonlyArray<{ label: string }> | undefined): string {
+  if (options === undefined || options.length === 0) return body
+  const list = options.map((o, i) => `${i + 1}. ${o.label}`).join('\n')
+  return `${body.trimEnd()}\n\n${list}\n\nReply with the number or the words.`
+}
 
 function attachmentType(ref: TelegramAttachmentRef, file_path: string): { ext: string; content_type: string } {
   const fromPath = /\.([A-Za-z0-9]{1,8})$/.exec(file_path)?.[1]?.toLowerCase()

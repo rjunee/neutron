@@ -50,8 +50,10 @@ absent, as before.
   credential" message as the web chat (`canDispatchLiveAgent`). Transcripts are cut at 4000 characters, and a captionless voice
   note's transcript appears once, as the `[voice]` line. Reply files are read one
   upload at a time and capped at 100 MB per reply. At shutdown the bridge drains
-  first: it starts the turn for an album still being gathered and waits up to
-  20 s for running turns.
+  first, from the composition's `on_shutdown_start` (before the persistent REPLs
+  stop): it starts the turn for an album still being gathered and waits up to
+  10 s for running turns. A reply that offers choices (`options`) is posted with
+  them as a numbered list.
 - `gateway/wiring/build-live-agent-turn.ts` and
   `gateway/http/chat-sender-registry.ts` — a turn request may name its
   `reply_sink` (absent = the web chat). A follow-up is injected into the topic's

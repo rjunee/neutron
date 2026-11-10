@@ -28,7 +28,7 @@ import { TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import { buildWebhookHandler, type TelegramUpdate } from '@neutronai/channels/adapters/telegram/webhook-server.ts'
 import type { LiveAgentTurnRequest } from '@neutronai/gateway/http/chat-sender-registry.ts'
 
-import { TELEGRAM_REPLY_NOTE, TRANSCRIPT_MAX_CHARS, buildTelegramChatBridge, type TelegramChatBridge, type TelegramChatBridgeOptions } from '../wiring/telegram-chat.ts'
+import { withOptionsAsText, TELEGRAM_REPLY_NOTE, TRANSCRIPT_MAX_CHARS, buildTelegramChatBridge, type TelegramChatBridge, type TelegramChatBridgeOptions } from '../wiring/telegram-chat.ts'
 
 // ── mock Bot API ────────────────────────────────────────────────────────────
 interface ApiCall {
@@ -427,5 +427,12 @@ describe('telegram chat bridge', () => {
     })
     await slow.idle()
     expect(turns.length).toBe(1)
+  })
+
+  test('choices offered in a reply are posted as a numbered list', async () => {
+    expect(withOptionsAsText('Which one?', [{ label: 'Tomorrow' }, { label: 'Friday' }])).toBe(
+      'Which one?\n\n1. Tomorrow\n2. Friday\n\nReply with the number or the words.',
+    )
+    expect(withOptionsAsText('Plain', undefined)).toBe('Plain')
   })
 })
