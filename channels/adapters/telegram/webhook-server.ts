@@ -552,6 +552,7 @@ export function decodeUpdate(
       chat_id: String(msg.chat.id),
       chat_type: msg.chat.type,
       message_id: msg.message_id,
+      ...(msg.message_thread_id !== undefined ? { message_thread_id: msg.message_thread_id } : {}),
       ...(typeof msg.chat.title === 'string' ? { chat_title: msg.chat.title } : {}),
       ...(msg.media_group_id !== undefined ? { media_group_id: msg.media_group_id } : {}),
       ...(update.edited_message !== undefined && update.message === undefined ? { edited: true } : {}),

@@ -35,7 +35,14 @@ absent, as before.
   the audio, album gathering (1.5 s window), de-duplication by `<chat>:<message>`,
   the turn on `appWsProjectTopicId(owner, project)` through the same live-agent
   runner the web chat uses, and the reply back to the chat. The webhook returns
-  before the turn runs.
+  before the turn runs. Recent update ids are kept in
+  `<NEUTRON_HOME>/telegram/seen-updates.json` (last 1000), so a re-sent update
+  runs once across a restart. A message written in a forum topic is answered in
+  that topic. Transcripts are cut at 4000 characters, and a captionless voice
+  note's transcript appears once, as the `[voice]` line. Reply files are read one
+  upload at a time and capped at 100 MB per reply. At shutdown the bridge drains
+  first: it starts the turn for an album still being gathered and waits up to
+  20 s for running turns.
 - `open/composer.ts` — the voice-note transcriber the upload route used inline is
   now one named function (`transcribeVoiceNote`) shared by the upload route and
   the bridge; the Telegram surface gets a late-bound receiver that forwards to the

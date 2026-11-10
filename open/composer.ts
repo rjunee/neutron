@@ -7220,6 +7220,7 @@ export function buildOpenGraphComposer(
           access: new TelegramAccess(telegramAccessPath(owner_home)),
           client: telegramWebhookSurface.client,
           inbox_dir: joinPath(owner_home, 'telegram', 'inbox'),
+          seen_path: joinPath(owner_home, 'telegram', 'seen-updates.json'),
           chat_turn: appWsChatTurn,
           transcribe: transcribeVoiceNote,
           log: {
@@ -7227,6 +7228,11 @@ export function buildOpenGraphComposer(
             warn: (event, meta) => telegramLog.warn(event, meta ?? {}),
           },
         })
+        // Drain FIRST at shutdown (before the substrate and the database close):
+        // gather any album still in its window into a turn and give running
+        // turns a bounded wait.
+        const bridgeForShutdown = telegramChatBridge
+        realmodeCleanups.unshift(() => bridgeForShutdown.close())
       }
     } catch (err) {
       log.error('telegram_webhook_build_failed', {

@@ -264,7 +264,11 @@ export class TelegramClient {
   }
 
   /** Show "typing…" (or another chat action) for about five seconds. */
-  sendChatAction(input: { chat_id: number | string; action: 'typing' | 'upload_photo' | 'upload_video' | 'upload_document' }): Promise<true> {
+  sendChatAction(input: {
+    chat_id: number | string
+    action: 'typing' | 'upload_photo' | 'upload_video' | 'upload_document'
+    message_thread_id?: number
+  }): Promise<true> {
     return this.call<typeof input, true>('sendChatAction', input)
   }
 

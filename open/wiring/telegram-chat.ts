@@ -39,19 +39,22 @@
  *
  * The webhook must answer Telegram quickly or Telegram re-sends the update, so
  * `receive` returns as soon as the message is accepted; the turn runs in the
- * background. Updates are de-duplicated by `<chat>:<message>`.
+ * background. Updates are de-duplicated by `<chat>:<message>`, remembered on disk
+ * so a re-sent update runs once across a restart. A message in a forum topic is
+ * answered in that topic.
  *
  * Nothing in the turn shape is Telegram-only by design: another messaging
  * channel can produce the same header + attachments + text and reuse the agent
  * side unchanged.
  */
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
 import type { IncomingEvent, IncomingEventReceiver } from '@neutronai/channels/types.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
-import type { TelegramClient, TelegramUpload } from '@neutronai/channels/adapters/telegram/client.ts'
+import type { LogFields } from '@neutronai/logger'
+import type { TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import type { TelegramAccess } from '@neutronai/channels/adapters/telegram/access.ts'
 import {
   isTelegramAttachmentRef,
@@ -71,11 +74,18 @@ import type { LiveAgentTurnRequest } from '@neutronai/gateway/http/chat-sender-r
 export const TELEGRAM_DOWNLOAD_MAX_BYTES = 20 * 1024 * 1024
 /** How long to wait for the rest of an album after its first item. */
 export const ALBUM_WINDOW_MS = 1500
-const SEEN_EVENT_CAP = 1000
+/** How many recent update ids are remembered (on disk) to run a re-sent update once. */
+export const SEEN_EVENT_CAP = 1000
+/** A transcript longer than this is cut, as the web chat's attachment path does. */
+export const TRANSCRIPT_MAX_CHARS = 4000
+/** Total bytes of files one reply may upload; files past it are reported, not sent. */
+export const REPLY_FILES_MAX_TOTAL_BYTES = 100 * 1024 * 1024
+/** How long shutdown waits for turns already running. */
+export const SHUTDOWN_DRAIN_MS = 20_000
 
 export interface TelegramChatLog {
-  info: (event: string, meta?: Record<string, unknown>) => void
-  warn: (event: string, meta?: Record<string, unknown>) => void
+  info: (event: string, meta?: LogFields) => void
+  warn: (event: string, meta?: LogFields) => void
 }
 
 export interface TelegramChatBridgeOptions {
@@ -89,6 +99,8 @@ export interface TelegramChatBridgeOptions {
   client: Pick<TelegramClient, 'sendMessage' | 'sendChatAction' | 'getFile' | 'downloadFile' | 'sendFile' | 'sendMediaGroup'>
   /** `<NEUTRON_HOME>/telegram/inbox` */
   inbox_dir: string
+  /** `<NEUTRON_HOME>/telegram/seen-updates.json`: recent update ids, so a re-sent update runs once across restarts. */
+  seen_path: string
   /** Runs one turn on the live agent. Null when no agent is configured. */
   chat_turn: ((turn: LiveAgentTurnRequest) => Promise<unknown>) | null
   /** The shared voice-note transcriber; null result = no transcript. */
@@ -105,8 +117,19 @@ export interface TelegramChatBridgeOptions {
 interface Accepted {
   event: IncomingEvent
   chat_id: string
+  /** Forum topic the message was written in; every answer goes back to it. */
+  thread_id: number | undefined
   project_id: string
 }
+
+/** Where an answer goes: the chat, and the forum topic when there is one. */
+interface Dest {
+  chat_id: string
+  thread_id: number | undefined
+}
+
+const threadField = (d: Dest): { message_thread_id?: number } =>
+  d.thread_id !== undefined ? { message_thread_id: d.thread_id } : {}
 
 interface SavedAttachment {
   path: string
@@ -116,8 +139,13 @@ interface SavedAttachment {
 }
 
 export interface TelegramChatBridge extends IncomingEventReceiver {
-  /** Resolves when every turn started so far has finished (tests, shutdown). */
+  /** Resolves when every turn started so far has finished (tests). */
   idle(): Promise<void>
+  /**
+   * Shutdown: stop accepting messages, start the turn for any album still being
+   * gathered, and wait up to `timeout_ms` for running turns.
+   */
+  close(timeout_ms?: number): Promise<void>
 }
 
 export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): TelegramChatBridge {
@@ -134,7 +162,8 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
         return null
       }
     })
-  const seen = new Set<string>()
+  const seen = new SeenUpdates(opts.seen_path, opts.log)
+  let closed = false
   const albums = new Map<string, { items: Accepted[]; timer: ReturnType<typeof setTimeout> }>()
   const inFlight = new Set<Promise<void>>()
 
@@ -143,15 +172,19 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     fireAndForget('telegram-chat.track', p.finally(() => inFlight.delete(p)))
   }
 
-  const say = async (chat_id: string, text: string): Promise<void> => {
+  const say = async (to: Dest, text: string): Promise<void> => {
     try {
-      await opts.client.sendMessage({ chat_id, text })
+      await opts.client.sendMessage({ chat_id: to.chat_id, text, ...threadField(to) })
     } catch (err) {
-      opts.log.warn('telegram_send_failed', { chat: chat_id, error: errMsg(err) })
+      opts.log.warn('telegram_send_failed', { chat: to.chat_id, error: errMsg(err) })
     }
   }
+  const typing = (to: Dest): void => {
+    fireAndForget('telegram-chat.typing', opts.client.sendChatAction({ chat_id: to.chat_id, action: 'typing', ...threadField(to) }))
+  }
 
-  const handleCommand = async (event: IncomingEvent, chat_id: string, chat_type: string): Promise<boolean> => {
+  const handleCommand = async (event: IncomingEvent, to: Dest, chat_type: string): Promise<boolean> => {
+    const chat_id = to.chat_id
     const m = /^\/(start|pair|connect)(?:@[A-Za-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(event.body.text.trim())
     if (m === null) return false
     const command = (m[1] ?? '').toLowerCase()
@@ -162,7 +195,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       // Private chats only: a code shown in a group is a code anyone there can use.
       if (chat_type !== 'private') return true
       if (allowed) {
-        await say(chat_id, "You're already paired.")
+        await say(to, "You're already paired.")
         return true
       }
       const code = opts.access.issueCode({ user_id, name: event.user.display_name })
@@ -181,9 +214,9 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       const r = opts.access.pair({ code: arg, by_user_id: user_id })
       if (r.ok) {
         opts.log.info('telegram_user_paired', { user: r.user_id, by: user_id })
-        await say(chat_id, `Paired ${r.name}.`)
+        await say(to, `Paired ${r.name}.`)
       } else {
-        await say(chat_id, 'That code is unknown or has expired. Ask for a new one with /start in a private chat with me.')
+        await say(to, 'That code is unknown or has expired. Ask for a new one with /start in a private chat with me.')
       }
       return true
     }
@@ -192,11 +225,11 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     const r = opts.access.connect({ chat_id, chat_type, by_user_id: user_id, ...(title !== undefined ? { title } : {}) })
     if (r.ok) {
       opts.log.info('telegram_chat_connected', { chat: chat_id, project: r.project_id, by: user_id })
-      await say(chat_id, r.already ? 'This chat is already connected.' : 'This chat is connected.')
+      await say(to, r.already ? 'This chat is already connected.' : 'This chat is connected.')
     } else if (r.reason === 'not_a_group') {
-      await say(chat_id, 'Send /connect inside the group you want to connect.')
+      await say(to, 'Send /connect inside the group you want to connect.')
     } else if (r.reason === 'no_default_project') {
-      await say(chat_id, 'No project is set up for Telegram on this instance yet.')
+      await say(to, 'No project is set up for Telegram on this instance yet.')
     }
     return true
   }
@@ -222,7 +255,10 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
         } catch (err) {
           opts.log.warn('telegram_transcription_failed', { chat: chat_id, error: errMsg(err) })
         }
-        if (transcript !== null) writeFileSync(`${path}.txt`, transcript, { mode: 0o600 })
+        if (transcript !== null) {
+          writeFileSync(`${path}.txt`, transcript, { mode: 0o600 })
+          transcript = capTranscript(transcript)
+        }
       }
       return { path, content_type, kind: ref.kind, transcript }
     } catch (err) {
@@ -231,50 +267,53 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     }
   }
 
-  const sendReply = async (chat_id: string, body: string): Promise<void> => {
+  const sendReply = async (to: Dest, body: string): Promise<void> => {
     const { text, files, rejected } = extractReplyFiles(body)
     for (const part of chunkTelegramText(text)) {
-      if (part.trim().length > 0) await say(chat_id, part)
+      if (part.trim().length > 0) await say(to, part)
     }
-    const uploads: Array<{ kind: 'photo' | 'video' | 'document'; path: string; upload: TelegramUpload }> = []
+    // Sizes first, bytes later: each upload step reads only its own files, so a
+    // reply never holds more than one album in memory, and the whole reply is
+    // capped at REPLY_FILES_MAX_TOTAL_BYTES.
+    const planned: Array<{ kind: 'photo' | 'video' | 'document'; path: string; filename: string; content_type: string }> = []
     const skipped = [...rejected]
+    let total = 0
     for (const path of files) {
       const size = fileSize(path)
-      if (size === null || size > TELEGRAM_UPLOAD_MAX_BYTES) {
+      if (size === null || size > TELEGRAM_UPLOAD_MAX_BYTES || total + size > REPLY_FILES_MAX_TOTAL_BYTES) {
         skipped.push(path)
         continue
       }
-      const c = classifyReplyFile(path)
-      try {
-        uploads.push({ kind: c.kind, path, upload: { bytes: readFile(path), filename: c.filename, content_type: c.content_type } })
-      } catch {
-        skipped.push(path)
-      }
+      total += size
+      planned.push({ path, ...classifyReplyFile(path) })
     }
-    for (const step of planReplyUploads(uploads)) {
+    for (const step of planReplyUploads(planned)) {
+      const items = 'album' in step ? step.album : [step.single]
       try {
+        const uploads = items.map((u) => ({ kind: u.kind, upload: { bytes: readFile(u.path), filename: u.filename, content_type: u.content_type } }))
         if ('album' in step) {
           await opts.client.sendMediaGroup({
-            chat_id,
-            items: step.album.map((u) => ({ type: u.kind === 'video' ? 'video' : 'photo', file: u.upload })),
+            chat_id: to.chat_id,
+            ...threadField(to),
+            items: uploads.map((u) => ({ type: u.kind === 'video' ? ('video' as const) : ('photo' as const), file: u.upload })),
           })
         } else {
-          const u = step.single
+          const u = uploads[0] as (typeof uploads)[number]
           await opts.client.sendFile({
             method: u.kind === 'photo' ? 'sendPhoto' : u.kind === 'video' ? 'sendVideo' : 'sendDocument',
-            chat_id,
+            chat_id: to.chat_id,
+            ...threadField(to),
             file: u.upload,
           })
         }
       } catch (err) {
-        opts.log.warn('telegram_file_send_failed', { chat: chat_id, error: errMsg(err) })
-        const names = 'album' in step ? step.album.map((u) => u.upload.filename) : [step.single.upload.filename]
-        await say(chat_id, `Could not send ${names.join(', ')}.`)
+        opts.log.warn('telegram_file_send_failed', { chat: to.chat_id, error: errMsg(err) })
+        await say(to, `Could not send ${items.map((u) => u.filename).join(', ')}.`)
       }
     }
     if (skipped.length > 0) {
-      opts.log.warn('telegram_reply_files_skipped', { chat: chat_id, count: skipped.length })
-      await say(chat_id, `Could not send ${skipped.length === 1 ? 'one file' : `${skipped.length} files`} (missing, not absolute, or over 50 MB).`)
+      opts.log.warn('telegram_reply_files_skipped', { chat: to.chat_id, count: skipped.length })
+      await say(to, `Could not send ${skipped.length === 1 ? 'one file' : `${skipped.length} files`} (missing, not an absolute path, or over the size limit).`)
     }
   }
 
@@ -282,11 +321,12 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     const first = items[0]
     if (first === undefined) return
     const { chat_id, project_id } = first
+    const to: Dest = { chat_id, thread_id: first.thread_id }
     if (opts.chat_turn === null) {
-      await say(chat_id, "I can't answer yet: this instance has no AI credential configured.")
+      await say(to, "I can't answer yet: this instance has no AI credential configured.")
       return
     }
-    fireAndForget('telegram-chat.typing', opts.client.sendChatAction({ chat_id, action: 'typing' }))
+    typing(to)
     const saved: SavedAttachment[] = []
     const texts: string[] = []
     for (const a of items) {
@@ -306,11 +346,11 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
     const send = (ev: ChatOutbound): void => {
       if (ev.type === 'agent_message') {
         const body = ev.body
-        chain = chain.then(() => sendReply(chat_id, body)).catch((err) => {
+        chain = chain.then(() => sendReply(to, body)).catch((err) => {
           opts.log.warn('telegram_reply_failed', { chat: chat_id, error: errMsg(err) })
         })
       } else if (ev.type === 'agent_typing_start') {
-        fireAndForget('telegram-chat.typing', opts.client.sendChatAction({ chat_id, action: 'typing' }))
+        typing(to)
       }
     }
     opts.log.info('telegram_turn_dispatched', { chat: chat_id, project: project_id, messages: items.length, files: saved.length })
@@ -326,7 +366,7 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       })
     } catch (err) {
       opts.log.warn('telegram_turn_failed', { chat: chat_id, error: errMsg(err) })
-      chain = chain.then(() => say(chat_id, 'Something went wrong handling that message. Please send it again.'))
+      chain = chain.then(() => say(to, 'Something went wrong handling that message. Please send it again.'))
     }
     await chain
   }
@@ -340,25 +380,22 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
 
   return {
     async receive(event: IncomingEvent): Promise<void> {
-      if (event.channel_kind !== 'telegram') return
+      if (event.channel_kind !== 'telegram' || closed) return
       const chat_id = String(event.adapter_metadata?.['chat_id'] ?? event.channel_topic_id.split(':')[0] ?? '')
       const chat_type = String(event.adapter_metadata?.['chat_type'] ?? '')
       if (chat_id.length === 0) return
       // An edit is not a new message; acting on it would run a second turn.
       if (event.adapter_metadata?.['edited'] === true) return
-      if (seen.has(event.event_id)) return
-      seen.add(event.event_id)
-      if (seen.size > SEEN_EVENT_CAP) {
-        const oldest = seen.values().next().value
-        if (oldest !== undefined) seen.delete(oldest)
-      }
-      if (await handleCommand(event, chat_id, chat_type)) return
+      if (!seen.claim(event.event_id)) return
+      const rawThread = event.adapter_metadata?.['message_thread_id']
+      const thread_id = typeof rawThread === 'number' && Number.isInteger(rawThread) ? rawThread : undefined
+      if (await handleCommand(event, { chat_id, thread_id }, chat_type)) return
       const project_id = opts.access.deliveryProject({ chat_id, user_id: event.user.channel_user_id })
       if (project_id === null) {
         opts.log.info('telegram_message_dropped', { chat: chat_id, user: event.user.channel_user_id })
         return
       }
-      const accepted: Accepted = { event, chat_id, project_id }
+      const accepted: Accepted = { event, chat_id, thread_id, project_id }
       const group = event.adapter_metadata?.['media_group_id']
       if (typeof group === 'string' && group.length > 0) {
         const key = `${chat_id}:${group}`
@@ -379,6 +416,66 @@ export function buildTelegramChatBridge(opts: TelegramChatBridgeOptions): Telegr
       }
       while (inFlight.size > 0) await Promise.all([...inFlight])
     },
+    async close(timeout_ms: number = SHUTDOWN_DRAIN_MS): Promise<void> {
+      closed = true
+      for (const [key, album] of albums) {
+        clearTimeout(album.timer)
+        flushAlbum(key)
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const deadline = new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, timeout_ms)
+      })
+      await Promise.race([Promise.all([...inFlight]).then(() => undefined), deadline])
+      if (timer !== undefined) clearTimeout(timer)
+      if (inFlight.size > 0) opts.log.warn('telegram_shutdown_turns_running', { count: inFlight.size })
+    },
+  }
+}
+
+/**
+ * Recent update ids, kept on disk so a re-sent update runs once even when the
+ * process restarted between starting the turn and Telegram receiving the 200.
+ * Bounded to {@link SEEN_EVENT_CAP}; a write failure is logged and the id is
+ * still remembered in memory.
+ */
+class SeenUpdates {
+  private ids: string[]
+  private readonly set: Set<string>
+  constructor(
+    private readonly path: string,
+    private readonly log: TelegramChatLog,
+  ) {
+    this.ids = []
+    try {
+      if (existsSync(path)) {
+        const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+        if (Array.isArray(parsed)) this.ids = parsed.filter((v): v is string => typeof v === 'string').slice(-SEEN_EVENT_CAP)
+      }
+    } catch {
+      this.ids = []
+    }
+    this.set = new Set(this.ids)
+  }
+
+  /** True the first time an id is seen; false for a repeat. */
+  claim(id: string): boolean {
+    if (this.set.has(id)) return false
+    this.set.add(id)
+    this.ids.push(id)
+    while (this.ids.length > SEEN_EVENT_CAP) {
+      const old = this.ids.shift()
+      if (old !== undefined) this.set.delete(old)
+    }
+    try {
+      mkdirSync(dirname(this.path), { recursive: true, mode: 0o700 })
+      const tmp = `${this.path}.tmp-${process.pid}`
+      writeFileSync(tmp, JSON.stringify(this.ids), { mode: 0o600 })
+      renameSync(tmp, this.path)
+    } catch (err) {
+      this.log.warn('telegram_seen_write_failed', { error: errMsg(err) })
+    }
+    return true
   }
 }
 
@@ -405,12 +502,20 @@ export function composeTelegramTurnText(input: {
       'with the Read tool. Voice notes and audio carry their transcript inline below;',
       'do not Read the raw audio bytes:',
     )
+    // A captionless voice note's transcript is the message itself (the
+    // `[voice]` line below), so its attachment line points there instead of
+    // repeating it.
+    const voiceIsMessage = input.texts.length === 0
+    const firstAudio = input.saved.find((s) => s.kind === 'voice' || s.kind === 'audio')
     for (const s of input.saved) {
       if (s.kind === 'voice' || s.kind === 'audio') {
+        const what = s.kind === 'voice' ? 'voice note' : 'audio'
         lines.push(
-          s.transcript !== null
-            ? `- ${s.path} (${s.content_type}) — ${s.kind === 'voice' ? 'voice note' : 'audio'}; transcript: ${oneLine(s.transcript)}`
-            : `- ${s.path} (${s.content_type}) — ${s.kind === 'voice' ? 'voice note' : 'audio'}; transcription unavailable`,
+          s.transcript === null
+            ? `- ${s.path} (${s.content_type}) — ${what}; transcription unavailable`
+            : voiceIsMessage && s === firstAudio
+              ? `- ${s.path} (${s.content_type}) — ${what}; transcript is the message below`
+              : `- ${s.path} (${s.content_type}) — ${what}; transcript: ${oneLine(s.transcript)}`,
         )
       } else {
         lines.push(`- ${s.path} (${s.content_type})`)
@@ -465,6 +570,11 @@ function stamp(ms: number): string {
 
 function oneLine(s: string): string {
   return s.replace(/\s+/g, ' ').trim()
+}
+
+function capTranscript(s: string): string {
+  const t = s.trim()
+  return t.length > TRANSCRIPT_MAX_CHARS ? `${t.slice(0, TRANSCRIPT_MAX_CHARS)}… [transcript truncated]` : t
 }
 
 function errMsg(err: unknown): string {

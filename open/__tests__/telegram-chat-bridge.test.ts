@@ -28,7 +28,7 @@ import { TelegramClient } from '@neutronai/channels/adapters/telegram/client.ts'
 import { buildWebhookHandler, type TelegramUpdate } from '@neutronai/channels/adapters/telegram/webhook-server.ts'
 import type { LiveAgentTurnRequest } from '@neutronai/gateway/http/chat-sender-registry.ts'
 
-import { buildTelegramChatBridge, type TelegramChatBridge } from '../wiring/telegram-chat.ts'
+import { TRANSCRIPT_MAX_CHARS, buildTelegramChatBridge, type TelegramChatBridge, type TelegramChatBridgeOptions } from '../wiring/telegram-chat.ts'
 
 // ── mock Bot API ────────────────────────────────────────────────────────────
 interface ApiCall {
@@ -117,13 +117,19 @@ beforeEach(() => {
     users: { [String(PARENT_ONE)]: { name: 'Parent One' } },
     chats: {},
   })
-  bridge = buildTelegramChatBridge({
+  bridge = buildTelegramChatBridge(bridgeOptions())
+  handler = buildWebhookHandler({ bot_user_id: 1, secret_token: 'sec', receiver: bridge, rate_limit: { windowMs: 60_000, maxRequests: 1000 } })
+})
+
+function bridgeOptions(): TelegramChatBridgeOptions {
+  return {
     project_slug: 'inst',
     owner_user_id: 'owner',
     project_topic_id: (p) => `app:owner:${p}`,
     access: new TelegramAccess(telegramAccessPath(home)),
     client: new TelegramClient(TOKEN, { base_url: base }),
     inbox_dir: join(home, 'telegram', 'inbox'),
+    seen_path: join(home, 'telegram', 'seen-updates.json'),
     chat_turn: async (turn) => {
       turns.push(turn)
       turn.send({ type: 'agent_message', body: replyFor(turn) })
@@ -132,9 +138,8 @@ beforeEach(() => {
     transcribe: async () => 'she read all four words',
     log: { info: () => undefined, warn: () => undefined },
     album_window_ms: 30,
-  })
-  handler = buildWebhookHandler({ bot_user_id: 1, secret_token: 'sec', receiver: bridge, rate_limit: { windowMs: 60_000, maxRequests: 1000 } })
-})
+  }
+}
 afterEach(() => rmSync(home, { recursive: true, force: true }))
 
 async function post(message: Record<string, unknown>, opts: { from?: number; chat?: { id: number; type: string; title?: string } } = {}): Promise<void> {
@@ -228,7 +233,7 @@ describe('telegram chat bridge', () => {
     expect(photoTurn.endsWith('\nher page')).toBe(true)
 
     const voiceTurn = turns[1]?.user_text ?? ''
-    expect(voiceTurn).toContain('voice note; transcript: she read all four words')
+    expect(voiceTurn).toContain('voice note; transcript is the message below')
     expect(voiceTurn.endsWith('\n[voice] she read all four words')).toBe(true)
     const voicePath = /- (\S+\.ogg) \(audio\/ogg\)/.exec(voiceTurn)?.[1] ?? ''
     expect(existsSync(voicePath)).toBe(true)
@@ -301,6 +306,7 @@ describe('telegram chat bridge', () => {
       access: new TelegramAccess(telegramAccessPath(home)),
       client: new TelegramClient(TOKEN, { base_url: base }),
       inbox_dir: join(home, 'inbox'),
+      seen_path: join(home, 'seen.json'),
       chat_turn: null,
       transcribe: async () => null,
       log: { info: () => undefined, warn: () => undefined },
@@ -316,5 +322,75 @@ describe('telegram chat bridge', () => {
     })
     await noAgent.idle()
     expect(sentTexts()[0]).toContain('no AI credential')
+  })
+
+  test('a message in a forum topic is answered in that topic', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    await post({ text: 'in a topic', message_thread_id: 77 }, { chat: { id: GROUP, type: 'supergroup' } })
+    await bridge.idle()
+    expect(turns.length).toBe(1)
+    const reply = calls.find((c) => c.method === 'sendMessage')
+    expect(reply?.json?.['message_thread_id']).toBe(77)
+    expect(calls.find((c) => c.method === 'sendChatAction')?.json?.['message_thread_id']).toBe(77)
+  })
+
+  test('a re-sent update runs once even after a restart', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    const update = { update_id: 78, message: { message_id: 5151, from: { id: PARENT_ONE, first_name: 'P' }, chat: { id: GROUP, type: 'group' }, date: 1, text: 'once across restarts' } }
+    const send = (h: (req: Request) => Promise<Response>) =>
+      h(new Request('http://x/webhook/telegram', { method: 'POST', headers: { 'x-telegram-bot-api-secret-token': 'sec' }, body: JSON.stringify(update) }))
+    await send(handler)
+    await bridge.idle()
+    // A new bridge over the same NEUTRON_HOME is a restarted process.
+    const restarted = buildTelegramChatBridge(bridgeOptions())
+    await send(buildWebhookHandler({ bot_user_id: 1, secret_token: 'sec', receiver: restarted }))
+    await restarted.idle()
+    expect(turns.length).toBe(1)
+  })
+
+  test('a long transcript is cut before it reaches the turn', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    const long = buildTelegramChatBridge({ ...bridgeOptions(), transcribe: async () => 'word '.repeat(5000) })
+    await long.receive({
+      channel_kind: 'telegram',
+      channel_topic_id: String(GROUP),
+      user: { channel_user_id: String(PARENT_ONE), display_name: 'P' },
+      body: { text: '', attachments: [{ kind: 'voice', file_id: 'voice-1' }] },
+      event_id: `${GROUP}:9001`,
+      received_at: 1,
+      adapter_metadata: { chat_id: String(GROUP), chat_type: 'group', message_id: 9001 },
+    })
+    await long.idle()
+    const text = turns[0]?.user_text ?? ''
+    expect(text).toContain('[transcript truncated]')
+    expect(text.length).toBeLessThan(TRANSCRIPT_MAX_CHARS + 600)
+    // The captionless note's transcript appears once, as the message.
+    expect(text).toContain('transcript is the message below')
+  })
+
+  test('close() starts a gathered album and waits for running turns', async () => {
+    seedAccess({ default_project_id: 'family', users: { [String(PARENT_ONE)]: { name: 'P' } }, chats: { [String(GROUP)]: { project_id: 'family' } } })
+    const slow = buildTelegramChatBridge({ ...bridgeOptions(), album_window_ms: 60_000 })
+    const h = buildWebhookHandler({ bot_user_id: 1, secret_token: 'sec', receiver: slow })
+    await h(new Request('http://x/webhook/telegram', {
+      method: 'POST',
+      headers: { 'x-telegram-bot-api-secret-token': 'sec' },
+      body: JSON.stringify({ update_id: 90, message: { message_id: 9100, from: { id: PARENT_ONE, first_name: 'P' }, chat: { id: GROUP, type: 'group' }, date: 1, media_group_id: 'late', photo: [{ file_id: 'photo-a' }] } }),
+    }))
+    expect(turns.length).toBe(0)
+    await slow.close(5_000)
+    expect(turns.length).toBe(1)
+    // Closed: nothing new is accepted.
+    await slow.receive({
+      channel_kind: 'telegram',
+      channel_topic_id: String(GROUP),
+      user: { channel_user_id: String(PARENT_ONE), display_name: 'P' },
+      body: { text: 'after close' },
+      event_id: `${GROUP}:9200`,
+      received_at: 1,
+      adapter_metadata: { chat_id: String(GROUP), chat_type: 'group', message_id: 9200 },
+    })
+    await slow.idle()
+    expect(turns.length).toBe(1)
   })
 })
