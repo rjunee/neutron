@@ -479,6 +479,8 @@ import { createAppAdminSurface } from '@neutronai/gateway/http/app-admin-surface
 import { createAdminPersonalitySurface } from '@neutronai/gateway/http/admin-personality-surface.ts'
 import { createAppBackupsSurface } from '@neutronai/gateway/http/app-backups-surface.ts'
 import { buildTelegramWebhookSurface } from '@neutronai/gateway/wiring/build-telegram-webhook.ts'
+import { TelegramAccess, telegramAccessPath } from '@neutronai/channels/adapters/telegram/access.ts'
+import { buildTelegramChatBridge, type TelegramChatBridge } from './wiring/telegram-chat.ts'
 import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
 import { ProjectBackupScheduler } from '@neutronai/gateway/git/project-backup-scheduler.ts'
 import { enumerateVaultProjects } from '@neutronai/gateway/git/vault-snapshot.ts'
@@ -4175,49 +4177,53 @@ export function buildOpenGraphComposer(
       resolveSharedKey: () =>
         resolveOnboardingOpenAiKey({ db, owner_home, owner_handle, project_slug }),
     })
+    // ONE voice-note transcriber for every surface that receives audio: the web
+    // chat's upload route and a connected Telegram chat both call it, so both use
+    // the backend the owner chose in Settings and both log the same way.
+    const transcribeVoiceNote = async (i: {
+      bytes: Uint8Array
+      content_type: string
+      hash: string
+    }): Promise<string | null> => {
+      const backend = resolveTranscriber({
+        env,
+        neutron_home: owner_home,
+        choice: readTranscriptionBackend(db, project_slug),
+        openai_api_key: await openAiTranscriptionKeys.resolve(),
+      })
+      if (backend.client === null) {
+        // NOT silent. A voice note that produces no transcript because the
+        // box is unconfigured, or because both backends are set up and nobody
+        // has said which to use, is otherwise indistinguishable from a
+        // transcription that simply failed.
+        log.warn('voice_transcription_unconfigured', {
+          reason: backend.reason ?? 'unconfigured',
+          hash: i.hash,
+        })
+        return null
+      }
+      const r = await backend.client.transcribe({
+        bytes: i.bytes,
+        content_type: i.content_type,
+      })
+      if (!r.ok) {
+        log.warn('voice_transcription_failed', {
+          backend: backend.kind,
+          ...(backend.model_id !== undefined ? { model: backend.model_id } : {}),
+          code: r.code,
+          ...(r.status !== undefined ? { status: r.status } : {}),
+          hash: i.hash,
+        })
+        return null
+      }
+      const t = r.text.trim()
+      return t.length > 0 ? t : null
+    }
     const appUploadSurface = createAppUploadSurface({
       auth: appOwnerAuth,
       project_slug,
       owner_home,
-      transcribeAudio: async (i: {
-        bytes: Uint8Array
-        content_type: string
-        hash: string
-      }): Promise<string | null> => {
-        const backend = resolveTranscriber({
-          env,
-          neutron_home: owner_home,
-          choice: readTranscriptionBackend(db, project_slug),
-          openai_api_key: await openAiTranscriptionKeys.resolve(),
-        })
-        if (backend.client === null) {
-          // NOT silent. A voice note that produces no transcript because the
-          // box is unconfigured, or because both backends are set up and nobody
-          // has said which to use, is otherwise indistinguishable from a
-          // transcription that simply failed.
-          log.warn('voice_transcription_unconfigured', {
-            reason: backend.reason ?? 'unconfigured',
-            hash: i.hash,
-          })
-          return null
-        }
-        const r = await backend.client.transcribe({
-          bytes: i.bytes,
-          content_type: i.content_type,
-        })
-        if (!r.ok) {
-          log.warn('voice_transcription_failed', {
-            backend: backend.kind,
-            ...(backend.model_id !== undefined ? { model: backend.model_id } : {}),
-            code: r.code,
-            ...(r.status !== undefined ? { status: r.status } : {}),
-            hash: i.hash,
-          })
-          return null
-        }
-        const t = r.text.trim()
-        return t.length > 0 ? t : null
-      },
+      transcribeAudio: transcribeVoiceNote,
     })
 
     // The Settings-tab installer for the local backend. ONE machine-scoped
@@ -7187,13 +7193,41 @@ export function buildOpenGraphComposer(
     let telegramWebhookSurface: Awaited<
       ReturnType<typeof buildTelegramWebhookSurface>
     > = null
+    // The receiver is late-bound because the bridge needs the client the
+    // surface builds. A decoded update goes to the Telegram chat bridge
+    // (`open/wiring/telegram-chat.ts`): access list, pairing, media download,
+    // voice transcription, then a turn on the connected project's warm session
+    // with the reply posted back to the chat. With no Telegram secrets there is
+    // no surface, no route and no bridge, exactly as before.
+    let telegramChatBridge: TelegramChatBridge | null = null
     try {
       telegramWebhookSurface = await buildTelegramWebhookSurface({
         owner_handle,
         url_slug: project_slug,
         secrets: secretsStore,
-        receiver: channelRouter,
+        receiver: {
+          receive: async (event) => {
+            if (telegramChatBridge !== null) await telegramChatBridge.receive(event)
+          },
+        },
       })
+      if (telegramWebhookSurface !== null) {
+        const telegramLog = createLogger('telegram-chat')
+        telegramChatBridge = buildTelegramChatBridge({
+          project_slug,
+          owner_user_id: OWNER_USER_ID,
+          project_topic_id: (projectId) => appWsProjectTopicId(OWNER_USER_ID, projectId),
+          access: new TelegramAccess(telegramAccessPath(owner_home)),
+          client: telegramWebhookSurface.client,
+          inbox_dir: joinPath(owner_home, 'telegram', 'inbox'),
+          chat_turn: appWsChatTurn,
+          transcribe: transcribeVoiceNote,
+          log: {
+            info: (event, meta) => telegramLog.info(event, meta ?? {}),
+            warn: (event, meta) => telegramLog.warn(event, meta ?? {}),
+          },
+        })
+      }
     } catch (err) {
       log.error('telegram_webhook_build_failed', {
         error: err instanceof Error ? err.message : String(err),

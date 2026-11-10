@@ -35,14 +35,86 @@ interface TelegramChat {
   type: 'private' | 'group' | 'supergroup' | 'channel'
 }
 
+/** A Bot API file reference (`PhotoSize`, `Voice`, `Audio`, `Document`, `Video`, `VideoNote`). */
+interface TelegramFileRef {
+  file_id: string
+  file_unique_id?: string
+  file_size?: number
+  mime_type?: string
+  file_name?: string
+  width?: number
+  height?: number
+  duration?: number
+}
+
 interface TelegramMessage {
   message_id: number
   from?: TelegramFrom
-  chat: TelegramChat
+  chat: TelegramChat & { title?: string }
   date: number
   text?: string
+  /** Media messages carry their text here instead of `text`. */
+  caption?: string
+  /** Every size Telegram generated, smallest first. */
+  photo?: TelegramFileRef[]
+  voice?: TelegramFileRef
+  audio?: TelegramFileRef
+  document?: TelegramFileRef
+  video?: TelegramFileRef
+  video_note?: TelegramFileRef
+  /** Shared by the messages of one album; each item still arrives as its own update. */
+  media_group_id?: string
   /** Bot API 9.6 — set inside a forum supergroup. */
   message_thread_id?: number
+}
+
+/**
+ * One file a Telegram message carried, as `IncomingEvent.body.attachments`
+ * entries. Only the reference travels: the receiver that decides the sender is
+ * allowed downloads it with `getFile`, so an update from a stranger never costs a
+ * download.
+ */
+export interface TelegramAttachmentRef {
+  kind: 'photo' | 'voice' | 'audio' | 'document' | 'video' | 'video_note'
+  file_id: string
+  file_unique_id?: string
+  file_size?: number
+  mime_type?: string
+  file_name?: string
+}
+
+/** Narrow an `IncomingEvent.body.attachments` entry to a Telegram file reference. */
+export function isTelegramAttachmentRef(v: unknown): v is TelegramAttachmentRef {
+  if (v === null || typeof v !== 'object') return false
+  const o = v as Record<string, unknown>
+  return (
+    typeof o['file_id'] === 'string' &&
+    (o['kind'] === 'photo' || o['kind'] === 'voice' || o['kind'] === 'audio' ||
+      o['kind'] === 'document' || o['kind'] === 'video' || o['kind'] === 'video_note')
+  )
+}
+
+function attachmentRefs(msg: TelegramMessage): TelegramAttachmentRef[] {
+  const refs: TelegramAttachmentRef[] = []
+  const push = (kind: TelegramAttachmentRef['kind'], f: TelegramFileRef | undefined): void => {
+    if (f === undefined || typeof f.file_id !== 'string' || f.file_id.length === 0) return
+    refs.push({
+      kind,
+      file_id: f.file_id,
+      ...(f.file_unique_id !== undefined ? { file_unique_id: f.file_unique_id } : {}),
+      ...(f.file_size !== undefined ? { file_size: f.file_size } : {}),
+      ...(f.mime_type !== undefined ? { mime_type: f.mime_type } : {}),
+      ...(f.file_name !== undefined ? { file_name: f.file_name } : {}),
+    })
+  }
+  // The largest rendition is the last; the smaller ones are thumbnails.
+  if (Array.isArray(msg.photo) && msg.photo.length > 0) push('photo', msg.photo[msg.photo.length - 1])
+  push('voice', msg.voice)
+  push('audio', msg.audio)
+  push('document', msg.document)
+  push('video', msg.video)
+  push('video_note', msg.video_note)
+  return refs
 }
 
 export interface TelegramUpdate {
@@ -443,14 +515,20 @@ export function decodeUpdate(
   opts: WebhookHandlerOptions,
 ): IncomingEvent | null {
   const msg = update.message ?? update.edited_message
-  if (!msg || !msg.from || !msg.text) return null
+  if (!msg || !msg.from) return null
+  // A media message carries its words in `caption` and may carry none at all
+  // (a bare photo or voice note). Either a text or at least one file makes an
+  // event; a message with neither (a sticker, a service message) is ignored.
+  const attachments = attachmentRefs(msg)
+  const text = msg.text ?? msg.caption ?? ''
+  if (text.length === 0 && attachments.length === 0) return null
   if (msg.from.is_bot && msg.from.id === opts.bot_user_id) return null
-  if (opts.self_echo_filter !== undefined) {
+  if (opts.self_echo_filter !== undefined && text.length > 0) {
     const channel_topic_id = renderTopicId(msg)
     if (
       opts.self_echo_filter.isSelfEcho({
         channel_topic_id,
-        text_hash: hashText(msg.text),
+        text_hash: hashText(text),
       })
     ) {
       return null
@@ -467,9 +545,17 @@ export function decodeUpdate(
       channel_user_id: String(msg.from.id),
       display_name,
     },
-    body: { text: msg.text },
+    body: attachments.length > 0 ? { text, attachments } : { text },
     event_id: `${msg.chat.id}:${msg.message_id}`,
     received_at: Date.now(),
+    adapter_metadata: {
+      chat_id: String(msg.chat.id),
+      chat_type: msg.chat.type,
+      message_id: msg.message_id,
+      ...(typeof msg.chat.title === 'string' ? { chat_title: msg.chat.title } : {}),
+      ...(msg.media_group_id !== undefined ? { media_group_id: msg.media_group_id } : {}),
+      ...(update.edited_message !== undefined && update.message === undefined ? { edited: true } : {}),
+    },
   }
 }
 

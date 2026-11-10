@@ -107,6 +107,11 @@ export interface TelegramWebhookSurface {
    * deliberately. Callers that read only `.handler` are unaffected.
    */
   adapter: TelegramAdapter
+  /**
+   * The Bot API client behind the adapter, for the receiver that answers in the
+   * chat (pairing replies, agent replies, file uploads, media downloads).
+   */
+  client: TelegramClient
 }
 
 export async function buildTelegramWebhookSurface(
@@ -186,5 +191,6 @@ export async function buildTelegramWebhookSurface(
   return {
     handler: adapter.webhookHandler(),
     adapter,
+    client,
   }
 }
