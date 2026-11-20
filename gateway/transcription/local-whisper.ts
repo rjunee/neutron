@@ -32,8 +32,9 @@
  * 8-core box, eight threads was consistently SLOWER than four (memory-bandwidth
  * contention) — so the cap costs nothing and leaves half the machine responsive.
  *
- * CONTAINERS — `whisper-cli` decodes wav/mp3/ogg/flac itself (it links
- * miniaudio). It does NOT decode m4a/mp4, which is exactly what iOS Safari's
+ * CONTAINERS — `whisper-cli` decodes wav/mp3/flac and Ogg Vorbis itself (it
+ * links miniaudio). It does NOT decode Ogg Opus (every Telegram voice note), so
+ * Ogg is normalized through `ffmpeg` whenever it is present. Nor m4a/mp4, which is exactly what iOS Safari's
  * recorder produces, so those are normalized through `ffmpeg` when it is
  * present and refused with a precise `unsupported_format` when it is not.
  *
@@ -123,7 +124,11 @@ export function createLocalWhisperClient(opts: LocalWhisperOptions): Transcripti
           message: `local transcription does not handle ${input.content_type}`,
         }
       }
-      const needsTranscode = !NATIVE_MIMES.has(input.content_type)
+      // Ogg is native to miniaudio only as Vorbis. A Telegram or WhatsApp voice
+      // note is Ogg/Opus, which whisper-cli refuses ("failed to read audio
+      // data"), so Ogg goes through ffmpeg whenever it is installed.
+      const hasFfmpeg = opts.ffmpeg !== undefined && opts.ffmpeg !== null
+      const needsTranscode = !NATIVE_MIMES.has(input.content_type) || (input.content_type === 'audio/ogg' && hasFfmpeg)
       if (needsTranscode && (opts.ffmpeg === undefined || opts.ffmpeg === null)) {
         return {
           ok: false,
