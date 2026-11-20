@@ -189,6 +189,29 @@ describe('createLocalWhisperClient', () => {
     expect(calls.length).toBe(0)
   })
 
+  describe('ogg — Opus voice notes (Telegram) need ffmpeg; Vorbis is native', () => {
+    test('WITH ffmpeg an ogg is normalized to 16 kHz mono wav first', async () => {
+      const { client, calls } = makeClient(
+        (argv) => (argv[0] === '/usr/bin/ffmpeg' ? ok('') : ok('opus text')),
+        { ffmpeg: '/usr/bin/ffmpeg' },
+      )
+      const res = await client.transcribe({ bytes: FAKE_AUDIO, content_type: 'audio/ogg' })
+      expect(res).toEqual({ ok: true, text: 'opus text' })
+      expect(calls.length).toBe(2)
+      expect(calls[0]![0]).toBe('/usr/bin/ffmpeg')
+      const w = calls[1]!
+      expect((w[w.indexOf('-f') + 1] ?? '').endsWith('.wav')).toBe(true)
+    })
+
+    test('WITHOUT ffmpeg an ogg still goes to whisper directly (Vorbis decodes natively)', async () => {
+      const { client, calls } = makeClient(() => ok('vorbis text'), { ffmpeg: null })
+      const res = await client.transcribe({ bytes: FAKE_AUDIO, content_type: 'audio/ogg' })
+      expect(res).toEqual({ ok: true, text: 'vorbis text' })
+      expect(calls.length).toBe(1)
+      expect((calls[0]![calls[0]!.indexOf('-f') + 1] ?? '').endsWith('.ogg')).toBe(true)
+    })
+  })
+
   describe('m4a — the container whisper.cpp cannot decode itself', () => {
     test('WITHOUT ffmpeg it is refused with actionable guidance', async () => {
       const { client, calls } = makeClient(() => ok('x'), { ffmpeg: null })
